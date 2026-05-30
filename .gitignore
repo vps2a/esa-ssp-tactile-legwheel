@@ -1,0 +1,27 @@
+# ROS 2 generated folders
+build/
+install/
+log/
+
+# Experiment data
+data/
+*.mcap
+*.db3
+*.bag
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+
+# VS Code local settings
+.vscode/settings.json
+
+# OS/editor junk
+.DS_Store
+*~
