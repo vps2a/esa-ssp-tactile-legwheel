@@ -29,6 +29,7 @@ setup(
         'console_scripts': [
             'fake_rgbd_publisher_node = legwheel_rgbd.fake_rgbd_publisher_node:main',
             'depth_visualizer_node = legwheel_rgbd.depth_visualizer_node:main',
+            'sensorstream_bridge_node = legwheel_rgbd.sensorstream_bridge_node:main',
         ],
     },
 )
