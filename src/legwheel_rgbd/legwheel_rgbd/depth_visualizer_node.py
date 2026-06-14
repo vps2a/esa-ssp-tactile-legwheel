@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import struct
+import numpy as np
 
 import rclpy
 from rclpy.node import Node
@@ -24,36 +24,71 @@ class DepthVisualizerNode(Node):
 
         self.has_warned_about_encoding = False
 
+        # Queue size 1 is important for low latency.
+        # If the node is briefly slower than the incoming stream,
+        # old frames are dropped instead of displayed late.
         self.sub = self.create_subscription(
             Image,
             input_depth_topic,
             self.depth_callback,
-            10,
+            1,
         )
 
         self.pub = self.create_publisher(
             Image,
             output_depth_viz_topic,
-            10,
+            1,
         )
 
         self.get_logger().info(
             f"Depth visualizer: {input_depth_topic} -> {output_depth_viz_topic}"
         )
-
         self.get_logger().info(
             f"Depth range: {self.min_depth_m:.2f} m to {self.max_depth_m:.2f} m"
         )
 
     def depth_callback(self, msg):
-        if msg.encoding not in ["32FC1", "16UC1"]:
+        if self.max_depth_m <= self.min_depth_m:
+            self.get_logger().error("max_depth_m must be greater than min_depth_m")
+            return
+
+        if msg.encoding == "16UC1":
+            depth_raw = np.frombuffer(msg.data, dtype=np.uint16)
+            depth_m = depth_raw.astype(np.float32) / 1000.0
+
+        elif msg.encoding == "32FC1":
+            depth_m = np.frombuffer(msg.data, dtype=np.float32)
+
+        else:
             if not self.has_warned_about_encoding:
                 self.get_logger().warning(
                     f"Unsupported depth encoding: {msg.encoding}. "
-                    "Expected 32FC1 or 16UC1."
+                    "Expected 16UC1 or 32FC1."
                 )
                 self.has_warned_about_encoding = True
             return
+
+        expected_pixels = msg.width * msg.height
+        if depth_m.size < expected_pixels:
+            self.get_logger().warning(
+                f"Depth image has too few pixels: got {depth_m.size}, "
+                f"expected {expected_pixels}"
+            )
+            return
+
+        depth_m = depth_m[:expected_pixels].reshape((msg.height, msg.width))
+
+        normalized = (depth_m - self.min_depth_m) / (
+            self.max_depth_m - self.min_depth_m
+        )
+        normalized = np.clip(normalized, 0.0, 1.0)
+
+        # Invalid zero-depth pixels become black.
+        valid = depth_m > 0.0
+
+        # Near = bright, far = dark.
+        mono = (255.0 * (1.0 - normalized)).astype(np.uint8)
+        mono[~valid] = 0
 
         viz = Image()
         viz.header = msg.header
@@ -62,76 +97,9 @@ class DepthVisualizerNode(Node):
         viz.encoding = "mono8"
         viz.is_bigendian = False
         viz.step = msg.width
+        viz.data = mono.tobytes()
 
-        output = bytearray()
-        depth_range = self.max_depth_m - self.min_depth_m
-
-        if depth_range <= 0.0:
-            self.get_logger().error("max_depth_m must be greater than min_depth_m")
-            return
-
-        if msg.encoding == "32FC1":
-            output = self.convert_32fc1_to_mono8(msg, depth_range)
-
-        elif msg.encoding == "16UC1":
-            output = self.convert_16uc1_to_mono8(msg, depth_range)
-
-        viz.data = bytes(output)
         self.pub.publish(viz)
-
-    def convert_32fc1_to_mono8(self, msg, depth_range):
-        output = bytearray()
-
-        expected_bytes = msg.width * msg.height * 4
-        if len(msg.data) < expected_bytes:
-            self.get_logger().warning(
-                f"Depth image data too short for 32FC1: "
-                f"got {len(msg.data)} bytes, expected {expected_bytes}"
-            )
-            return output
-
-        for i in range(0, expected_bytes, 4):
-            depth_m = struct.unpack_from("f", msg.data, i)[0]
-            output.append(self.depth_m_to_pixel(depth_m, invalid_if_zero=True))
-
-        return output
-
-    def convert_16uc1_to_mono8(self, msg, depth_range):
-        output = bytearray()
-
-        expected_bytes = msg.width * msg.height * 2
-        if len(msg.data) < expected_bytes:
-            self.get_logger().warning(
-                f"Depth image data too short for 16UC1: "
-                f"got {len(msg.data)} bytes, expected {expected_bytes}"
-            )
-            return output
-
-        for i in range(0, expected_bytes, 2):
-            raw_depth_mm = struct.unpack_from("H", msg.data, i)[0]
-
-            # Convention: 16UC1 depth is usually in millimetres.
-            # 1000 means approximately 1.0 metre.
-            depth_m = raw_depth_mm / 1000.0
-
-            output.append(self.depth_m_to_pixel(depth_m, invalid_if_zero=True))
-
-        return output
-
-    def depth_m_to_pixel(self, depth_m, invalid_if_zero=True):
-        if invalid_if_zero and depth_m <= 0.0:
-            return 0
-
-        normalized = (depth_m - self.min_depth_m) / (
-            self.max_depth_m - self.min_depth_m
-        )
-
-        normalized = max(0.0, min(1.0, normalized))
-
-        # Near objects are bright, far objects are dark.
-        pixel = int(255 * (1.0 - normalized))
-
-        return pixel
 
 
 def main(args=None):
