@@ -1,0 +1,48 @@
+cmake_minimum_required(VERSION 3.15)
+project(legwheel_can)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(Threads REQUIRED)
+
+# We only want to use CANdle-SDK as a C++ library inside this ROS package.
+# Do not build/install candletool, examples, Python bindings, tests, or udev rules.
+set(CANDLESDK_BUILD_PYTHON OFF CACHE BOOL "" FORCE)
+set(CANDLESDK_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(CANDLESDK_BUILD_CANDLETOOL OFF CACHE BOOL "" FORCE)
+set(MAKE_TESTS OFF CACHE BOOL "" FORCE)
+set(CANDLE_BUILD_STATIC ON CACHE BOOL "" FORCE)
+
+add_subdirectory(
+  ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/CANdle-SDK
+  ${CMAKE_CURRENT_BINARY_DIR}/CANdle-SDK
+)
+
+add_executable(md80_impedance_node
+  src/md80_impedance_node.cpp
+)
+
+ament_target_dependencies(md80_impedance_node
+  rclcpp
+  sensor_msgs
+  std_msgs
+)
+
+target_link_libraries(md80_impedance_node
+  candle
+  Threads::Threads
+)
+
+target_compile_features(md80_impedance_node PUBLIC cxx_std_20)
+
+install(TARGETS md80_impedance_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+ament_package()
