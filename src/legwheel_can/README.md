@@ -6,6 +6,8 @@ safety-first split:
 
 - `md80_zero_node` is for passive encoder observation and zeroing.
 - `md80_impedance_node` is for read-only monitoring or gated impedance control.
+- `legwheel_controller_node` is a small terminal command publisher for impedance
+  targets, gains, and motor enable/stop status.
 
 The default logical joints are:
 
@@ -23,11 +25,14 @@ expected motors. Missing motors are logged and skipped.
 - `config/motor_limits.yaml`: software position, velocity, and torque limits.
 - `src/md80_zero_node.cpp`: passive calibration and zeroing node.
 - `src/md80_impedance_node.cpp`: impedance/read-only runtime node.
+- `src/legwheel_controller_node.cpp`: terminal command node for publishing
+  impedance commands.
 - `launch/md80_zero.launch.py`: launches the zeroing node with motor IDs.
 - `launch/md80_impedance.launch.py`: launches the impedance node with motor IDs
-  and software limits.
-- `CMakeLists.txt` and `package.xml`: build both nodes, link CANdle-SDK, install
-  launch/config files, and declare ROS dependencies.
+  and software limits, plus the controller node.
+- `CMakeLists.txt` and `package.xml`: build all package executables, link
+  CANdle-SDK where needed, install launch/config files, and declare ROS
+  dependencies.
 
 ## Safety Model
 
@@ -143,6 +148,66 @@ Supported values:
 - `"reject"`: default. Unsafe position targets are rejected and not sent.
 - `"clamp"`: debugging mode. Unsafe position targets are clamped into range.
 
+### Controller Node
+
+Executable:
+
+```bash
+legwheel_controller_node
+```
+
+The controller node reads simple text commands from the terminal and publishes
+the full ROS messages expected by the impedance node. It does not talk to
+CANdle-SDK or hardware directly.
+
+Publishes:
+
+| Topic | Type | Purpose |
+| --- | --- | --- |
+| `/legwheel/motor_status` | `std_msgs/msg/Bool` | `true` allows the impedance node to enable motors, `false` disables them |
+| `/legwheel/spring_zero_position` | `std_msgs/msg/Float64MultiArray` | Current `[hip_zero_rad, knee_zero_rad]` command |
+| `/legwheel/spring_constant` | `std_msgs/msg/Float64MultiArray` | Current `[hip_kp, knee_kp]` command |
+| `/legwheel/damping_constant` | `std_msgs/msg/Float64MultiArray` | Current `[hip_kd, knee_kd]` command |
+
+Terminal commands:
+
+| Command | Effect |
+| --- | --- |
+| `e` or `enable` | Publish `/legwheel/motor_status=true` |
+| `s` or `stop` | Publish `/legwheel/motor_status=false` |
+| `hip set_zeropos 0.0` | Set hip spring zero position to `0.0` rad |
+| `knee set_zeropos 0.0` | Set knee spring zero position to `0.0` rad |
+| `hip set_spring 4.0` | Set hip spring constant to `4.0` Nm/rad |
+| `knee set_spring 4.0` | Set knee spring constant to `4.0` Nm/rad |
+| `hip set_damp 5.0` | Set hip damping constant to `5.0` N/(rad/s) |
+| `knee set_damp 5.0` | Set knee damping constant to `5.0` N/(rad/s) |
+| `status` | Print the controller's current command arrays |
+| `help` | Print a short command summary |
+
+On startup, the controller publishes initial zero/gain arrays by default:
+
+```yaml
+spring_zero_position: [0.0, 0.0]
+spring_constant: [1.0, 1.0]
+damping_constant: [0.05, 0.05]
+```
+
+It does not enable motors on startup unless launched with
+`controller_auto_enable:=true`.
+
+### Impedance Launch Arguments
+
+`md80_impedance.launch.py` starts both the impedance node and the controller
+node.
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `enable_control` | `false` | Arms the impedance node. Motors still wait for `/legwheel/motor_status=true` |
+| `controller_auto_enable` | `false` | Makes the controller publish `/legwheel/motor_status=true` on startup |
+
+For normal testing, keep `controller_auto_enable` false and type `e` only after
+the mechanism is ready.
+
 ## Parameters
 
 ### Motor IDs
@@ -247,33 +312,35 @@ This publishes encoder state but does not enable motors.
 
 ### 3. Control-Enabled Impedance Runtime
 
-Launch with control armed:
+Launch with control armed. This also starts the terminal controller:
 
 ```bash
 ros2 launch legwheel_can md80_impedance.launch.py enable_control:=true
 ```
 
-Then a separate controller or teleop node must explicitly open the motor gate:
+The controller publishes initial zero/gain arrays automatically. In the launch
+terminal, type commands such as:
 
 ```bash
-ros2 topic pub --once /legwheel/motor_status std_msgs/msg/Bool "{data: true}"
+hip set_zeropos 0.0
+knee set_spring 4.0
+hip set_damp 5.0
 ```
 
-Set equilibrium and gains:
+Explicitly enable motors only when ready:
 
 ```bash
-ros2 topic pub --once /legwheel/spring_zero_position std_msgs/msg/Float64MultiArray "{data: [0.0, 0.0]}"
-ros2 topic pub --once /legwheel/spring_constant std_msgs/msg/Float64MultiArray "{data: [1.0, 1.0]}"
-ros2 topic pub --once /legwheel/damping_constant std_msgs/msg/Float64MultiArray "{data: [0.05, 0.05]}"
+e
 ```
 
 Panic stop:
 
 ```bash
-ros2 topic pub --once /legwheel/motor_status std_msgs/msg/Bool "{data: false}"
+s
 ```
 
-Publishing `false` disables all connected motors immediately.
+Typing `s` publishes `/legwheel/motor_status=false`, which disables all connected
+motors immediately.
 
 ## Notes
 

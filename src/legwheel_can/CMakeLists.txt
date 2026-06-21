@@ -33,6 +33,10 @@ add_executable(md80_zero_node
   src/md80_zero_node.cpp
 )
 
+add_executable(legwheel_controller_node
+  src/legwheel_controller_node.cpp
+)
+
 ament_target_dependencies(md80_impedance_node
   rclcpp
   sensor_msgs
@@ -47,6 +51,11 @@ ament_target_dependencies(md80_zero_node
   std_srvs
 )
 
+ament_target_dependencies(legwheel_controller_node
+  rclcpp
+  std_msgs
+)
+
 target_link_libraries(md80_impedance_node
   candle
   Threads::Threads
@@ -57,12 +66,18 @@ target_link_libraries(md80_zero_node
   Threads::Threads
 )
 
+target_link_libraries(legwheel_controller_node
+  Threads::Threads
+)
+
 target_compile_features(md80_impedance_node PUBLIC cxx_std_20)
 target_compile_features(md80_zero_node PUBLIC cxx_std_20)
+target_compile_features(legwheel_controller_node PUBLIC cxx_std_20)
 
 install(TARGETS
   md80_impedance_node
   md80_zero_node
+  legwheel_controller_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
