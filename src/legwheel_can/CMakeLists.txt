@@ -9,6 +9,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(Threads REQUIRED)
 
 # We only want to use CANdle-SDK as a C++ library inside this ROS package.
@@ -28,10 +29,22 @@ add_executable(md80_impedance_node
   src/md80_impedance_node.cpp
 )
 
+add_executable(md80_zero_node
+  src/md80_zero_node.cpp
+)
+
 ament_target_dependencies(md80_impedance_node
   rclcpp
   sensor_msgs
   std_msgs
+  std_srvs
+)
+
+ament_target_dependencies(md80_zero_node
+  rclcpp
+  sensor_msgs
+  std_msgs
+  std_srvs
 )
 
 target_link_libraries(md80_impedance_node
@@ -39,10 +52,22 @@ target_link_libraries(md80_impedance_node
   Threads::Threads
 )
 
-target_compile_features(md80_impedance_node PUBLIC cxx_std_20)
+target_link_libraries(md80_zero_node
+  candle
+  Threads::Threads
+)
 
-install(TARGETS md80_impedance_node
+target_compile_features(md80_impedance_node PUBLIC cxx_std_20)
+target_compile_features(md80_zero_node PUBLIC cxx_std_20)
+
+install(TARGETS
+  md80_impedance_node
+  md80_zero_node
   DESTINATION lib/${PROJECT_NAME}
+)
+
+install(DIRECTORY launch config
+  DESTINATION share/${PROJECT_NAME}
 )
 
 ament_package()

@@ -1,19 +1,54 @@
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <iostream>
 #include <memory>
+#include <mutex>
+#include <optional>
+#include <sstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 
-// CANdle-SDK headers
-#include "candle.hpp"
 #include "MD.hpp"
+#include "candle.hpp"
 
-using namespace std::chrono_literals;
+namespace
+{
+constexpr std::size_t kHipIndex = 0;
+constexpr std::size_t kKneeIndex = 1;
+
+std::string md_error_to_string(const mab::MD::Error_t error)
+{
+  switch (error) {
+    case mab::MD::Error_t::OK:
+      return "OK";
+    case mab::MD::Error_t::REQUEST_INVALID:
+      return "REQUEST_INVALID";
+    case mab::MD::Error_t::TRANSFER_FAILED:
+      return "TRANSFER_FAILED";
+    case mab::MD::Error_t::NOT_CONNECTED:
+      return "NOT_CONNECTED";
+    case mab::MD::Error_t::LEGACY_FW:
+      return "LEGACY_FW";
+    case mab::MD::Error_t::UNKNOWN_ERROR:
+    default:
+      return "UNKNOWN_ERROR";
+  }
+}
+
+bool is_finite(const double value)
+{
+  return std::isfinite(value);
+}
+}  // namespace
 
 class Md80ImpedanceNode : public rclcpp::Node
 {
@@ -21,48 +56,69 @@ public:
   Md80ImpedanceNode()
   : Node("md80_impedance_node")
   {
-    declare_parameter<std::vector<int64_t>>("motor_ids", std::vector<int64_t>{});
-    declare_parameter<std::vector<std::string>>("joint_names", std::vector<std::string>{"hip_joint", "knee_joint"});
-
-    declare_parameter<std::vector<double>>("position_min_rad", std::vector<double>{-0.5, -0.5});
-    declare_parameter<std::vector<double>>("position_max_rad", std::vector<double>{ 0.5,  0.5});
-    declare_parameter<std::vector<double>>("velocity_max_rad_s", std::vector<double>{1.0, 1.0});
-
-    declare_parameter<double>("kp", 1.0);
-    declare_parameter<double>("kd", 0.05);
-    declare_parameter<double>("torque_ff", 0.0);
-
-    declare_parameter<bool>("zero_on_startup", false);
-    declare_parameter<bool>("enable_control", false);
-    declare_parameter<double>("publish_rate_hz", 100.0);
-
-    motor_ids_ = get_parameter("motor_ids").as_integer_array();
-    joint_names_ = get_parameter("joint_names").as_string_array();
-    position_min_ = get_parameter("position_min_rad").as_double_array();
-    position_max_ = get_parameter("position_max_rad").as_double_array();
-    velocity_max_ = get_parameter("velocity_max_rad_s").as_double_array();
-
-    kp_ = get_parameter("kp").as_double();
-    kd_ = get_parameter("kd").as_double();
-    torque_ff_ = get_parameter("torque_ff").as_double();
-    zero_on_startup_ = get_parameter("zero_on_startup").as_bool();
-    enable_control_ = get_parameter("enable_control").as_bool();
-
-    validate_parameters();
+    declare_parameters();
+    load_parameters();
+    validate_limits();
 
     joint_state_pub_ = create_publisher<sensor_msgs::msg::JointState>(
-      "/legwheel/joint_states", 10);
+      "/legwheel/joint_states", rclcpp::SensorDataQoS());
 
-    command_sub_ = create_subscription<std_msgs::msg::Float64MultiArray>(
-      "/legwheel/target_positions",
+    status_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    command_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+
+    rclcpp::SubscriptionOptions status_options;
+    status_options.callback_group = status_callback_group_;
+    motor_status_sub_ = create_subscription<std_msgs::msg::Bool>(
+      "/legwheel/motor_status",
+      rclcpp::QoS(10).reliable(),
+      std::bind(&Md80ImpedanceNode::handle_motor_status, this, std::placeholders::_1),
+      status_options);
+
+    rclcpp::SubscriptionOptions command_options;
+    command_options.callback_group = command_callback_group_;
+    spring_zero_sub_ = create_subscription<std_msgs::msg::Float64MultiArray>(
+      "/legwheel/spring_zero_position",
       10,
-      std::bind(&Md80ImpedanceNode::target_callback, this, std::placeholders::_1));
+      std::bind(&Md80ImpedanceNode::handle_spring_zero_position, this, std::placeholders::_1),
+      command_options);
+    spring_constant_sub_ = create_subscription<std_msgs::msg::Float64MultiArray>(
+      "/legwheel/spring_constant",
+      10,
+      std::bind(&Md80ImpedanceNode::handle_spring_constant, this, std::placeholders::_1),
+      command_options);
+    damping_constant_sub_ = create_subscription<std_msgs::msg::Float64MultiArray>(
+      "/legwheel/damping_constant",
+      10,
+      std::bind(&Md80ImpedanceNode::handle_damping_constant, this, std::placeholders::_1),
+      command_options);
 
-    connect_to_motors();
+    connect_to_candle();
+    discover_motors();
+    connect_expected_motors();
 
-    const double publish_rate_hz = get_parameter("publish_rate_hz").as_double();
-    const auto period = std::chrono::duration<double>(1.0 / publish_rate_hz);
+    if (!any_motor_connected()) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "No expected MD80 controllers are connected. Node will remain alive but cannot publish data.");
+    }
 
+    if (enable_control_requested_ && !limits_valid_) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "enable_control was requested, but software limits are missing or invalid. "
+        "Control will stay disabled.");
+    } else if (!enable_control_requested_) {
+      RCLCPP_WARN(get_logger(), "enable_control is false. Running in read-only encoder mode.");
+    }
+
+    if (enable_control_requested_ && limits_valid_) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Control is armed by parameter, but motors will remain disabled until "
+        "/legwheel/motor_status publishes true.");
+    }
+
+    const auto period = std::chrono::duration<double>(1.0 / publish_rate_hz_);
     timer_ = create_wall_timer(
       std::chrono::duration_cast<std::chrono::nanoseconds>(period),
       std::bind(&Md80ImpedanceNode::update, this));
@@ -70,49 +126,180 @@ public:
 
   ~Md80ImpedanceNode() override
   {
-    RCLCPP_WARN(get_logger(), "Shutting down MD80 node: disabling motors.");
-
-    for (auto & md : mds_) {
-      try {
-        md.disable();
-      } catch (...) {
-        // Never throw from destructor.
-      }
-    }
-
-    if (candle_ != nullptr) {
-      try {
-        mab::detachCandle(candle_);
-      } catch (...) {
-      }
-    }
+    RCLCPP_WARN(get_logger(), "Shutting down impedance node: disabling all connected motors.");
+    disable_all_motors();
+    detach_candle();
   }
 
 private:
-  void validate_parameters()
+  struct JointLimits
   {
-    if (joint_names_.size() != 2) {
-      throw std::runtime_error("joint_names must contain exactly 2 names.");
+    double position_min_rad{0.0};
+    double position_max_rad{0.0};
+    double velocity_max_rad_s{0.0};
+    double torque_max_nm{0.0};
+  };
+
+  struct Joint
+  {
+    std::string label;
+    std::string joint_name;
+    int id{0};
+    JointLimits limits;
+    std::unique_ptr<mab::MD> md;
+    bool connected{false};
+    bool enabled{false};
+    bool impedance_configured{false};
+    double spring_zero_rad{0.0};
+    double kp{1.0};
+    double kd{0.05};
+    double last_position_rad{0.0};
+    double last_velocity_rad_s{0.0};
+    double last_effort_nm{0.0};
+  };
+
+  void declare_parameters()
+  {
+    declare_parameter<int>("hip_motor_id", 461);
+    declare_parameter<int>("knee_motor_id", 923);
+    declare_parameter<bool>("limits_provided", false);
+
+    declare_parameter<double>("hip_position_min_rad", -0.5);
+    declare_parameter<double>("hip_position_max_rad", 0.5);
+    declare_parameter<double>("hip_velocity_max_rad_s", 1.0);
+    declare_parameter<double>("hip_torque_max_nm", 2.0);
+    declare_parameter<double>("knee_position_min_rad", -0.5);
+    declare_parameter<double>("knee_position_max_rad", 0.5);
+    declare_parameter<double>("knee_velocity_max_rad_s", 1.0);
+    declare_parameter<double>("knee_torque_max_nm", 2.0);
+
+    declare_parameter<double>("initial_spring_constant", 1.0);
+    declare_parameter<double>("initial_damping_constant", 0.05);
+    declare_parameter<double>("max_spring_constant", 50.0);
+    declare_parameter<double>("max_damping_constant", 5.0);
+    declare_parameter<std::string>("command_limit_policy", "reject");
+
+    declare_parameter<bool>("enable_control", false);
+    declare_parameter<double>("publish_rate_hz", 100.0);
+  }
+
+  void load_parameters()
+  {
+    joints_[kHipIndex].label = "hip";
+    joints_[kHipIndex].joint_name = "hip_joint";
+    joints_[kHipIndex].id = get_parameter("hip_motor_id").as_int();
+    joints_[kHipIndex].limits.position_min_rad =
+      get_parameter("hip_position_min_rad").as_double();
+    joints_[kHipIndex].limits.position_max_rad =
+      get_parameter("hip_position_max_rad").as_double();
+    joints_[kHipIndex].limits.velocity_max_rad_s =
+      get_parameter("hip_velocity_max_rad_s").as_double();
+    joints_[kHipIndex].limits.torque_max_nm = get_parameter("hip_torque_max_nm").as_double();
+
+    joints_[kKneeIndex].label = "knee";
+    joints_[kKneeIndex].joint_name = "knee_joint";
+    joints_[kKneeIndex].id = get_parameter("knee_motor_id").as_int();
+    joints_[kKneeIndex].limits.position_min_rad =
+      get_parameter("knee_position_min_rad").as_double();
+    joints_[kKneeIndex].limits.position_max_rad =
+      get_parameter("knee_position_max_rad").as_double();
+    joints_[kKneeIndex].limits.velocity_max_rad_s =
+      get_parameter("knee_velocity_max_rad_s").as_double();
+    joints_[kKneeIndex].limits.torque_max_nm = get_parameter("knee_torque_max_nm").as_double();
+
+    limits_provided_ = get_parameter("limits_provided").as_bool();
+    enable_control_requested_ = get_parameter("enable_control").as_bool();
+    publish_rate_hz_ = get_parameter("publish_rate_hz").as_double();
+    max_spring_constant_ = get_parameter("max_spring_constant").as_double();
+    max_damping_constant_ = get_parameter("max_damping_constant").as_double();
+    command_limit_policy_ = get_parameter("command_limit_policy").as_string();
+
+    const double initial_kp = get_parameter("initial_spring_constant").as_double();
+    const double initial_kd = get_parameter("initial_damping_constant").as_double();
+    for (auto & joint : joints_) {
+      joint.kp = initial_kp;
+      joint.kd = initial_kd;
     }
 
-    if (position_min_.size() != 2 || position_max_.size() != 2 || velocity_max_.size() != 2) {
-      throw std::runtime_error("position_min_rad, position_max_rad, and velocity_max_rad_s must each contain 2 values.");
+    if (publish_rate_hz_ <= 0.0 || !is_finite(publish_rate_hz_)) {
+      throw std::runtime_error("publish_rate_hz must be finite and positive.");
+    }
+    if (command_limit_policy_ != "reject" && command_limit_policy_ != "clamp") {
+      throw std::runtime_error("command_limit_policy must be either 'reject' or 'clamp'.");
     }
 
-    for (size_t i = 0; i < 2; ++i) {
-      if (position_min_[i] >= position_max_[i]) {
-        throw std::runtime_error("Each position_min_rad must be smaller than position_max_rad.");
+    RCLCPP_INFO(
+      get_logger(),
+      "Expected MD80 IDs: hip=%d, knee=%d",
+      joints_[kHipIndex].id,
+      joints_[kKneeIndex].id);
+  }
+
+  void validate_limits()
+  {
+    limits_valid_ = limits_provided_;
+
+    if (!limits_provided_) {
+      RCLCPP_WARN(
+        get_logger(),
+        "limits_provided is false. Encoder publishing is allowed, but control cannot be enabled.");
+      return;
+    }
+
+    if (max_spring_constant_ <= 0.0 || !is_finite(max_spring_constant_)) {
+      RCLCPP_ERROR(get_logger(), "max_spring_constant must be finite and positive.");
+      limits_valid_ = false;
+    }
+    if (max_damping_constant_ <= 0.0 || !is_finite(max_damping_constant_)) {
+      RCLCPP_ERROR(get_logger(), "max_damping_constant must be finite and positive.");
+      limits_valid_ = false;
+    }
+
+    for (const auto & joint : joints_) {
+      const auto & limits = joint.limits;
+      if (!is_finite(limits.position_min_rad) || !is_finite(limits.position_max_rad) ||
+        limits.position_min_rad >= limits.position_max_rad)
+      {
+        RCLCPP_ERROR(
+          get_logger(),
+          "%s position limits are invalid: min=%.3f max=%.3f",
+          joint.label.c_str(),
+          limits.position_min_rad,
+          limits.position_max_rad);
+        limits_valid_ = false;
       }
-      if (velocity_max_[i] <= 0.0) {
-        throw std::runtime_error("Each velocity_max_rad_s must be positive.");
+      if (!is_finite(limits.velocity_max_rad_s) || limits.velocity_max_rad_s <= 0.0) {
+        RCLCPP_ERROR(
+          get_logger(),
+          "%s velocity limit must be finite and positive.",
+          joint.label.c_str());
+        limits_valid_ = false;
       }
+      if (!is_finite(limits.torque_max_nm) || limits.torque_max_nm <= 0.0) {
+        RCLCPP_ERROR(
+          get_logger(),
+          "%s torque limit must be finite and positive.",
+          joint.label.c_str());
+        limits_valid_ = false;
+      }
+      if (joint.kp < 0.0 || joint.kp > max_spring_constant_ || !is_finite(joint.kp)) {
+        RCLCPP_ERROR(get_logger(), "initial_spring_constant is invalid.");
+        limits_valid_ = false;
+      }
+      if (joint.kd < 0.0 || joint.kd > max_damping_constant_ || !is_finite(joint.kd)) {
+        RCLCPP_ERROR(get_logger(), "initial_damping_constant is invalid.");
+        limits_valid_ = false;
+      }
+    }
+
+    if (limits_valid_) {
+      RCLCPP_INFO(get_logger(), "Software motor limits are present and valid.");
     }
   }
 
-  void connect_to_motors()
+  void connect_to_candle()
   {
-    RCLCPP_INFO(get_logger(), "Connecting to CANdle...");
-
+    RCLCPP_INFO(get_logger(), "Connecting to CANdle USB adapter...");
     candle_ = mab::attachCandle(
       mab::CANdleDatarate_E::CAN_DATARATE_1M,
       mab::candleTypes::busTypes_t::USB);
@@ -120,189 +307,476 @@ private:
     if (candle_ == nullptr) {
       throw std::runtime_error("Failed to attach CANdle.");
     }
-
-    RCLCPP_INFO(get_logger(), "Discovering MD80 controllers...");
-
-    auto discovered_ids = mab::MD::discoverMDs(candle_);
-
-    if (discovered_ids.empty()) {
-      throw std::runtime_error("No MD controllers discovered.");
-    }
-
-    RCLCPP_INFO(get_logger(), "Discovered %zu MD controller(s).", discovered_ids.size());
-
-    std::vector<int> ids_to_use;
-
-    if (motor_ids_.empty()) {
-      if (discovered_ids.size() != 2) {
-        throw std::runtime_error(
-          "motor_ids parameter is empty, so expected exactly 2 discovered MDs. "
-          "Set motor_ids explicitly if more/less are visible.");
-      }
-
-      for (auto id : discovered_ids) {
-        ids_to_use.push_back(static_cast<int>(id));
-      }
-    } else {
-      if (motor_ids_.size() != 2) {
-        throw std::runtime_error("motor_ids must contain exactly 2 IDs.");
-      }
-
-      for (auto id : motor_ids_) {
-        ids_to_use.push_back(static_cast<int>(id));
-      }
-    }
-
-    for (const auto id : ids_to_use) {
-      RCLCPP_INFO(get_logger(), "Initializing MD controller ID %d", id);
-
-      mab::MD md(id, candle_);
-
-      if (md.init() != mab::MD::Error_t::OK) {
-        throw std::runtime_error("Failed to initialize one of the MD controllers.");
-      }
-
-      if (zero_on_startup_) {
-        RCLCPP_WARN(
-          get_logger(),
-          "Zeroing MD ID %d. Make sure the joint is physically at its chosen zero pose.",
-          id);
-        md.zero();
-      }
-
-      md.setMotionMode(mab::MdMode_E::IMPEDANCE);
-
-      if (enable_control_) {
-        RCLCPP_WARN(get_logger(), "Enabling MD ID %d in impedance mode.", id);
-        md.enable();
-      } else {
-        RCLCPP_WARN(
-          get_logger(),
-          "Control disabled for MD ID %d. Publishing encoder data only.",
-          id);
-      }
-
-      mds_.push_back(md);
-    }
-
-    target_positions_.resize(2, 0.0);
-    last_positions_.resize(2, 0.0);
-    velocities_.resize(2, 0.0);
-    first_read_ = true;
   }
 
-  void target_callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
+  void discover_motors()
   {
-    if (msg->data.size() != 2) {
-      RCLCPP_ERROR(get_logger(), "Expected exactly 2 target positions.");
+    RCLCPP_INFO(get_logger(), "Discovering MD80 controllers...");
+    discovered_ids_.clear();
+    for (const auto id : mab::MD::discoverMDs(candle_)) {
+      discovered_ids_.insert(static_cast<int>(id));
+    }
+
+    if (discovered_ids_.empty()) {
+      RCLCPP_WARN(get_logger(), "No MD80 controllers were discovered.");
       return;
     }
 
-    for (size_t i = 0; i < 2; ++i) {
-      const double raw_target = msg->data[i];
-      const double clamped_target = std::clamp(raw_target, position_min_[i], position_max_[i]);
+    RCLCPP_INFO(get_logger(), "Discovered MD80 IDs: %s", discovered_ids_string().c_str());
+  }
 
-      if (std::abs(raw_target - clamped_target) > 1e-9) {
-        RCLCPP_WARN(
-          get_logger(),
-          "Target for %s was outside limits. Requested %.3f rad, clamped to %.3f rad.",
-          joint_names_[i].c_str(),
-          raw_target,
-          clamped_target);
-      }
-
-      target_positions_[i] = clamped_target;
+  void connect_expected_motors()
+  {
+    for (auto & joint : joints_) {
+      connect_motor_if_available(joint);
     }
+  }
+
+  void connect_motor_if_available(Joint & joint)
+  {
+    if (discovered_ids_.find(joint.id) == discovered_ids_.end()) {
+      RCLCPP_WARN(
+        get_logger(),
+        "%s motor ID %d was expected but not discovered. Continuing without this joint.",
+        joint.label.c_str(),
+        joint.id);
+      return;
+    }
+
+    auto md = std::make_unique<mab::MD>(joint.id, candle_);
+    const auto init_result = md->init();
+    if (init_result != mab::MD::Error_t::OK) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Failed to initialize %s motor ID %d: %s",
+        joint.label.c_str(),
+        joint.id,
+        md_error_to_string(init_result).c_str());
+      return;
+    }
+
+    // Keep the drive unpowered on startup. Enabling is gated by parameter, valid limits,
+    // and an explicit true message on /legwheel/motor_status.
+    const auto disable_result = md->disable();
+    if (disable_result != mab::MD::Error_t::OK) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Initial disable for %s motor ID %d returned %s.",
+        joint.label.c_str(),
+        joint.id,
+        md_error_to_string(disable_result).c_str());
+    }
+
+    joint.md = std::move(md);
+    joint.connected = true;
+    joint.enabled = false;
+    joint.impedance_configured = false;
+
+    RCLCPP_INFO(
+      get_logger(),
+      "Connected %s_joint to MD80 ID %d.",
+      joint.label.c_str(),
+      joint.id);
+  }
+
+  bool any_motor_connected() const
+  {
+    return std::any_of(joints_.begin(), joints_.end(), [](const auto & joint) {
+      return joint.connected;
+    });
   }
 
   void update()
   {
-    const auto now = this->now();
+    std::lock_guard<std::mutex> lock(md_mutex_);
+    read_connected_motors();
+    publish_joint_states();
 
-    sensor_msgs::msg::JointState msg;
-    msg.header.stamp = now;
-    msg.name = joint_names_;
-    msg.position.resize(2);
-    msg.velocity.resize(2);
-    msg.effort.resize(2);
-
-    for (size_t i = 0; i < 2; ++i) {
-      const double position = static_cast<double>(mds_[i].getPosition().first);
-
-      double velocity = 0.0;
-      if (!first_read_) {
-        const double dt = (now - last_time_).seconds();
-        if (dt > 1e-6) {
-          velocity = (position - last_positions_[i]) / dt;
-        }
-      }
-
-      velocity = std::clamp(velocity, -velocity_max_[i], velocity_max_[i]);
-
-      msg.position[i] = position;
-      msg.velocity[i] = velocity;
-      msg.effort[i] = 0.0;  // Add measured/estimated torque later if SDK call is available.
-
-      last_positions_[i] = position;
-      velocities_[i] = velocity;
-
-      if (enable_control_) {
-        const double safe_target = std::clamp(
-          target_positions_[i],
-          position_min_[i],
-          position_max_[i]);
-
-        /*
-         * Minimal impedance command:
-         * - target position comes from /legwheel/target_positions
-         * - velocity target is zero for now
-         *
-         * Depending on your CANdle-SDK version, you may have explicit methods like:
-         *   setTargetPosition(...)
-         *   setTargetVelocity(...)
-         *   setTargetTorque(...)
-         *   setImpedanceKp(...)
-         *   setImpedanceKd(...)
-         *
-         * MAB's example shows setTargetPosition(...). Add the gain/torque calls
-         * after confirming their exact names in your installed SDK headers/examples.
-         */
-        mds_[i].setTargetPosition(static_cast<float>(safe_target));
-      }
+    if (!control_may_run()) {
+      return;
     }
 
-    first_read_ = false;
-    last_time_ = now;
+    for (auto & joint : joints_) {
+      if (!joint.connected) {
+        continue;
+      }
+      command_impedance(joint);
+    }
+  }
+
+  void read_connected_motors()
+  {
+    for (auto & joint : joints_) {
+      if (!joint.connected) {
+        continue;
+      }
+
+      const auto position = joint.md->getPosition();
+      if (position.second == mab::MD::Error_t::OK) {
+        joint.last_position_rad = position.first;
+      } else {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(),
+          *get_clock(),
+          2000,
+          "Failed to read %s position: %s",
+          joint.label.c_str(),
+          md_error_to_string(position.second).c_str());
+      }
+
+      const auto velocity = joint.md->getVelocity();
+      if (velocity.second == mab::MD::Error_t::OK) {
+        joint.last_velocity_rad_s = std::clamp(
+          static_cast<double>(velocity.first),
+          -joint.limits.velocity_max_rad_s,
+          joint.limits.velocity_max_rad_s);
+      }
+
+      const auto torque = joint.md->getTorque();
+      if (torque.second == mab::MD::Error_t::OK) {
+        joint.last_effort_nm = torque.first;
+      }
+    }
+  }
+
+  void publish_joint_states()
+  {
+    sensor_msgs::msg::JointState msg;
+    msg.header.stamp = now();
+    msg.name.reserve(joints_.size());
+    msg.position.reserve(joints_.size());
+    msg.velocity.reserve(joints_.size());
+    msg.effort.reserve(joints_.size());
+
+    for (const auto & joint : joints_) {
+      if (!joint.connected) {
+        continue;
+      }
+      msg.name.push_back(joint.joint_name);
+      msg.position.push_back(joint.last_position_rad);
+      msg.velocity.push_back(joint.last_velocity_rad_s);
+      msg.effort.push_back(joint.last_effort_nm);
+    }
 
     joint_state_pub_->publish(msg);
   }
 
+  bool control_may_run() const
+  {
+    return enable_control_requested_ && limits_valid_ && motor_status_allows_enable_.load() &&
+           any_motor_connected();
+  }
+
+  void command_impedance(Joint & joint)
+  {
+    if (!motor_status_allows_enable_.load()) {
+      return;
+    }
+
+    if (!joint.impedance_configured) {
+      if (!check_md(joint, joint.md->setMotionMode(mab::MdMode_E::IMPEDANCE), "set impedance mode")) {
+        return;
+      }
+      if (!motor_status_allows_enable_.load()) {
+        return;
+      }
+      if (!check_md(joint, joint.md->setImpedanceParams(joint.kp, joint.kd), "set impedance gains")) {
+        return;
+      }
+      if (!motor_status_allows_enable_.load()) {
+        return;
+      }
+      if (!check_md(joint, joint.md->setMaxTorque(joint.limits.torque_max_nm), "set max torque")) {
+        return;
+      }
+      joint.impedance_configured = true;
+    }
+
+    if (!joint.enabled) {
+      if (!motor_status_allows_enable_.load()) {
+        return;
+      }
+      if (!check_md(joint, joint.md->enable(), "enable")) {
+        return;
+      }
+      joint.enabled = true;
+      RCLCPP_WARN(
+        get_logger(),
+        "%s motor ID %d enabled in impedance mode.",
+        joint.label.c_str(),
+        joint.id);
+    }
+
+    if (!motor_status_allows_enable_.load()) {
+      return;
+    }
+    if (!check_md(joint, joint.md->setTargetVelocity(0.0f), "set target velocity")) {
+      return;
+    }
+    if (!motor_status_allows_enable_.load()) {
+      return;
+    }
+    if (!check_md(joint, joint.md->setTargetTorque(0.0f), "set target torque")) {
+      return;
+    }
+    if (!motor_status_allows_enable_.load()) {
+      return;
+    }
+    check_md(
+      joint,
+      joint.md->setTargetPosition(static_cast<float>(joint.spring_zero_rad)),
+      "set target position");
+  }
+
+  bool check_md(const Joint & joint, const mab::MD::Error_t result, const std::string & action)
+  {
+    if (result == mab::MD::Error_t::OK) {
+      return true;
+    }
+    RCLCPP_ERROR(
+      get_logger(),
+      "Failed to %s for %s motor ID %d: %s",
+      action.c_str(),
+      joint.label.c_str(),
+      joint.id,
+      md_error_to_string(result).c_str());
+    return false;
+  }
+
+  void handle_motor_status(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    if (!msg->data) {
+      RCLCPP_ERROR(get_logger(), "Received motor_status=false. Disabling motors immediately.");
+      motor_status_allows_enable_.store(false);
+      disable_all_motors();
+      return;
+    }
+
+    motor_status_allows_enable_.store(true);
+    if (!enable_control_requested_) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Received motor_status=true, but enable_control is false. Motors remain disabled.");
+    } else if (!limits_valid_) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Received motor_status=true, but software limits are invalid. Motors remain disabled.");
+    } else {
+      RCLCPP_WARN(
+        get_logger(),
+        "Received motor_status=true. Connected motors may be enabled by the update loop.");
+    }
+  }
+
+  void handle_spring_zero_position(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
+  {
+    if (!validate_array_size(*msg, "spring_zero_position")) {
+      return;
+    }
+
+    std::lock_guard<std::mutex> lock(md_mutex_);
+    for (std::size_t i = 0; i < joints_.size(); ++i) {
+      auto & joint = joints_[i];
+      if (!joint.connected) {
+        continue;
+      }
+
+      const auto safe_value = checked_position_command(joint, msg->data[i]);
+      if (!safe_value.has_value()) {
+        continue;
+      }
+      joint.spring_zero_rad = safe_value.value();
+      RCLCPP_INFO(
+        get_logger(),
+        "%s spring zero set to %.4f rad.",
+        joint.label.c_str(),
+        joint.spring_zero_rad);
+    }
+  }
+
+  void handle_spring_constant(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
+  {
+    if (!validate_array_size(*msg, "spring_constant")) {
+      return;
+    }
+    update_gain_array(*msg, "spring constant", max_spring_constant_, true);
+  }
+
+  void handle_damping_constant(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
+  {
+    if (!validate_array_size(*msg, "damping_constant")) {
+      return;
+    }
+    update_gain_array(*msg, "damping constant", max_damping_constant_, false);
+  }
+
+  bool validate_array_size(
+    const std_msgs::msg::Float64MultiArray & msg,
+    const std::string & topic_name) const
+  {
+    if (msg.data.size() != joints_.size()) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Expected %zu values on /legwheel/%s, got %zu.",
+        joints_.size(),
+        topic_name.c_str(),
+        msg.data.size());
+      return false;
+    }
+    return true;
+  }
+
+  std::optional<double> checked_position_command(const Joint & joint, const double requested)
+  {
+    if (!is_finite(requested)) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Rejecting non-finite %s spring zero command.",
+        joint.label.c_str());
+      return std::nullopt;
+    }
+
+    const auto & limits = joint.limits;
+    if (requested >= limits.position_min_rad && requested <= limits.position_max_rad) {
+      return requested;
+    }
+
+    if (command_limit_policy_ == "clamp") {
+      const double clamped = std::clamp(
+        requested,
+        limits.position_min_rad,
+        limits.position_max_rad);
+      RCLCPP_WARN(
+        get_logger(),
+        "Clamping %s spring zero from %.4f rad to %.4f rad.",
+        joint.label.c_str(),
+        requested,
+        clamped);
+      return clamped;
+    }
+
+    RCLCPP_ERROR(
+      get_logger(),
+      "Rejecting %s spring zero %.4f rad outside software limits [%.4f, %.4f].",
+      joint.label.c_str(),
+      requested,
+      limits.position_min_rad,
+      limits.position_max_rad);
+    return std::nullopt;
+  }
+
+  void update_gain_array(
+    const std_msgs::msg::Float64MultiArray & msg,
+    const std::string & name,
+    const double max_value,
+    const bool update_kp)
+  {
+    std::lock_guard<std::mutex> lock(md_mutex_);
+    for (std::size_t i = 0; i < joints_.size(); ++i) {
+      auto & joint = joints_[i];
+      if (!joint.connected) {
+        continue;
+      }
+
+      const double value = msg.data[i];
+      if (!is_finite(value) || value < 0.0 || value > max_value) {
+        RCLCPP_ERROR(
+          get_logger(),
+          "Rejecting %s %s %.4f. Expected finite value in [0, %.4f].",
+          joint.label.c_str(),
+          name.c_str(),
+          value,
+          max_value);
+        continue;
+      }
+
+      if (update_kp) {
+        joint.kp = value;
+      } else {
+        joint.kd = value;
+      }
+      joint.impedance_configured = false;
+
+      RCLCPP_INFO(
+        get_logger(),
+        "%s %s set to %.4f.",
+        joint.label.c_str(),
+        name.c_str(),
+        value);
+    }
+  }
+
+  void disable_all_motors()
+  {
+    std::lock_guard<std::mutex> lock(md_mutex_);
+    for (auto & joint : joints_) {
+      if (!joint.connected) {
+        continue;
+      }
+      const auto result = joint.md->disable();
+      if (result != mab::MD::Error_t::OK) {
+        RCLCPP_ERROR(
+          get_logger(),
+          "Failed to disable %s motor ID %d: %s",
+          joint.label.c_str(),
+          joint.id,
+          md_error_to_string(result).c_str());
+      }
+      joint.enabled = false;
+      joint.impedance_configured = false;
+    }
+  }
+
+  void detach_candle()
+  {
+    if (candle_ == nullptr) {
+      return;
+    }
+
+    try {
+      mab::detachCandle(candle_);
+    } catch (...) {
+      // Destructors must not throw during shutdown.
+    }
+    candle_ = nullptr;
+  }
+
+  std::string discovered_ids_string() const
+  {
+    std::ostringstream stream;
+    bool first = true;
+    for (const auto id : discovered_ids_) {
+      if (!first) {
+        stream << ", ";
+      }
+      stream << id;
+      first = false;
+    }
+    return stream.str();
+  }
+
   mab::Candle * candle_{nullptr};
-  std::vector<mab::MD> mds_;
+  std::array<Joint, 2> joints_;
+  std::unordered_set<int> discovered_ids_;
 
-  std::vector<int64_t> motor_ids_;
-  std::vector<std::string> joint_names_;
+  bool limits_provided_{false};
+  bool limits_valid_{false};
+  bool enable_control_requested_{false};
+  std::atomic_bool motor_status_allows_enable_{false};
+  double publish_rate_hz_{100.0};
+  double max_spring_constant_{50.0};
+  double max_damping_constant_{5.0};
+  std::string command_limit_policy_{"reject"};
 
-  std::vector<double> position_min_;
-  std::vector<double> position_max_;
-  std::vector<double> velocity_max_;
+  mutable std::mutex md_mutex_;
 
-  std::vector<double> target_positions_;
-  std::vector<double> last_positions_;
-  std::vector<double> velocities_;
-
-  double kp_{1.0};
-  double kd_{0.05};
-  double torque_ff_{0.0};
-
-  bool zero_on_startup_{false};
-  bool enable_control_{false};
-  bool first_read_{true};
-
-  rclcpp::Time last_time_;
-
+  rclcpp::CallbackGroup::SharedPtr status_callback_group_;
+  rclcpp::CallbackGroup::SharedPtr command_callback_group_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
-  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr command_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr motor_status_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr spring_zero_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr spring_constant_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr damping_constant_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 
@@ -312,7 +786,9 @@ int main(int argc, char ** argv)
 
   try {
     auto node = std::make_shared<Md80ImpedanceNode>();
-    rclcpp::spin(node);
+    rclcpp::executors::MultiThreadedExecutor executor;
+    executor.add_node(node);
+    executor.spin();
   } catch (const std::exception & e) {
     std::cerr << "Fatal error in md80_impedance_node: " << e.what() << std::endl;
   }
