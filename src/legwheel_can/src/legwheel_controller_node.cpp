@@ -13,6 +13,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
+#include "std_msgs/msg/string.hpp"
 
 #include <sys/select.h>
 #include <unistd.h>
@@ -88,12 +89,18 @@ public:
       "/legwheel/spring_constant", 10);
     damping_constant_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
       "/legwheel/damping_constant", 10);
+    command_sub_ = create_subscription<std_msgs::msg::String>(
+      "/legwheel/controller_command",
+      10,
+      std::bind(&LegwheelControllerNode::handle_command_message, this, std::placeholders::_1));
 
     startup_timer_ = create_wall_timer(
       std::chrono::milliseconds(500),
       std::bind(&LegwheelControllerNode::publish_startup_commands, this));
 
-    RCLCPP_INFO(get_logger(), "Legwheel controller ready. Type 'help' for commands.");
+    RCLCPP_INFO(
+      get_logger(),
+      "Legwheel controller ready. Type commands followed by Enter, or publish std_msgs/String to /legwheel/controller_command.");
     input_thread_ = std::thread(&LegwheelControllerNode::input_loop, this);
   }
 
@@ -277,6 +284,11 @@ private:
       tokens[1].c_str());
   }
 
+  void handle_command_message(const std_msgs::msg::String::SharedPtr msg)
+  {
+    handle_command(msg->data);
+  }
+
   void set_spring_zero(const std::size_t joint_index, const double value)
   {
     {
@@ -377,6 +389,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr spring_zero_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr spring_constant_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr damping_constant_pub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr command_sub_;
   rclcpp::TimerBase::SharedPtr startup_timer_;
 };
 

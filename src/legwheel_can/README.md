@@ -158,7 +158,9 @@ legwheel_controller_node
 
 The controller node reads simple text commands from the terminal and publishes
 the full ROS messages expected by the impedance node. It does not talk to
-CANdle-SDK or hardware directly.
+CANdle-SDK or hardware directly. When launched through `ros2 launch`, terminal
+stdin may not be forwarded to the controller on every system, so the same
+commands can also be sent on `/legwheel/controller_command`.
 
 Publishes:
 
@@ -168,6 +170,12 @@ Publishes:
 | `/legwheel/spring_zero_position` | `std_msgs/msg/Float64MultiArray` | Current `[hip_zero_rad, knee_zero_rad]` command |
 | `/legwheel/spring_constant` | `std_msgs/msg/Float64MultiArray` | Current `[hip_kp, knee_kp]` command |
 | `/legwheel/damping_constant` | `std_msgs/msg/Float64MultiArray` | Current `[hip_kd, knee_kd]` command |
+
+Subscribes:
+
+| Topic | Type | Purpose |
+| --- | --- | --- |
+| `/legwheel/controller_command` | `std_msgs/msg/String` | Text command input, for example `e` or `hip set_spring 4.0` |
 
 Terminal commands:
 
@@ -183,6 +191,15 @@ Terminal commands:
 | `knee set_damp 5.0` | Set knee damping constant to `5.0` N/(rad/s) |
 | `status` | Print the controller's current command arrays |
 | `help` | Print a short command summary |
+
+If typing directly into the launch terminal does not produce a controller log,
+send the same command through ROS:
+
+```bash
+ros2 topic pub --once /legwheel/controller_command std_msgs/msg/String "{data: 'e'}"
+ros2 topic pub --once /legwheel/controller_command std_msgs/msg/String "{data: 'hip set_zeropos 0.0'}"
+ros2 topic pub --once /legwheel/controller_command std_msgs/msg/String "{data: 's'}"
+```
 
 On startup, the controller publishes initial zero/gain arrays by default:
 
@@ -319,7 +336,7 @@ ros2 launch legwheel_can md80_impedance.launch.py enable_control:=true
 ```
 
 The controller publishes initial zero/gain arrays automatically. In the launch
-terminal, type commands such as:
+terminal, type commands followed by Enter, such as:
 
 ```bash
 hip set_zeropos 0.0
@@ -341,6 +358,13 @@ s
 
 Typing `s` publishes `/legwheel/motor_status=false`, which disables all connected
 motors immediately.
+
+If the launch terminal does not forward input to the controller, use:
+
+```bash
+ros2 topic pub --once /legwheel/controller_command std_msgs/msg/String "{data: 'e'}"
+ros2 topic pub --once /legwheel/controller_command std_msgs/msg/String "{data: 's'}"
+```
 
 ## Notes
 
