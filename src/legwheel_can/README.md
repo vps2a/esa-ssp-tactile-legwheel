@@ -6,8 +6,8 @@ safety-first split:
 
 - `md80_zero_node` is for passive encoder observation and zeroing.
 - `md80_impedance_node` is for read-only monitoring or gated impedance control.
-- `legwheel_controller_node` is a small terminal command publisher for impedance
-  targets, gains, and motor enable/stop status.
+- `legwheel_controller_node` is a Python terminal command publisher for
+  impedance targets, gains, and motor enable/stop status.
 
 The default logical joints are:
 
@@ -25,11 +25,13 @@ expected motors. Missing motors are logged and skipped.
 - `config/motor_limits.yaml`: software position, velocity, and torque limits.
 - `src/md80_zero_node.cpp`: passive calibration and zeroing node.
 - `src/md80_impedance_node.cpp`: impedance/read-only runtime node.
-- `src/legwheel_controller_node.cpp`: terminal command node for publishing
+- `scripts/legwheel_controller_node.py`: terminal command node for publishing
   impedance commands.
 - `launch/md80_zero.launch.py`: launches the zeroing node with motor IDs.
 - `launch/md80_impedance.launch.py`: launches the impedance node with motor IDs
-  and software limits, plus the controller node.
+  and software limits.
+- `launch/launch_controller.launch.py`: launches only the Python controller node
+  for use in a separate terminal.
 - `CMakeLists.txt` and `package.xml`: build all package executables, link
   CANdle-SDK where needed, install launch/config files, and declare ROS
   dependencies.
@@ -210,20 +212,25 @@ damping_constant: [0.05, 0.05]
 ```
 
 It does not enable motors on startup unless launched with
-`controller_auto_enable:=true`.
+`auto_enable:=true`.
 
-### Impedance Launch Arguments
+### Launch Files
 
-`md80_impedance.launch.py` starts both the impedance node and the controller
-node.
+`md80_impedance.launch.py` starts only the impedance node.
 
 | Argument | Default | Meaning |
 | --- | --- | --- |
 | `enable_control` | `false` | Arms the impedance node. Motors still wait for `/legwheel/motor_status=true` |
-| `controller_auto_enable` | `false` | Makes the controller publish `/legwheel/motor_status=true` on startup |
 
-For normal testing, keep `controller_auto_enable` false and type `e` only after
-the mechanism is ready.
+`launch_controller.launch.py` starts only the Python controller node.
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `auto_enable` | `false` | Makes the controller publish `/legwheel/motor_status=true` on startup |
+| `publish_initial_commands` | `true` | Publishes initial zero, spring, and damping arrays on startup |
+
+For normal testing, keep `auto_enable` false and type `e` only after the
+mechanism is ready.
 
 ## Parameters
 
@@ -329,14 +336,20 @@ This publishes encoder state but does not enable motors.
 
 ### 3. Control-Enabled Impedance Runtime
 
-Launch with control armed. This also starts the terminal controller:
+Terminal 1: launch the impedance node with control armed:
 
 ```bash
 ros2 launch legwheel_can md80_impedance.launch.py enable_control:=true
 ```
 
-The controller publishes initial zero/gain arrays automatically. In the launch
-terminal, type commands followed by Enter, such as:
+Terminal 2: launch the Python controller:
+
+```bash
+ros2 launch legwheel_can launch_controller.launch.py
+```
+
+The controller publishes initial zero/gain arrays automatically. In the
+controller terminal, type commands followed by Enter, such as:
 
 ```bash
 hip set_zeropos 0.0
