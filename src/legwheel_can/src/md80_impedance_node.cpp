@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <iostream>
@@ -16,6 +17,7 @@
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
+#include "std_msgs/msg/string.hpp"
 
 #include "MD.hpp"
 #include "candle.hpp"
@@ -47,6 +49,38 @@ std::string md_error_to_string(const mab::MD::Error_t error)
 bool is_finite(const double value)
 {
   return std::isfinite(value);
+}
+
+enum class OperatingMode
+{
+  Impedance,
+  OneDof,
+};
+
+std::string operating_mode_to_string(const OperatingMode mode)
+{
+  switch (mode) {
+    case OperatingMode::Impedance:
+      return "impedance";
+    case OperatingMode::OneDof:
+      return "1dof";
+  }
+  return "unknown";
+}
+
+std::optional<OperatingMode> parse_operating_mode(std::string mode)
+{
+  std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char character) {
+    return static_cast<char>(std::tolower(character));
+  });
+
+  if (mode == "impedance") {
+    return OperatingMode::Impedance;
+  }
+  if (mode == "1dof" || mode == "one_dof" || mode == "onedof") {
+    return OperatingMode::OneDof;
+  }
+  return std::nullopt;
 }
 }  // namespace
 
@@ -90,6 +124,11 @@ public:
       "/legwheel/damping_constant",
       10,
       std::bind(&Md80ImpedanceNode::handle_damping_constant, this, std::placeholders::_1),
+      command_options);
+    operating_mode_sub_ = create_subscription<std_msgs::msg::String>(
+      "/legwheel/operating_mode",
+      10,
+      std::bind(&Md80ImpedanceNode::handle_operating_mode, this, std::placeholders::_1),
       command_options);
 
     connect_to_candle();
@@ -177,6 +216,7 @@ private:
     declare_parameter<double>("initial_damping_constant", 0.05);
     declare_parameter<double>("max_spring_constant", 50.0);
     declare_parameter<double>("max_damping_constant", 5.0);
+    declare_parameter<double>("hip_mirror_multiplier", -0.5);
     declare_parameter<std::string>("command_limit_policy", "reject");
 
     declare_parameter<bool>("enable_control", false);
@@ -212,6 +252,7 @@ private:
     publish_rate_hz_ = get_parameter("publish_rate_hz").as_double();
     max_spring_constant_ = get_parameter("max_spring_constant").as_double();
     max_damping_constant_ = get_parameter("max_damping_constant").as_double();
+    hip_mirror_multiplier_ = get_parameter("hip_mirror_multiplier").as_double();
     command_limit_policy_ = get_parameter("command_limit_policy").as_string();
 
     const double initial_kp = get_parameter("initial_spring_constant").as_double();
@@ -226,6 +267,9 @@ private:
     }
     if (command_limit_policy_ != "reject" && command_limit_policy_ != "clamp") {
       throw std::runtime_error("command_limit_policy must be either 'reject' or 'clamp'.");
+    }
+    if (!is_finite(hip_mirror_multiplier_)) {
+      throw std::runtime_error("hip_mirror_multiplier must be finite.");
     }
 
     RCLCPP_INFO(
@@ -400,7 +444,13 @@ private:
       if (!joint.connected) {
         continue;
       }
-      command_impedance(joint);
+      if (operating_mode_ == OperatingMode::Impedance) {
+        command_impedance(joint, joint.spring_zero_rad);
+      }
+    }
+
+    if (operating_mode_ == OperatingMode::OneDof) {
+      command_one_dof();
     }
   }
 
@@ -467,9 +517,43 @@ private:
            any_motor_connected();
   }
 
-  void command_impedance(Joint & joint)
+  void command_one_dof()
+  {
+    auto & knee = joints_[kKneeIndex];
+    auto & hip = joints_[kHipIndex];
+
+    if (knee.connected) {
+      command_impedance(knee, knee.spring_zero_rad);
+    }
+
+    if (!hip.connected) {
+      return;
+    }
+    if (!knee.connected) {
+      RCLCPP_ERROR_THROTTLE(
+        get_logger(),
+        *get_clock(),
+        2000,
+        "1DOF mode requires the knee motor. Hip mirror command is skipped.");
+      return;
+    }
+
+    const double hip_target = hip_mirror_multiplier_ * knee.last_position_rad;
+    command_impedance(hip, hip_target);
+  }
+
+  void command_impedance(Joint & joint, const double target_position_rad)
   {
     if (!motor_status_allows_enable_.load()) {
+      return;
+    }
+
+    const auto safe_target = checked_position_command(
+      joint,
+      target_position_rad,
+      "target position",
+      true);
+    if (!safe_target.has_value()) {
       return;
     }
 
@@ -524,7 +608,7 @@ private:
     }
     check_md(
       joint,
-      joint.md->setTargetPosition(static_cast<float>(joint.spring_zero_rad)),
+      joint.md->setTargetPosition(static_cast<float>(safe_target.value())),
       "set target position");
   }
 
@@ -580,8 +664,14 @@ private:
       if (!joint.connected) {
         continue;
       }
+      if (operating_mode_ == OperatingMode::OneDof && i == kHipIndex) {
+        RCLCPP_WARN(
+          get_logger(),
+          "Ignoring hip spring zero command in 1DOF mode. Hip mirrors knee position.");
+        continue;
+      }
 
-      const auto safe_value = checked_position_command(joint, msg->data[i]);
+      const auto safe_value = checked_position_command(joint, msg->data[i], "spring zero", false);
       if (!safe_value.has_value()) {
         continue;
       }
@@ -610,6 +700,43 @@ private:
     update_gain_array(*msg, "damping constant", max_damping_constant_, false);
   }
 
+  void handle_operating_mode(const std_msgs::msg::String::SharedPtr msg)
+  {
+    const auto requested_mode = parse_operating_mode(msg->data);
+    if (!requested_mode.has_value()) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Unknown operating mode '%s'. Expected 'impedance' or '1dof'.",
+        msg->data.c_str());
+      return;
+    }
+
+    std::lock_guard<std::mutex> lock(md_mutex_);
+    if (requested_mode.value() == operating_mode_) {
+      RCLCPP_INFO(
+        get_logger(),
+        "Already in %s mode.",
+        operating_mode_to_string(operating_mode_).c_str());
+      return;
+    }
+
+    for (auto & joint : joints_) {
+      joint.spring_zero_rad = 0.0;
+      joint.impedance_configured = false;
+    }
+
+    operating_mode_ = requested_mode.value();
+    if (operating_mode_ == OperatingMode::OneDof && !joints_[kKneeIndex].connected) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "1DOF mode selected, but knee motor is not connected. Hip mirror commands will be skipped.");
+    }
+    RCLCPP_WARN(
+      get_logger(),
+      "Operating mode changed to %s. Spring zero targets were reset to 0.0 rad.",
+      operating_mode_to_string(operating_mode_).c_str());
+  }
+
   bool validate_array_size(
     const std_msgs::msg::Float64MultiArray & msg,
     const std::string & topic_name) const
@@ -626,13 +753,28 @@ private:
     return true;
   }
 
-  std::optional<double> checked_position_command(const Joint & joint, const double requested)
+  std::optional<double> checked_position_command(
+    const Joint & joint,
+    const double requested,
+    const std::string & command_name,
+    const bool throttle_errors)
   {
     if (!is_finite(requested)) {
-      RCLCPP_ERROR(
-        get_logger(),
-        "Rejecting non-finite %s spring zero command.",
-        joint.label.c_str());
+      if (throttle_errors) {
+        RCLCPP_ERROR_THROTTLE(
+          get_logger(),
+          *get_clock(),
+          2000,
+          "Rejecting non-finite %s %s command.",
+          joint.label.c_str(),
+          command_name.c_str());
+      } else {
+        RCLCPP_ERROR(
+          get_logger(),
+          "Rejecting non-finite %s %s command.",
+          joint.label.c_str(),
+          command_name.c_str());
+      }
       return std::nullopt;
     }
 
@@ -646,22 +788,49 @@ private:
         requested,
         limits.position_min_rad,
         limits.position_max_rad);
-      RCLCPP_WARN(
-        get_logger(),
-        "Clamping %s spring zero from %.4f rad to %.4f rad.",
-        joint.label.c_str(),
-        requested,
-        clamped);
+      if (throttle_errors) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(),
+          *get_clock(),
+          2000,
+          "Clamping %s %s from %.4f rad to %.4f rad.",
+          joint.label.c_str(),
+          command_name.c_str(),
+          requested,
+          clamped);
+      } else {
+        RCLCPP_WARN(
+          get_logger(),
+          "Clamping %s %s from %.4f rad to %.4f rad.",
+          joint.label.c_str(),
+          command_name.c_str(),
+          requested,
+          clamped);
+      }
       return clamped;
     }
 
-    RCLCPP_ERROR(
-      get_logger(),
-      "Rejecting %s spring zero %.4f rad outside software limits [%.4f, %.4f].",
-      joint.label.c_str(),
-      requested,
-      limits.position_min_rad,
-      limits.position_max_rad);
+    if (throttle_errors) {
+      RCLCPP_ERROR_THROTTLE(
+        get_logger(),
+        *get_clock(),
+        2000,
+        "Rejecting %s %s %.4f rad outside software limits [%.4f, %.4f].",
+        joint.label.c_str(),
+        command_name.c_str(),
+        requested,
+        limits.position_min_rad,
+        limits.position_max_rad);
+    } else {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Rejecting %s %s %.4f rad outside software limits [%.4f, %.4f].",
+        joint.label.c_str(),
+        command_name.c_str(),
+        requested,
+        limits.position_min_rad,
+        limits.position_max_rad);
+    }
     return std::nullopt;
   }
 
@@ -675,6 +844,13 @@ private:
     for (std::size_t i = 0; i < joints_.size(); ++i) {
       auto & joint = joints_[i];
       if (!joint.connected) {
+        continue;
+      }
+      if (operating_mode_ == OperatingMode::OneDof && i == kHipIndex) {
+        RCLCPP_WARN(
+          get_logger(),
+          "Ignoring hip %s command in 1DOF mode. Hip mirrors knee position.",
+          name.c_str());
         continue;
       }
 
@@ -766,7 +942,9 @@ private:
   double publish_rate_hz_{100.0};
   double max_spring_constant_{50.0};
   double max_damping_constant_{5.0};
+  double hip_mirror_multiplier_{-0.5};
   std::string command_limit_policy_{"reject"};
+  OperatingMode operating_mode_{OperatingMode::Impedance};
 
   mutable std::mutex md_mutex_;
 
@@ -777,6 +955,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr spring_zero_sub_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr spring_constant_sub_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr damping_constant_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr operating_mode_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

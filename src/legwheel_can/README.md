@@ -60,6 +60,14 @@ If `/legwheel/motor_status` publishes `false`, the node immediately drops the
 enable gate and calls `md.disable()` on every connected motor. No new targets are
 sent while the gate is false.
 
+Two operating modes are supported:
+
+- `impedance`: hip and knee are independent MD80 impedance systems with separate
+  zero, spring, and damping commands.
+- `1dof`: knee remains a tunable MD80 impedance system, while hip mirrors knee
+  encoder position with `hip_target = -0.5 * knee_position`. Hip zero/gain
+  commands are ignored in this mode.
+
 Default launch behavior is read-only. Motors do not power on just because the
 impedance node starts.
 
@@ -126,8 +134,9 @@ Subscribes:
 | `/legwheel/spring_zero_position` | `std_msgs/msg/Float64MultiArray` | `[hip_zero_rad, knee_zero_rad]` impedance equilibrium |
 | `/legwheel/spring_constant` | `std_msgs/msg/Float64MultiArray` | `[hip_kp, knee_kp]` live impedance stiffness |
 | `/legwheel/damping_constant` | `std_msgs/msg/Float64MultiArray` | `[hip_kd, knee_kd]` live impedance damping |
+| `/legwheel/operating_mode` | `std_msgs/msg/String` | `impedance` or `1dof` |
 
-Control loop:
+Control loop in `impedance` mode:
 
 1. Read position, velocity, and torque from connected motors.
 2. Publish `/legwheel/joint_states`.
@@ -138,6 +147,20 @@ Control loop:
    - enable the motor if not already enabled,
    - command zero target velocity, zero feed-forward torque, and target position.
 4. If the control gate is closed, do not send target commands.
+
+Control loop in `1dof` mode:
+
+1. Knee is commanded with its normal impedance target, spring, and damping.
+2. Hip target is computed from the latest knee encoder position:
+
+   ```text
+   hip_target_rad = -0.5 * knee_encoder_position_rad
+   ```
+
+3. Hip position targets are still checked against hip software limits before
+   they are sent.
+4. If the knee motor is missing, `1dof` mode remains selected but hip mirror
+   commands are skipped.
 
 Command position safety is controlled by:
 
@@ -172,6 +195,7 @@ Publishes:
 | `/legwheel/spring_zero_position` | `std_msgs/msg/Float64MultiArray` | Current `[hip_zero_rad, knee_zero_rad]` command |
 | `/legwheel/spring_constant` | `std_msgs/msg/Float64MultiArray` | Current `[hip_kp, knee_kp]` command |
 | `/legwheel/damping_constant` | `std_msgs/msg/Float64MultiArray` | Current `[hip_kd, knee_kd]` command |
+| `/legwheel/operating_mode` | `std_msgs/msg/String` | Current operating mode: `impedance` or `1dof` |
 
 Subscribes:
 
@@ -185,14 +209,27 @@ Terminal commands:
 | --- | --- |
 | `e` or `enable` | Publish `/legwheel/motor_status=true` |
 | `s` or `stop` | Publish `/legwheel/motor_status=false` |
+| `mode impedance` | Request independent hip/knee impedance mode |
+| `mode 1dof` | Request knee impedance plus hip mirror mode |
 | `hip set_zeropos 0.0` | Set hip spring zero position to `0.0` rad |
 | `knee set_zeropos 0.0` | Set knee spring zero position to `0.0` rad |
+| `all set_zeropos 0.0` | Set both spring zero positions to `0.0` rad |
 | `hip set_spring 4.0` | Set hip spring constant to `4.0` Nm/rad |
 | `knee set_spring 4.0` | Set knee spring constant to `4.0` Nm/rad |
+| `all set_spring 3.0` | Set both spring constants to `3.0` Nm/rad |
 | `hip set_damp 5.0` | Set hip damping constant to `5.0` N/(rad/s) |
 | `knee set_damp 5.0` | Set knee damping constant to `5.0` N/(rad/s) |
+| `all set_damp 0.1` | Set both damping constants to `0.1` N/(rad/s) |
 | `status` | Print the controller's current command arrays |
 | `help` | Print a short command summary |
+
+Mode changes require confirmation. After `mode 1dof` or `mode impedance`, the
+controller warns that both motors will be commanded to `0.0` rad before the mode
+change. Type `yes` to proceed or `no` to cancel.
+
+In `1dof` mode, `hip ...` and `all ...` commands are rejected. Use `knee ...`
+commands to tune the active impedance behavior; hip target is generated from the
+knee encoder position.
 
 If typing directly into the launch terminal does not produce a controller log,
 send the same command through ROS:
@@ -200,6 +237,8 @@ send the same command through ROS:
 ```bash
 ros2 topic pub --once /legwheel/controller_command std_msgs/msg/String "{data: 'e'}"
 ros2 topic pub --once /legwheel/controller_command std_msgs/msg/String "{data: 'hip set_zeropos 0.0'}"
+ros2 topic pub --once /legwheel/controller_command std_msgs/msg/String "{data: 'mode 1dof'}"
+ros2 topic pub --once /legwheel/controller_command std_msgs/msg/String "{data: 'yes'}"
 ros2 topic pub --once /legwheel/controller_command std_msgs/msg/String "{data: 's'}"
 ```
 
@@ -209,6 +248,7 @@ On startup, the controller publishes initial zero/gain arrays by default:
 spring_zero_position: [0.0, 0.0]
 spring_constant: [1.0, 1.0]
 damping_constant: [0.05, 0.05]
+operating_mode: impedance
 ```
 
 It does not enable motors on startup unless launched with
@@ -353,8 +393,30 @@ controller terminal, type commands followed by Enter, such as:
 
 ```bash
 hip set_zeropos 0.0
+all set_spring 3.0
 knee set_spring 4.0
 hip set_damp 5.0
+```
+
+Switch modes with confirmation:
+
+```bash
+mode 1dof
+yes
+```
+
+In `1dof` mode, tune the knee only:
+
+```bash
+knee set_spring 4.0
+knee set_damp 0.05
+```
+
+Return to independent impedance mode:
+
+```bash
+mode impedance
+yes
 ```
 
 Explicitly enable motors only when ready:

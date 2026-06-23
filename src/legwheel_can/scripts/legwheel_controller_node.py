@@ -4,7 +4,7 @@ import math
 import select
 import sys
 import threading
-from typing import List, TextIO
+from typing import List, Optional, TextIO
 
 import rclpy
 from rclpy.node import Node
@@ -13,6 +13,8 @@ from std_msgs.msg import Bool, Float64MultiArray, String
 
 HIP_INDEX = 0
 KNEE_INDEX = 1
+MODE_IMPEDANCE = "impedance"
+MODE_ONE_DOF = "1dof"
 
 
 def make_array_msg(values: List[float]) -> Float64MultiArray:
@@ -50,6 +52,8 @@ class LegwheelControllerNode(Node):
         ]
         self.publish_initial_commands = self.get_parameter("publish_initial_commands").value
         self.auto_enable = self.get_parameter("auto_enable").value
+        self.current_mode = MODE_IMPEDANCE
+        self.pending_mode: Optional[str] = None
 
         self._validate_initial_values()
 
@@ -69,6 +73,9 @@ class LegwheelControllerNode(Node):
         )
         self.damping_constant_pub = self.create_publisher(
             Float64MultiArray, "/legwheel/damping_constant", 10
+        )
+        self.operating_mode_pub = self.create_publisher(
+            String, "/legwheel/operating_mode", 10
         )
         self.command_sub = self.create_subscription(
             String,
@@ -102,6 +109,9 @@ class LegwheelControllerNode(Node):
                 raise ValueError("Initial damping constants must be finite and non-negative.")
 
     def _publish_startup_commands(self) -> None:
+        if self._startup_publish_count == 0:
+            self._publish_operating_mode(self.current_mode)
+
         if self.publish_initial_commands:
             self._publish_all_command_arrays()
             if self._startup_publish_count == 0:
@@ -167,8 +177,13 @@ class LegwheelControllerNode(Node):
 
         command = tokens[0].lower()
         if command in ("s", "stop", "disable"):
+            self.pending_mode = None
             self._publish_motor_status(False)
             self.get_logger().error("Published motor_status=false.")
+            return
+
+        if self.pending_mode is not None:
+            self._handle_pending_mode_confirmation(command)
             return
 
         if command in ("e", "enable", "start"):
@@ -184,16 +199,27 @@ class LegwheelControllerNode(Node):
             self._print_status()
             return
 
+        if command == "mode":
+            self._request_mode_change(tokens)
+            return
+
         if len(tokens) != 3:
             self.get_logger().error(
-                "Invalid command. Expected '<hip|knee> <set_zeropos|set_spring|set_damp> <value>', 'e', or 's'."
+                "Invalid command. Expected '<hip|knee|all> <set_zeropos|set_spring|set_damp> <value>', "
+                "'mode <impedance|1dof>', 'e', or 's'."
             )
             return
 
-        joint_index = self._parse_joint(tokens[0])
-        if joint_index is None:
+        joint_indices = self._parse_target(tokens[0])
+        if joint_indices is None:
             self.get_logger().error(
-                "Unknown joint '%s'. Use 'hip' or 'knee'." % tokens[0]
+                "Unknown target '%s'. Use 'hip', 'knee', or 'all'." % tokens[0]
+            )
+            return
+
+        if self.current_mode == MODE_ONE_DOF and HIP_INDEX in joint_indices:
+            self.get_logger().error(
+                "Hip commands are not accepted in 1DOF mode. The hip mirrors knee position; use knee commands only."
             )
             return
 
@@ -209,27 +235,85 @@ class LegwheelControllerNode(Node):
 
         action = tokens[1].lower()
         if action in ("set_zeropos", "set_zero", "set_zero_position"):
-            self._set_spring_zero(joint_index, value)
+            for joint_index in joint_indices:
+                self._set_spring_zero(joint_index, value)
             return
 
         if action == "set_spring":
             if value < 0.0:
                 self.get_logger().error("Spring constant must be non-negative.")
                 return
-            self._set_spring_constant(joint_index, value)
+            for joint_index in joint_indices:
+                self._set_spring_constant(joint_index, value)
             return
 
         if action in ("set_damp", "set_damping"):
             if value < 0.0:
                 self.get_logger().error("Damping constant must be non-negative.")
                 return
-            self._set_damping_constant(joint_index, value)
+            for joint_index in joint_indices:
+                self._set_damping_constant(joint_index, value)
             return
 
         self.get_logger().error(
             "Unknown action '%s'. Use set_zeropos, set_spring, or set_damp."
             % tokens[1]
         )
+
+    def _request_mode_change(self, tokens: List[str]) -> None:
+        if len(tokens) != 2:
+            self.get_logger().error("Expected mode command: mode <impedance|1dof>.")
+            return
+
+        requested_mode = self._normalize_mode(tokens[1])
+        if requested_mode is None:
+            self.get_logger().error("Unknown mode '%s'. Use 'impedance' or '1dof'." % tokens[1])
+            return
+
+        if requested_mode == self.current_mode:
+            self.get_logger().info("Already in %s mode." % self.current_mode)
+            return
+
+        self.pending_mode = requested_mode
+        self.get_logger().warning(
+            "Switching to %s mode will command both motors back to 0.0 rad before changing mode. "
+            "Type 'yes' to proceed or 'no' to cancel."
+            % requested_mode
+        )
+
+    def _handle_pending_mode_confirmation(self, command: str) -> None:
+        if command in ("yes", "y"):
+            self._complete_mode_change()
+            return
+        if command in ("no", "n", "cancel"):
+            self.get_logger().info("Mode change to %s cancelled." % self.pending_mode)
+            self.pending_mode = None
+            return
+
+        self.get_logger().warning(
+            "Mode change to %s is waiting for confirmation. Type 'yes' to proceed or 'no' to cancel."
+            % self.pending_mode
+        )
+
+    def _complete_mode_change(self) -> None:
+        requested_mode = self.pending_mode
+        if requested_mode is None:
+            return
+
+        with self._lock:
+            self.spring_zero_position = [0.0, 0.0]
+            self.spring_zero_pub.publish(make_array_msg(self.spring_zero_position))
+
+        self._publish_operating_mode(requested_mode)
+        self.current_mode = requested_mode
+        self.pending_mode = None
+
+        if self.current_mode == MODE_ONE_DOF:
+            self.get_logger().warning(
+                "Changed to 1DOF mode. Hip set_zeropos, set_spring, and set_damp commands are disabled."
+            )
+        else:
+            self.get_logger().warning("Changed to impedance mode.")
 
     def _set_spring_zero(self, joint_index: int, value: float) -> None:
         with self._lock:
@@ -269,18 +353,25 @@ class LegwheelControllerNode(Node):
         msg.data = enabled
         self.motor_status_pub.publish(msg)
 
+    def _publish_operating_mode(self, mode: str) -> None:
+        msg = String()
+        msg.data = mode
+        self.operating_mode_pub.publish(msg)
+
     def _print_help(self) -> None:
         self.get_logger().info(
             "Commands: 'e' or 'enable' allow motors; 's' disables motors; "
+            "'mode impedance'; 'mode 1dof'; 'all set_spring 3.0'; "
             "'hip set_zeropos 0.0'; 'knee set_spring 4.0'; 'hip set_damp 5.0'; 'status'."
         )
 
     def _print_status(self) -> None:
         with self._lock:
             self.get_logger().info(
-                "Current commands: zero=[%.4f, %.4f] rad, spring=[%.4f, %.4f] Nm/rad, "
+                "Mode=%s, zero=[%.4f, %.4f] rad, spring=[%.4f, %.4f] Nm/rad, "
                 "damping=[%.4f, %.4f] N/(rad/s)."
                 % (
+                    self.current_mode,
                     self.spring_zero_position[HIP_INDEX],
                     self.spring_zero_position[KNEE_INDEX],
                     self.spring_constant[HIP_INDEX],
@@ -291,17 +382,28 @@ class LegwheelControllerNode(Node):
             )
 
     @staticmethod
-    def _parse_joint(token: str):
-        joint = token.lower()
-        if joint == "hip":
-            return HIP_INDEX
-        if joint == "knee":
-            return KNEE_INDEX
+    def _parse_target(token: str):
+        target = token.lower()
+        if target == "hip":
+            return [HIP_INDEX]
+        if target == "knee":
+            return [KNEE_INDEX]
+        if target == "all":
+            return [HIP_INDEX, KNEE_INDEX]
         return None
 
     @staticmethod
     def _joint_name(joint_index: int) -> str:
         return "hip" if joint_index == HIP_INDEX else "knee"
+
+    @staticmethod
+    def _normalize_mode(mode: str) -> Optional[str]:
+        normalized = mode.lower()
+        if normalized == MODE_IMPEDANCE:
+            return MODE_IMPEDANCE
+        if normalized in (MODE_ONE_DOF, "one_dof", "onedof"):
+            return MODE_ONE_DOF
+        return None
 
 
 def main(args=None) -> None:
