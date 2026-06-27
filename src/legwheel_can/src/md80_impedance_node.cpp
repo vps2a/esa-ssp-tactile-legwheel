@@ -214,7 +214,7 @@ private:
     declare_parameter<double>("knee_velocity_max_rad_s", 1.0);
     declare_parameter<double>("knee_torque_max_nm", 2.0);
 
-    declare_parameter<double>("initial_spring_constant", 1.0);
+    declare_parameter<double>("initial_spring_constant", 4.0);
     declare_parameter<double>("initial_damping_constant", 0.05);
     declare_parameter<double>("max_spring_constant", 50.0);
     declare_parameter<double>("max_damping_constant", 5.0);
@@ -541,6 +541,10 @@ private:
     }
 
     const double hip_target = hip_mirror_multiplier_ * knee.last_position_rad;
+    hip.md->setMotionMode(mab::MdMode_E::POSITION_PID);
+    RCLCPP_INFO(
+      get_logger(),
+      "Set the Hip motor to POSITION_PID motion mode");
     hip.md->setTargetPosition(hip_target); // This sets the target position of the hip motor to be a scaled version of the knee's last position, effectively mirroring the knee's movement in a 1DOF configuration.
   }
 

@@ -31,8 +31,8 @@ class LegwheelControllerNode(Node):
 
         self.declare_parameter("initial_hip_zero_position_rad", 0.0)
         self.declare_parameter("initial_knee_zero_position_rad", 0.0)
-        self.declare_parameter("initial_hip_spring_constant", 1.0)
-        self.declare_parameter("initial_knee_spring_constant", 1.0)
+        self.declare_parameter("initial_hip_spring_constant", 4.0)
+        self.declare_parameter("initial_knee_spring_constant", 4.0)
         self.declare_parameter("initial_hip_damping_constant", 0.05)
         self.declare_parameter("initial_knee_damping_constant", 0.05)
         self.declare_parameter("publish_initial_commands", True)
