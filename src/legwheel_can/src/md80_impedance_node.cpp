@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <iostream>
@@ -17,7 +16,6 @@
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
-#include "std_msgs/msg/string.hpp"
 
 #include "MD.hpp"
 #include "candle.hpp"
@@ -49,38 +47,6 @@ std::string md_error_to_string(const mab::MD::Error_t error)
 bool is_finite(const double value)
 {
   return std::isfinite(value);
-}
-
-enum class OperatingMode
-{
-  Impedance,
-  OneDof,
-};
-
-std::string operating_mode_to_string(const OperatingMode mode)
-{
-  switch (mode) {
-    case OperatingMode::Impedance:
-      return "impedance";
-    case OperatingMode::OneDof:
-      return "1dof";
-  }
-  return "unknown";
-}
-
-std::optional<OperatingMode> parse_operating_mode(std::string mode)
-{
-  std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char character) {
-    return static_cast<char>(std::tolower(character));
-  });
-
-  if (mode == "impedance") {
-    return OperatingMode::Impedance;
-  }
-  if (mode == "1dof" || mode == "one_dof" || mode == "onedof") {
-    return OperatingMode::OneDof;
-  }
-  return std::nullopt;
 }
 }  // namespace
 
@@ -126,11 +92,6 @@ public:
       "/legwheel/damping_constant",
       10,
       std::bind(&Md80ImpedanceNode::handle_damping_constant, this, std::placeholders::_1),
-      command_options);
-    operating_mode_sub_ = create_subscription<std_msgs::msg::String>(
-      "/legwheel/operating_mode",
-      10,
-      std::bind(&Md80ImpedanceNode::handle_operating_mode, this, std::placeholders::_1),
       command_options);
 
     connect_to_candle();
@@ -189,8 +150,9 @@ private:
     JointLimits limits;
     std::unique_ptr<mab::MD> md;
     bool connected{false};
+    bool control_mode_configured{false};
     bool enabled{false};
-    bool impedance_configured{false};
+    bool knee_impedance_params_configured{false};
     double spring_zero_rad{0.0};
     double kp{1.0};
     double kd{0.05};
@@ -415,14 +377,57 @@ private:
 
     joint.md = std::move(md);
     joint.connected = true;
+    joint.control_mode_configured = false;
     joint.enabled = false;
-    joint.impedance_configured = false;
+    joint.knee_impedance_params_configured = false;
+
+    configure_motor_for_fixed_1dof(joint);
 
     RCLCPP_INFO(
       get_logger(),
       "Connected %s_joint to MD80 ID %d.",
       joint.label.c_str(),
       joint.id);
+  }
+
+  void configure_motor_for_fixed_1dof(Joint & joint)
+  {
+    if (!joint.connected) {
+      return;
+    }
+
+    // Motion modes are intentionally set once, while the motors are still disabled.
+    // The runtime loop must not switch modes: knee is always impedance, hip is always
+    // position PID for the fixed 1DOF mirror behavior.
+    if (joint.label == "hip") {
+      if (check_md(
+          joint,
+          joint.md->setMotionMode(mab::MdMode_E::POSITION_PID),
+          "set position PID mode"))
+      {
+        joint.control_mode_configured = true;
+        RCLCPP_INFO(
+          get_logger(),
+          "Configured hip motor ID %d for POSITION_PID mode.",
+          joint.id);
+      }
+      return;
+    }
+
+    if (joint.label == "knee") {
+      if (check_md(
+          joint,
+          joint.md->setMotionMode(mab::MdMode_E::IMPEDANCE),
+          "set impedance mode"))
+      {
+        joint.control_mode_configured = true;
+        RCLCPP_INFO(
+          get_logger(),
+          "Configured knee motor ID %d for IMPEDANCE mode.",
+          joint.id);
+      }
+      joint.knee_impedance_params_configured = false;
+    }
   }
 
   bool any_motor_connected() const
@@ -442,18 +447,7 @@ private:
       return;
     }
 
-    for (auto & joint : joints_) {
-      if (!joint.connected) {
-        continue;
-      }
-      if (operating_mode_ == OperatingMode::Impedance) {
-        command_impedance(joint, joint.spring_zero_rad);
-      }
-    }
-
-    if (operating_mode_ == OperatingMode::OneDof) {
-      command_one_dof();
-    }
+    command_fixed_one_dof();
   }
 
   void read_connected_motors()
@@ -519,13 +513,14 @@ private:
            any_motor_connected();
   }
 
-  void command_one_dof()
+  void command_fixed_one_dof()
   {
     auto & knee = joints_[kKneeIndex];
     auto & hip = joints_[kHipIndex];
 
+    bool knee_command_sent = false;
     if (knee.connected) {
-      command_impedance(knee, knee.spring_zero_rad);
+      knee_command_sent = command_knee_impedance(knee);
     }
 
     if (!hip.connected) {
@@ -539,47 +534,127 @@ private:
         "1DOF mode requires the knee motor. Hip mirror command is skipped.");
       return;
     }
+    if (!knee_command_sent) {
+      RCLCPP_ERROR_THROTTLE(
+        get_logger(),
+        *get_clock(),
+        2000,
+        "Knee impedance command was not accepted. Hip mirror command is skipped.");
+      return;
+    }
 
     const double hip_target = hip_mirror_multiplier_ * knee.last_position_rad;
-    hip.md->setMotionMode(mab::MdMode_E::POSITION_PID);
-    RCLCPP_INFO(
-      get_logger(),
-      "Set the Hip motor to POSITION_PID motion mode");
-    hip.md->setTargetPosition(hip_target); // This sets the target position of the hip motor to be a scaled version of the knee's last position, effectively mirroring the knee's movement in a 1DOF configuration.
+    command_hip_position_pid(hip, hip_target);
   }
 
-  void command_impedance(Joint & joint, const double target_position_rad)
+  bool command_knee_impedance(Joint & joint)
   {
     if (!motor_status_allows_enable_.load()) {
-      return;
+      return false;
+    }
+    if (!joint.control_mode_configured) {
+      RCLCPP_ERROR_THROTTLE(
+        get_logger(),
+        *get_clock(),
+        2000,
+        "Knee motor ID %d was not configured for IMPEDANCE mode. Command skipped.",
+        joint.id);
+      return false;
     }
 
     const auto safe_target = checked_position_command(
       joint,
-      target_position_rad,
+      joint.spring_zero_rad,
       "target position",
       true);
     if (!safe_target.has_value()) {
+      return false;
+    }
+
+    // The knee is already in IMPEDANCE mode from initialization. Gains may still
+    // be updated live, so only impedance parameters are refreshed here.
+    if (!joint.knee_impedance_params_configured) {
+      if (!check_md(
+          joint,
+          joint.md->setImpedanceParams(joint.kp, joint.kd),
+          "set impedance gains"))
+      {
+        return false;
+      }
+      if (!motor_status_allows_enable_.load()) {
+        return false;
+      }
+      if (!check_md(
+          joint,
+          joint.md->setMaxTorque(joint.limits.torque_max_nm),
+          "set max torque"))
+      {
+        return false;
+      }
+      joint.knee_impedance_params_configured = true;
+    }
+
+    if (!joint.enabled) {
+      if (!motor_status_allows_enable_.load()) {
+        return false;
+      }
+      if (!check_md(joint, joint.md->enable(), "enable")) {
+        return false;
+      }
+      joint.enabled = true;
+      RCLCPP_WARN(
+        get_logger(),
+        "%s motor ID %d enabled in knee impedance control.",
+        joint.label.c_str(),
+        joint.id);
+    }
+
+    if (!motor_status_allows_enable_.load()) {
+      return false;
+    }
+    if (!check_md(joint, joint.md->setTargetVelocity(0.0f), "set target velocity")) {
+      return false;
+    }
+    if (!motor_status_allows_enable_.load()) {
+      return false;
+    }
+    if (!check_md(joint, joint.md->setTargetTorque(0.0f), "set target torque")) {
+      return false;
+    }
+    if (!motor_status_allows_enable_.load()) {
+      return false;
+    }
+    return check_md(
+      joint,
+      joint.md->setTargetPosition(static_cast<float>(safe_target.value())),
+      "set target position");
+  }
+
+  void command_hip_position_pid(Joint & joint, const double target_position_rad)
+  {
+    if (!motor_status_allows_enable_.load()) {
+      return;
+    }
+    if (!joint.control_mode_configured) {
+      RCLCPP_ERROR_THROTTLE(
+        get_logger(),
+        *get_clock(),
+        2000,
+        "Hip motor ID %d was not configured for POSITION_PID mode. Command skipped.",
+        joint.id);
       return;
     }
 
-    if (!joint.impedance_configured) {
-      if (!check_md(joint, joint.md->setMotionMode(mab::MdMode_E::IMPEDANCE), "set impedance mode")) {
-        return;
-      }
-      if (!motor_status_allows_enable_.load()) {
-        return;
-      }
-      if (!check_md(joint, joint.md->setImpedanceParams(joint.kp, joint.kd), "set impedance gains")) {
-        return;
-      }
-      if (!motor_status_allows_enable_.load()) {
-        return;
-      }
-      if (!check_md(joint, joint.md->setMaxTorque(joint.limits.torque_max_nm), "set max torque")) {
-        return;
-      }
-      joint.impedance_configured = true;
+    // This sets the target position of the hip motor to a scaled version of the
+    // knee encoder position, effectively mirroring the knee in the fixed 1DOF
+    // configuration.
+    const auto safe_target = checked_position_command(
+      joint,
+      target_position_rad,
+      "mirror target position",
+      true);
+    if (!safe_target.has_value()) {
+      return;
     }
 
     if (!joint.enabled) {
@@ -592,7 +667,7 @@ private:
       joint.enabled = true;
       RCLCPP_WARN(
         get_logger(),
-        "%s motor ID %d enabled in impedance mode.",
+        "%s motor ID %d enabled in hip POSITION_PID mirror control.",
         joint.label.c_str(),
         joint.id);
     }
@@ -600,22 +675,10 @@ private:
     if (!motor_status_allows_enable_.load()) {
       return;
     }
-    if (!check_md(joint, joint.md->setTargetVelocity(0.0f), "set target velocity")) {
-      return;
-    }
-    if (!motor_status_allows_enable_.load()) {
-      return;
-    }
-    if (!check_md(joint, joint.md->setTargetTorque(0.0f), "set target torque")) {
-      return;
-    }
-    if (!motor_status_allows_enable_.load()) {
-      return;
-    }
     check_md(
       joint,
       joint.md->setTargetPosition(static_cast<float>(safe_target.value())),
-      "set target position");
+      "set position PID target");
   }
 
   bool check_md(const Joint & joint, const mab::MD::Error_t result, const std::string & action)
@@ -670,9 +733,11 @@ private:
       if (!joint.connected) {
         continue;
       }
-      if (operating_mode_ == OperatingMode::OneDof && i == kHipIndex) {
-        RCLCPP_WARN(
+      if (i == kHipIndex) {
+        RCLCPP_WARN_THROTTLE(
           get_logger(),
+          *get_clock(),
+          5000,
           "Ignoring hip spring zero command in 1DOF mode. Hip mirrors knee position.");
         continue;
       }
@@ -704,43 +769,6 @@ private:
       return;
     }
     update_gain_array(*msg, "damping constant", max_damping_constant_, false);
-  }
-
-  void handle_operating_mode(const std_msgs::msg::String::SharedPtr msg)
-  {
-    const auto requested_mode = parse_operating_mode(msg->data);
-    if (!requested_mode.has_value()) {
-      RCLCPP_ERROR(
-        get_logger(),
-        "Unknown operating mode '%s'. Expected 'impedance' or '1dof'.",
-        msg->data.c_str());
-      return;
-    }
-
-    std::lock_guard<std::mutex> lock(md_mutex_);
-    if (requested_mode.value() == operating_mode_) {
-      RCLCPP_INFO(
-        get_logger(),
-        "Already in %s mode.",
-        operating_mode_to_string(operating_mode_).c_str());
-      return;
-    }
-
-    for (auto & joint : joints_) {
-      joint.spring_zero_rad = 0.0;
-      joint.impedance_configured = false;
-    }
-
-    operating_mode_ = requested_mode.value();
-    if (operating_mode_ == OperatingMode::OneDof && !joints_[kKneeIndex].connected) {
-      RCLCPP_ERROR(
-        get_logger(),
-        "1DOF mode selected, but knee motor is not connected. Hip mirror commands will be skipped.");
-    }
-    RCLCPP_WARN(
-      get_logger(),
-      "Operating mode changed to %s. Spring zero targets were reset to 0.0 rad.",
-      operating_mode_to_string(operating_mode_).c_str());
   }
 
   bool validate_array_size(
@@ -852,9 +880,11 @@ private:
       if (!joint.connected) {
         continue;
       }
-      if (operating_mode_ == OperatingMode::OneDof && i == kHipIndex) {
-        RCLCPP_WARN(
+      if (i == kHipIndex) {
+        RCLCPP_WARN_THROTTLE(
           get_logger(),
+          *get_clock(),
+          5000,
           "Ignoring hip %s command in 1DOF mode. Hip mirrors knee position.",
           name.c_str());
         continue;
@@ -877,7 +907,7 @@ private:
       } else {
         joint.kd = value;
       }
-      joint.impedance_configured = false;
+      joint.knee_impedance_params_configured = false;
 
       RCLCPP_INFO(
         get_logger(),
@@ -905,7 +935,7 @@ private:
           md_error_to_string(result).c_str());
       }
       joint.enabled = false;
-      joint.impedance_configured = false;
+      joint.knee_impedance_params_configured = false;
     }
   }
 
@@ -950,7 +980,6 @@ private:
   double max_damping_constant_{5.0};
   double hip_mirror_multiplier_{-0.5};
   std::string command_limit_policy_{"reject"};
-  OperatingMode operating_mode_{OperatingMode::Impedance};
 
   mutable std::mutex md_mutex_;
 
@@ -961,7 +990,6 @@ private:
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr spring_zero_sub_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr spring_constant_sub_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr damping_constant_sub_;
-  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr operating_mode_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 
