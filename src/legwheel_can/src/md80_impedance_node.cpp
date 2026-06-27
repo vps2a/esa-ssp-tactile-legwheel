@@ -84,11 +84,13 @@ std::optional<OperatingMode> parse_operating_mode(std::string mode)
 }
 }  // namespace
 
+// Creating a ROS2 node class for MD80 impedance control
+
 class Md80ImpedanceNode : public rclcpp::Node
 {
 public:
   Md80ImpedanceNode()
-  : Node("md80_impedance_node")
+  : Node("md80_impedance_node") // Node name
   {
     declare_parameters();
     load_parameters();
@@ -257,7 +259,7 @@ private:
 
     const double initial_kp = get_parameter("initial_spring_constant").as_double();
     const double initial_kd = get_parameter("initial_damping_constant").as_double();
-    for (auto & joint : joints_) {
+    for (auto & joint : joints_) { // This sets the initial spring and damping constants for each joint
       joint.kp = initial_kp;
       joint.kd = initial_kd;
     }
@@ -265,14 +267,14 @@ private:
     if (publish_rate_hz_ <= 0.0 || !is_finite(publish_rate_hz_)) {
       throw std::runtime_error("publish_rate_hz must be finite and positive.");
     }
-    if (command_limit_policy_ != "reject" && command_limit_policy_ != "clamp") {
+    if (command_limit_policy_ != "reject" && command_limit_policy_ != "clamp") { // This checks if the command limit policy is valid. Command limit policy is used to determine how to handle commands that exceed the software limits. If the policy is "reject", commands outside the limits will be rejected. If the policy is "clamp", commands outside the limits will be clamped to the nearest limit.
       throw std::runtime_error("command_limit_policy must be either 'reject' or 'clamp'.");
     }
     if (!is_finite(hip_mirror_multiplier_)) {
       throw std::runtime_error("hip_mirror_multiplier must be finite.");
     }
 
-    RCLCPP_INFO(
+    RCLCPP_INFO( // This prints out data into the INFO-level logs
       get_logger(),
       "Expected MD80 IDs: hip=%d, knee=%d",
       joints_[kHipIndex].id,
@@ -355,7 +357,7 @@ private:
 
   void discover_motors()
   {
-    RCLCPP_INFO(get_logger(), "Discovering MD80 controllers...");
+    RCLCPP_INFO(get_logger(), "Discovering MD80 controllers... This might take 10-30 seconds...");
     discovered_ids_.clear();
     for (const auto id : mab::MD::discoverMDs(candle_)) {
       discovered_ids_.insert(static_cast<int>(id));
@@ -387,8 +389,8 @@ private:
       return;
     }
 
-    auto md = std::make_unique<mab::MD>(joint.id, candle_);
-    const auto init_result = md->init();
+    auto md = std::make_unique<mab::MD>(joint.id, candle_); // This creates a new instance of the MD class for the joint with the specified ID and candle pointer.
+    const auto init_result = md->init(); // This initializes the MD instance, which involves setting up communication with the motor controller and preparing it for operation.
     if (init_result != mab::MD::Error_t::OK) {
       RCLCPP_ERROR(
         get_logger(),
@@ -539,7 +541,7 @@ private:
     }
 
     const double hip_target = hip_mirror_multiplier_ * knee.last_position_rad;
-    command_impedance(hip, hip_target);
+    hip.md->setTargetPosition(hip_target); // This sets the target position of the hip motor to be a scaled version of the knee's last position, effectively mirroring the knee's movement in a 1DOF configuration.
   }
 
   void command_impedance(Joint & joint, const double target_position_rad)
