@@ -2,6 +2,10 @@
   "shutdown_to_startup_deviation_tolerance": 0.1,
   "wheel_speed_rampup_time": 1.0,
   "default_max_speed": 0.5,
+  "wheel_velocity_pid_kp": 0.05,
+  "wheel_velocity_pid_ki": 0.5,
+  "wheel_velocity_pid_kd": 0.0,
+  "wheel_velocity_pid_windup": 1.5,
 
   "initial_hip_zero_position_rad": 0.0,
   "initial_knee_zero_position_rad": 0.0,

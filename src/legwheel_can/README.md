@@ -101,6 +101,10 @@ Runtime control is fixed in 1DOF mode:
   clamped to `wheel_velocity_max_rad_s` and rate-limited in the C++ node before
   it is sent to the MD80. The wheel also uses `wheel_torque_max_nm` as its MD80
   maximum torque.
+- The wheel velocity PID gains are loaded from `motor_config.json` and written
+  through CANdle-SDK before the wheel motor is enabled. This avoids the common
+  failure mode where `setTargetVelocity()` succeeds but the motor does not move
+  because firmware/default velocity gains are zero.
 
 Default launch behavior is read-only. Motors do not power on just because the
 impedance node starts.
@@ -380,6 +384,10 @@ Configured in `config/motor_config.json`:
   "shutdown_to_startup_deviation_tolerance": 0.1,
   "wheel_speed_rampup_time": 1.0,
   "default_max_speed": 0.5,
+  "wheel_velocity_pid_kp": 0.05,
+  "wheel_velocity_pid_ki": 0.5,
+  "wheel_velocity_pid_kd": 0.0,
+  "wheel_velocity_pid_windup": 1.5,
 
   "initial_hip_zero_position_rad": 0.0,
   "initial_knee_zero_position_rad": 0.0,
@@ -393,9 +401,10 @@ Configured in `config/motor_config.json`:
 ```
 
 The tolerance and zero positions are in radians. Wheel speeds are in rad/s and
-the wheel ramp time is in seconds. The spring constants are in Nm/rad, and
-damping constants are in N/(rad/s). The impedance node reads these values on
-startup and refuses control if they are missing or invalid.
+the wheel ramp time is in seconds. The wheel PID values are passed directly to
+CANdle-SDK `setVelocityPIDparam(kp, ki, kd, windup)`. The spring constants are in
+Nm/rad, and damping constants are in N/(rad/s). The impedance node reads these
+values on startup and refuses control if they are missing or invalid.
 
 ## Build
 

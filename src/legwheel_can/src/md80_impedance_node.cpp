@@ -297,6 +297,18 @@ private:
     wheel_default_max_speed_rad_s_ = require_json_number(
       contents,
       "default_max_speed");
+    wheel_velocity_pid_kp_ = require_json_number(
+      contents,
+      "wheel_velocity_pid_kp");
+    wheel_velocity_pid_ki_ = require_json_number(
+      contents,
+      "wheel_velocity_pid_ki");
+    wheel_velocity_pid_kd_ = require_json_number(
+      contents,
+      "wheel_velocity_pid_kd");
+    wheel_velocity_pid_windup_ = require_json_number(
+      contents,
+      "wheel_velocity_pid_windup");
 
     joints_[kHipIndex].spring_zero_rad = require_json_number(
       contents,
@@ -320,12 +332,17 @@ private:
     RCLCPP_INFO(
       get_logger(),
       "Loaded motor config from %s: tolerance=%.4f rad, wheel_ramp=%.4f s, "
-      "default_wheel_max=%.4f rad/s, hip_zero=%.4f rad, knee_zero=%.4f rad, "
-      "hip_kp=%.4f, knee_kp=%.4f, hip_kd=%.4f, knee_kd=%.4f.",
+      "default_wheel_max=%.4f rad/s, wheel_pid=[%.4f, %.4f, %.4f, %.4f], "
+      "hip_zero=%.4f rad, knee_zero=%.4f rad, hip_kp=%.4f, knee_kp=%.4f, "
+      "hip_kd=%.4f, knee_kd=%.4f.",
       motor_config_json_path_.c_str(),
       shutdown_to_startup_deviation_tolerance_,
       wheel_speed_rampup_time_s_,
       wheel_default_max_speed_rad_s_,
+      wheel_velocity_pid_kp_,
+      wheel_velocity_pid_ki_,
+      wheel_velocity_pid_kd_,
+      wheel_velocity_pid_windup_,
       joints_[kHipIndex].spring_zero_rad,
       joints_[kKneeIndex].spring_zero_rad,
       joints_[kHipIndex].kp,
@@ -364,6 +381,18 @@ private:
     }
     if (!is_finite(wheel_default_max_speed_rad_s_) || wheel_default_max_speed_rad_s_ <= 0.0) {
       throw std::runtime_error("default_max_speed must be finite and positive.");
+    }
+    if (!is_finite(wheel_velocity_pid_kp_) || wheel_velocity_pid_kp_ < 0.0 ||
+      !is_finite(wheel_velocity_pid_ki_) || wheel_velocity_pid_ki_ < 0.0 ||
+      !is_finite(wheel_velocity_pid_kd_) || wheel_velocity_pid_kd_ < 0.0 ||
+      !is_finite(wheel_velocity_pid_windup_) || wheel_velocity_pid_windup_ <= 0.0)
+    {
+      throw std::runtime_error(
+        "wheel velocity PID values must be finite, non-negative, and windup must be positive.");
+    }
+    if (wheel_velocity_pid_kp_ <= 0.0 && wheel_velocity_pid_ki_ <= 0.0) {
+      throw std::runtime_error(
+        "wheel_velocity_pid_kp or wheel_velocity_pid_ki must be positive for velocity control.");
     }
   }
 
@@ -618,6 +647,23 @@ private:
     }
 
     if (joint.label == "wheel") {
+      // The CANdle-SDK exposes VELOCITY_PID as a closed-loop controller whose
+      // gains may be zero in firmware defaults. Write conservative gains here so
+      // a valid velocity target produces torque instead of silently doing nothing.
+      if (!check_md(joint, joint.md->setTargetVelocity(0.0f), "set initial wheel velocity")) {
+        return;
+      }
+      if (!check_md(
+          joint,
+          joint.md->setVelocityPIDparam(
+            static_cast<float>(wheel_velocity_pid_kp_),
+            static_cast<float>(wheel_velocity_pid_ki_),
+            static_cast<float>(wheel_velocity_pid_kd_),
+            static_cast<float>(wheel_velocity_pid_windup_)),
+          "set wheel velocity PID gains"))
+      {
+        return;
+      }
       if (!check_md(
           joint,
           joint.md->setMotionMode(mab::MdMode_E::VELOCITY_PID),
