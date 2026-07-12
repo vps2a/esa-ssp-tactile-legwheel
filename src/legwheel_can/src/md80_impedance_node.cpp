@@ -825,6 +825,10 @@ private:
       RCLCPP_ERROR(get_logger(), "Received motor_status=false. Disabling motors immediately.");
       motor_status_allows_enable_.store(false);
       disable_all_motors();
+      if (startup_suppressed_by_shutdown_deviation_) {
+        report_shutdown_position_save_blocked();
+        return;
+      }
       save_motor_positions_on_shutdown();
       return;
     }
@@ -850,6 +854,7 @@ private:
 
       read_connected_motors();
       if (!startup_positions_within_shutdown_tolerance()) {
+        startup_suppressed_by_shutdown_deviation_ = true;
         RCLCPP_WARN(
           get_logger(),
           "Received motor_status=true, but encoder positions moved too far from the saved "
@@ -857,6 +862,7 @@ private:
         motor_status_allows_enable_.store(false);
         return;
       }
+      startup_suppressed_by_shutdown_deviation_ = false;
 
       const bool configured_ok = configure_all_motors_for_fixed_1dof();
       if (!configured_ok) {
@@ -874,6 +880,31 @@ private:
     RCLCPP_WARN(
       get_logger(),
       "Received motor_status=true. Motor modes reconfigured; connected motors may now be enabled by the update loop.");
+  }
+
+  void report_shutdown_position_save_blocked()
+  {
+    std::lock_guard<std::mutex> lock(md_mutex_);
+
+    read_connected_motors();
+    const bool now_within_tolerance = startup_positions_within_shutdown_tolerance();
+
+    RCLCPP_WARN(
+      get_logger(),
+      "motor_status=false was received after startup was suppressed by the shutdown-to-startup "
+      "deviation check. A new motor_position_on_shutdown will not be saved.");
+
+    if (now_within_tolerance) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Current encoder positions are now within tolerance, but the saved shutdown pose is still "
+        "protected. Publish motor_status=true to clear this interlock.");
+    } else {
+      RCLCPP_WARN(
+        get_logger(),
+        "Current encoder positions are still outside the saved shutdown tolerance. Move the motors "
+        "back near the logged expected positions before enabling again.");
+    }
   }
 
   void save_motor_positions_on_shutdown()
@@ -1195,6 +1226,7 @@ private:
   bool limits_provided_{false};
   bool limits_valid_{false};
   bool enable_control_requested_{false};
+  bool startup_suppressed_by_shutdown_deviation_{false};
   std::atomic_bool motor_status_allows_enable_{false};
   double publish_rate_hz_{100.0};
   double max_spring_constant_{50.0};

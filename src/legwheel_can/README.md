@@ -70,6 +70,12 @@ If any connected motor moved by more than
 actual position, and deviation, then refuses to enable the motors. The default
 saved shutdown positions are `0.0` rad for both hip and knee.
 
+After a refused startup, another `/legwheel/motor_status=false` command will
+still disable the motors, but it will not overwrite `motor_position_on_shutdown`.
+This prevents accidentally accepting a moved pose as the new safe reference; move
+the motors back within tolerance and publish `/legwheel/motor_status=true` to
+clear the interlock.
+
 Runtime control is fixed in 1DOF mode:
 
 - Knee is configured as MD80 `IMPEDANCE` during initialization and before
