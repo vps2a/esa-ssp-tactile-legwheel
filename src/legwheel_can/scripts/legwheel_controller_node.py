@@ -14,6 +14,10 @@ from std_msgs.msg import Bool, Float64MultiArray, String
 HIP_INDEX = 0
 KNEE_INDEX = 1
 
+#Value interpolation additions
+T_CHANGE = 2.0 # secs
+RAMP_UPDATE_PERIOD = 0.02 # secs so 50 Hz
+
 
 def make_array_msg(values: List[float]) -> Float64MultiArray:
     msg = Float64MultiArray()
@@ -57,6 +61,7 @@ class LegwheelControllerNode(Node):
         self._stop_event = threading.Event()
         self._startup_publish_count = 0
         self._startup_enable_published = False
+        self._active_ramps = {}
 
         self.motor_status_pub = self.create_publisher(
             Bool, "/legwheel/motor_status", 10
@@ -78,12 +83,75 @@ class LegwheelControllerNode(Node):
         )
 
         self.startup_timer = self.create_timer(0.5, self._publish_startup_commands)
+        self.ramp_timer = self.create_timer(RAMP_UPDATE_PERIOD, self._update_ramps)
 
         self.get_logger().info(
             "Legwheel controller ready. Type commands followed by Enter. Type 'help' for commands."
         )
         self._input_thread = threading.Thread(target=self._input_loop, daemon=True)
         self._input_thread.start()
+
+    def _now_seconds(self) -> float:
+        return self.get_clock().now().nanoseconds * 1e-9 #This gives current ROS time in seconds
+
+    def _start_array_ramp(
+        self,
+        name: str,
+        current_values: List[float],
+        joint_index: int,
+        target_value: float,
+        publisher,
+    ) -> None:
+        now = self._now_seconds()
+
+        start_values = list(current_values)
+        target_values = list(current_values)
+        target_values[joint_index] = target_value
+
+        self._active_ramps[name] = {
+            "start_time": now,
+            "duration": T_CHANGE,
+            "start_values": start_values,
+            "target_values": target_values,
+            "current_values": current_values,
+            "publisher": publisher,
+        }
+
+    def _update_ramps(self) -> None:
+        with self._lock:
+            if not self._active_ramps:
+                return
+
+            now = self._now_seconds()
+            finished_ramps = []
+
+            for name, ramp in self._active_ramps.items():
+                elapsed = now - ramp["start_time"]
+                duration = ramp["duration"]
+
+                if duration <= 0.0:
+                    alpha = 1.0
+                else:
+                    alpha = elapsed / duration
+
+                alpha = max(0.0, min(1.0, alpha))
+
+                start_values = ramp["start_values"]
+                target_values = ramp["target_values"]
+                current_values = ramp["current_values"]
+
+                for i in range(len(current_values)):
+                    current_values[i] = start_values[i] + alpha * (
+                        target_values[i] - start_values[i]
+                    )
+
+                ramp["publisher"].publish(make_array_msg(current_values))
+
+                if alpha >= 1.0:
+                    finished_ramps.append(name)
+
+            for name in finished_ramps:
+                del self._active_ramps[name]
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -250,29 +318,47 @@ class LegwheelControllerNode(Node):
 
     def _set_spring_zero(self, joint_index: int, value: float) -> None:
         with self._lock:
-            self.spring_zero_position[joint_index] = value
-            self.spring_zero_pub.publish(make_array_msg(self.spring_zero_position))
+            self._start_array_ramp(
+                "spring_zero_position",
+                self.spring_zero_position,
+                joint_index,
+                value,
+                self.spring_zero_pub,
+            )
+
         self.get_logger().info(
-            "Published %s spring zero position %.4f rad."
-            % (self._joint_name(joint_index), value)
+            "Ramping %s spring zero position to %.4f rad over %.2f s."
+            % (self._joint_name(joint_index), value, T_CHANGE)
         )
 
     def _set_spring_constant(self, joint_index: int, value: float) -> None:
         with self._lock:
-            self.spring_constant[joint_index] = value
-            self.spring_constant_pub.publish(make_array_msg(self.spring_constant))
+            self._start_array_ramp(
+                "spring_constant",
+                self.spring_constant,
+                joint_index,
+                value,
+                self.spring_constant_pub,
+            )
+
         self.get_logger().info(
-            "Published %s spring constant %.4f Nm/rad."
-            % (self._joint_name(joint_index), value)
+            "Ramping %s spring constant to %.4f Nm/rad over %.2f s."
+            % (self._joint_name(joint_index), value, T_CHANGE)
         )
 
     def _set_damping_constant(self, joint_index: int, value: float) -> None:
         with self._lock:
-            self.damping_constant[joint_index] = value
-            self.damping_constant_pub.publish(make_array_msg(self.damping_constant))
+            self._start_array_ramp(
+                "damping_constant",
+                self.damping_constant,
+                joint_index,
+                value,
+                self.damping_constant_pub,
+            )
+
         self.get_logger().info(
-            "Published %s damping constant %.4f N/(rad/s)."
-            % (self._joint_name(joint_index), value)
+            "Ramping %s damping constant to %.4f N/(rad/s) over %.2f s."
+            % (self._joint_name(joint_index), value, T_CHANGE)
         )
 
     def _publish_all_command_arrays(self) -> None:

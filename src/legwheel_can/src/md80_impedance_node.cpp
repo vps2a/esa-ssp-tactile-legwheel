@@ -390,6 +390,25 @@ private:
       joint.id);
   }
 
+  bool configure_all_motors_for_fixed_1dof()
+  {
+    bool all_ok = true;
+
+    for (auto & joint : joints_) {
+      if (!joint.connected) {
+        continue;
+      }
+
+      configure_motor_for_fixed_1dof(joint);
+
+      if (!joint.control_mode_configured) {
+        all_ok = false;
+      }
+    }
+
+    return all_ok;
+  }
+
   void configure_motor_for_fixed_1dof(Joint & joint)
   {
     if (!joint.connected) {
@@ -705,20 +724,41 @@ private:
       return;
     }
 
-    motor_status_allows_enable_.store(true);
     if (!enable_control_requested_) {
       RCLCPP_WARN(
         get_logger(),
         "Received motor_status=true, but enable_control is false. Motors remain disabled.");
-    } else if (!limits_valid_) {
+      motor_status_allows_enable_.store(false);
+      return;
+    }
+
+    if (!limits_valid_) {
       RCLCPP_ERROR(
         get_logger(),
         "Received motor_status=true, but software limits are invalid. Motors remain disabled.");
-    } else {
-      RCLCPP_WARN(
-        get_logger(),
-        "Received motor_status=true. Connected motors may be enabled by the update loop.");
+      motor_status_allows_enable_.store(false);
+      return;
     }
+
+    {
+      std::lock_guard<std::mutex> lock(md_mutex_);
+
+      const bool configured_ok = configure_all_motors_for_fixed_1dof();
+      if (!configured_ok) {
+        RCLCPP_ERROR(
+          get_logger(),
+          "Received motor_status=true, but failed to configure one or more motor modes. "
+          "Motors remain disabled.");
+        motor_status_allows_enable_.store(false);
+        return;
+      }
+    }
+
+    motor_status_allows_enable_.store(true);
+
+    RCLCPP_WARN(
+      get_logger(),
+      "Received motor_status=true. Motor modes reconfigured; connected motors may now be enabled by the update loop.");
   }
 
   void handle_spring_zero_position(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
@@ -935,6 +975,7 @@ private:
           md_error_to_string(result).c_str());
       }
       joint.enabled = false;
+      joint.control_mode_configured = false; // so that I know I need to reconfigure the control mode if I re-enable the motor
       joint.knee_impedance_params_configured = false;
     }
   }
