@@ -3,11 +3,15 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <regex>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -153,9 +157,9 @@ private:
     bool control_mode_configured{false};
     bool enabled{false};
     bool knee_impedance_params_configured{false};
-    double spring_zero_rad{0.0};
-    double kp{1.0};
-    double kd{0.05};
+    double spring_zero_rad{std::numeric_limits<double>::quiet_NaN()};
+    double kp{std::numeric_limits<double>::quiet_NaN()};
+    double kd{std::numeric_limits<double>::quiet_NaN()};
     double last_position_rad{0.0};
     double last_velocity_rad_s{0.0};
     double last_effort_nm{0.0};
@@ -176,12 +180,11 @@ private:
     declare_parameter<double>("knee_velocity_max_rad_s", 1.0);
     declare_parameter<double>("knee_torque_max_nm", 2.0);
 
-    declare_parameter<double>("initial_spring_constant", 4.0);
-    declare_parameter<double>("initial_damping_constant", 0.05);
     declare_parameter<double>("max_spring_constant", 50.0);
     declare_parameter<double>("max_damping_constant", 5.0);
     declare_parameter<double>("hip_mirror_multiplier", -0.5);
     declare_parameter<std::string>("command_limit_policy", "reject");
+    declare_parameter<std::string>("motor_config_json_path", "");
 
     declare_parameter<bool>("enable_control", false);
     declare_parameter<double>("publish_rate_hz", 100.0);
@@ -218,13 +221,7 @@ private:
     max_damping_constant_ = get_parameter("max_damping_constant").as_double();
     hip_mirror_multiplier_ = get_parameter("hip_mirror_multiplier").as_double();
     command_limit_policy_ = get_parameter("command_limit_policy").as_string();
-
-    const double initial_kp = get_parameter("initial_spring_constant").as_double();
-    const double initial_kd = get_parameter("initial_damping_constant").as_double();
-    for (auto & joint : joints_) { // This sets the initial spring and damping constants for each joint
-      joint.kp = initial_kp;
-      joint.kd = initial_kd;
-    }
+    motor_config_json_path_ = get_parameter("motor_config_json_path").as_string();
 
     if (publish_rate_hz_ <= 0.0 || !is_finite(publish_rate_hz_)) {
       throw std::runtime_error("publish_rate_hz must be finite and positive.");
@@ -236,11 +233,95 @@ private:
       throw std::runtime_error("hip_mirror_multiplier must be finite.");
     }
 
+    load_motor_config_json();
+    validate_motor_config();
+
     RCLCPP_INFO( // This prints out data into the INFO-level logs
       get_logger(),
       "Expected MD80 IDs: hip=%d, knee=%d",
       joints_[kHipIndex].id,
       joints_[kKneeIndex].id);
+  }
+
+  void load_motor_config_json()
+  {
+    if (motor_config_json_path_.empty()) {
+      throw std::runtime_error(
+        "motor_config_json_path is empty. md80_impedance_node requires config/motor_config.json.");
+    }
+
+    std::ifstream config_file(motor_config_json_path_);
+    if (!config_file.is_open()) {
+      throw std::runtime_error(
+        "Could not open motor config JSON: " + motor_config_json_path_);
+    }
+
+    std::stringstream buffer;
+    buffer << config_file.rdbuf();
+    const std::string contents = buffer.str();
+
+    shutdown_to_startup_deviation_tolerance_ = require_json_number(
+      contents,
+      "shutdown_to_startup_deviation_tolerance");
+
+    joints_[kHipIndex].spring_zero_rad = require_json_number(
+      contents,
+      "initial_hip_zero_position_rad");
+    joints_[kKneeIndex].spring_zero_rad = require_json_number(
+      contents,
+      "initial_knee_zero_position_rad");
+    joints_[kHipIndex].kp = require_json_number(
+      contents,
+      "initial_hip_spring_constant");
+    joints_[kKneeIndex].kp = require_json_number(
+      contents,
+      "initial_knee_spring_constant");
+    joints_[kHipIndex].kd = require_json_number(
+      contents,
+      "initial_hip_damping_constant");
+    joints_[kKneeIndex].kd = require_json_number(
+      contents,
+      "initial_knee_damping_constant");
+
+    RCLCPP_INFO(
+      get_logger(),
+      "Loaded motor config from %s: tolerance=%.4f rad, hip_zero=%.4f rad, "
+      "knee_zero=%.4f rad, hip_kp=%.4f, knee_kp=%.4f, hip_kd=%.4f, knee_kd=%.4f.",
+      motor_config_json_path_.c_str(),
+      shutdown_to_startup_deviation_tolerance_,
+      joints_[kHipIndex].spring_zero_rad,
+      joints_[kKneeIndex].spring_zero_rad,
+      joints_[kHipIndex].kp,
+      joints_[kKneeIndex].kp,
+      joints_[kHipIndex].kd,
+      joints_[kKneeIndex].kd);
+  }
+
+  double require_json_number(const std::string & contents, const std::string & key) const
+  {
+    const std::string number_regex =
+      R"regex(([-+]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][-+]?[0-9]+)?))regex";
+    const std::regex pattern("\"" + key + R"regex("\s*:\s*)regex" + number_regex);
+    std::smatch match;
+    if (!std::regex_search(contents, match, pattern)) {
+      throw std::runtime_error("motor_config.json is missing numeric key: " + key);
+    }
+
+    const double value = std::stod(match[1].str());
+    if (!is_finite(value)) {
+      throw std::runtime_error("motor_config.json key is not finite: " + key);
+    }
+    return value;
+  }
+
+  void validate_motor_config() const
+  {
+    if (!is_finite(shutdown_to_startup_deviation_tolerance_) ||
+      shutdown_to_startup_deviation_tolerance_ <= 0.0)
+    {
+      throw std::runtime_error(
+        "shutdown_to_startup_deviation_tolerance must be finite and positive.");
+    }
   }
 
   void validate_limits()
@@ -290,12 +371,35 @@ private:
           joint.label.c_str());
         limits_valid_ = false;
       }
+      if (!is_finite(joint.spring_zero_rad) ||
+        joint.spring_zero_rad < limits.position_min_rad ||
+        joint.spring_zero_rad > limits.position_max_rad)
+      {
+        RCLCPP_ERROR(
+          get_logger(),
+          "%s initial zero position %.4f rad is outside software limits [%.4f, %.4f].",
+          joint.label.c_str(),
+          joint.spring_zero_rad,
+          limits.position_min_rad,
+          limits.position_max_rad);
+        limits_valid_ = false;
+      }
       if (joint.kp < 0.0 || joint.kp > max_spring_constant_ || !is_finite(joint.kp)) {
-        RCLCPP_ERROR(get_logger(), "initial_spring_constant is invalid.");
+        RCLCPP_ERROR(
+          get_logger(),
+          "%s initial spring constant %.4f is invalid. Expected finite value in [0, %.4f].",
+          joint.label.c_str(),
+          joint.kp,
+          max_spring_constant_);
         limits_valid_ = false;
       }
       if (joint.kd < 0.0 || joint.kd > max_damping_constant_ || !is_finite(joint.kd)) {
-        RCLCPP_ERROR(get_logger(), "initial_damping_constant is invalid.");
+        RCLCPP_ERROR(
+          get_logger(),
+          "%s initial damping constant %.4f is invalid. Expected finite value in [0, %.4f].",
+          joint.label.c_str(),
+          joint.kd,
+          max_damping_constant_);
         limits_valid_ = false;
       }
     }
@@ -721,6 +825,7 @@ private:
       RCLCPP_ERROR(get_logger(), "Received motor_status=false. Disabling motors immediately.");
       motor_status_allows_enable_.store(false);
       disable_all_motors();
+      save_motor_positions_on_shutdown();
       return;
     }
 
@@ -743,6 +848,16 @@ private:
     {
       std::lock_guard<std::mutex> lock(md_mutex_);
 
+      read_connected_motors();
+      if (!startup_positions_within_shutdown_tolerance()) {
+        RCLCPP_WARN(
+          get_logger(),
+          "Received motor_status=true, but encoder positions moved too far from the saved "
+          "shutdown pose. Motors remain disabled.");
+        motor_status_allows_enable_.store(false);
+        return;
+      }
+
       const bool configured_ok = configure_all_motors_for_fixed_1dof();
       if (!configured_ok) {
         RCLCPP_ERROR(
@@ -759,6 +874,71 @@ private:
     RCLCPP_WARN(
       get_logger(),
       "Received motor_status=true. Motor modes reconfigured; connected motors may now be enabled by the update loop.");
+  }
+
+  void save_motor_positions_on_shutdown()
+  {
+    std::lock_guard<std::mutex> lock(md_mutex_);
+
+    // The motors are already disabled before this is called. Take a fresh encoder
+    // read where possible, then save the values used as the next enable reference.
+    read_connected_motors();
+    for (std::size_t i = 0; i < joints_.size(); ++i) {
+      const auto & joint = joints_[i];
+      if (!joint.connected) {
+        continue;
+      }
+      motor_position_on_shutdown_[i] = joint.last_position_rad;
+      RCLCPP_INFO(
+        get_logger(),
+        "Saved %s motor_position_on_shutdown=%.4f rad.",
+        joint.label.c_str(),
+        motor_position_on_shutdown_[i]);
+    }
+  }
+
+  bool startup_positions_within_shutdown_tolerance() const
+  {
+    bool all_within_tolerance = true;
+
+    for (std::size_t i = 0; i < joints_.size(); ++i) {
+      const auto & joint = joints_[i];
+      if (!joint.connected) {
+        continue;
+      }
+
+      const double expected = motor_position_on_shutdown_[i];
+      const double actual = joint.last_position_rad;
+      const double deviation = actual - expected;
+      const double abs_deviation = std::abs(deviation);
+      const bool within_tolerance =
+        abs_deviation <= shutdown_to_startup_deviation_tolerance_;
+
+      if (within_tolerance) {
+        RCLCPP_INFO(
+          get_logger(),
+          "%s startup position check: expected=%.4f rad, actual=%.4f rad, "
+          "deviation=%.4f rad, tolerance=%.4f rad.",
+          joint.label.c_str(),
+          expected,
+          actual,
+          deviation,
+          shutdown_to_startup_deviation_tolerance_);
+      } else {
+        all_within_tolerance = false;
+        RCLCPP_WARN(
+          get_logger(),
+          "%s startup position check failed: expected=%.4f rad, actual=%.4f rad, "
+          "deviation=%.4f rad, tolerance=%.4f rad.",
+          joint.label.c_str(),
+          expected,
+          actual,
+          deviation,
+          shutdown_to_startup_deviation_tolerance_);
+      }
+    }
+
+    return all_within_tolerance;
   }
 
   void handle_spring_zero_position(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
@@ -1021,6 +1201,9 @@ private:
   double max_damping_constant_{5.0};
   double hip_mirror_multiplier_{-0.5};
   std::string command_limit_policy_{"reject"};
+  std::string motor_config_json_path_;
+  double shutdown_to_startup_deviation_tolerance_{std::numeric_limits<double>::quiet_NaN()};
+  std::array<double, 2> motor_position_on_shutdown_{0.0, 0.0};
 
   mutable std::mutex md_mutex_;
 

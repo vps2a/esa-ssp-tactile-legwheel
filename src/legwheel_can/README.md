@@ -23,6 +23,8 @@ expected motors. Missing motors are logged and skipped.
 
 - `config/motor_ids.yaml`: maps logical hip/knee joints to MD80 CAN IDs.
 - `config/motor_limits.yaml`: software position, velocity, and torque limits.
+- `config/motor_config.json`: startup zero/gain defaults and runtime safety
+  settings that are not ROS YAML parameters.
 - `src/md80_zero_node.cpp`: passive calibration and zeroing node.
 - `src/md80_impedance_node.cpp`: impedance/read-only runtime node.
 - `scripts/legwheel_controller_node.py`: terminal command node for publishing
@@ -57,14 +59,24 @@ commands a motor:
 3. `limits_provided` must be `true` and all software limits must validate.
 
 If `/legwheel/motor_status` publishes `false`, the node immediately drops the
-enable gate and calls `md.disable()` on every connected motor. No new targets are
-sent while the gate is false.
+enable gate and calls `md.disable()` on every connected motor. It then refreshes
+encoder readings and saves them as `motor_position_on_shutdown`. No new targets
+are sent while the gate is false.
+
+When `/legwheel/motor_status` later publishes `true`, the node refreshes encoder
+positions and compares each connected motor against the saved shutdown position.
+If any connected motor moved by more than
+`shutdown_to_startup_deviation_tolerance`, the node logs the expected position,
+actual position, and deviation, then refuses to enable the motors. The default
+saved shutdown positions are `0.0` rad for both hip and knee.
 
 Runtime control is fixed in 1DOF mode:
 
-- Knee is configured once on initialization as MD80 `IMPEDANCE`.
-- Hip is configured once on initialization as MD80 `POSITION_PID`.
-- The runtime loop does not change MD80 motion modes after initialization.
+- Knee is configured as MD80 `IMPEDANCE` during initialization and before
+  re-enable after a stop.
+- Hip is configured as MD80 `POSITION_PID` during initialization and before
+  re-enable after a stop.
+- The command loop does not switch MD80 motion modes while sending targets.
 - Knee remains a tunable spring/damper system.
 - Hip mirrors knee encoder position with
   `hip_target = hip_mirror_multiplier * knee_position`; the default multiplier
@@ -301,6 +313,29 @@ valid:
 - position min is less than position max,
 - velocity limit is positive,
 - torque limit is positive.
+
+### Motor Runtime Config
+
+Configured in `config/motor_config.json`:
+
+```json
+{
+  "shutdown_to_startup_deviation_tolerance": 0.1,
+
+  "initial_hip_zero_position_rad": 0.0,
+  "initial_knee_zero_position_rad": 0.0,
+
+  "initial_hip_spring_constant": 4.0,
+  "initial_knee_spring_constant": 4.0,
+
+  "initial_hip_damping_constant": 0.05,
+  "initial_knee_damping_constant": 0.05
+}
+```
+
+The tolerance and zero positions are in radians. The spring constants are in
+Nm/rad, and damping constants are in N/(rad/s). The impedance node reads these
+values on startup and refuses control if they are missing or invalid.
 
 ## Build
 

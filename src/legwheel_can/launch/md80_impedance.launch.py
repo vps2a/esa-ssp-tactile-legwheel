@@ -12,6 +12,9 @@ def generate_launch_description():
     motor_limits = PathJoinSubstitution(
         [FindPackageShare("legwheel_can"), "config", "motor_limits.yaml"]
     )
+    motor_config = PathJoinSubstitution(
+        [FindPackageShare("legwheel_can"), "config", "motor_config.json"]
+    )
 
     enable_control = LaunchConfiguration("enable_control")
 
@@ -30,6 +33,7 @@ def generate_launch_description():
                 parameters=[
                     motor_ids,
                     motor_limits,
+                    {"motor_config_json_path": motor_config},
                     {"enable_control": enable_control},
                 ],
             ),
