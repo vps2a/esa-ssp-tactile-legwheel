@@ -1,0 +1,17 @@
+legwheel_can:
+  ros__parameters:
+    # Set true only after these software limits have been reviewed for the real mechanism.
+    # Firmware-level limits should still be configured separately with candletool.
+    limits_provided: true
+
+    # Conservative placeholder position limits around the calibrated zero position.
+    hip_position_min_rad: -1.0
+    hip_position_max_rad: 1.0
+    hip_velocity_max_rad_s: 1.0
+    hip_torque_max_nm: 20.0
+
+    knee_position_min_rad: -1.0
+    knee_position_max_rad: 1.0
+    
+    knee_velocity_max_rad_s: 1.0
+    knee_torque_max_nm: 20.0

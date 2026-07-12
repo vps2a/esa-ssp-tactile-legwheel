@@ -1,0 +1,58 @@
+[motor]
+name = AK60_39
+pole pairs = 14
+torque constant = 0.119000
+torque constant a = 0.000000
+torque constant b = 0.000000
+torque constant c = 0.000000
+max current = 10.000000
+gear ratio = 0.025641
+torque bandwidth = 500
+dynamic friction = 0.000000
+static friction = 0.000000
+kv = 80
+calibration mode = FULL
+reverse direction = 0
+shutdown temp = 80
+
+[output encoder]
+output encoder = NONE
+output encoder default baud = 0
+output encoder mode = NONE
+output encoder calibration mode = FULL
+
+[position pid]
+kp = 20.000000
+ki = 0.100000
+kd = 0.000000
+windup = 10.000000
+
+[velocity pid]
+kp = 25.000000
+ki = 10.000000
+kd = 0.000000
+windup = 3.000000
+
+[impedance pd]
+kp = 50.000000
+kd = 5.000000
+
+[limits]
+max position = 340282346638528859811704183484516925440.000000
+min position = -340282346638528859811704183484516925440.000000
+max torque = 72.000000
+max velocity = 10.000000
+max acceleration = 100.000000
+max deceleration = 100.000000
+
+[profile]
+velocity = 10.000000
+acceleration = 10.000000
+deceleration = 10.000000
+quick stop deceleration = 100.000000
+
+[gpio]
+mode = OFF
+
+[hardware]
+shunt resistance = 0.001000

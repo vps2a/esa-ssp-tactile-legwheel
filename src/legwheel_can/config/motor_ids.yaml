@@ -1,0 +1,4 @@
+legwheel_can:
+  ros__parameters:
+    hip_motor_id: 461
+    knee_motor_id: 923
