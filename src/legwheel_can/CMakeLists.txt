@@ -73,6 +73,12 @@ install(PROGRAMS
   RENAME legwheel_controller_node
 )
 
+install(PROGRAMS
+  scripts/wheel_controller_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME wheel_controller_node
+)
+
 install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME}
 )

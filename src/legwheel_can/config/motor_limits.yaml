@@ -15,3 +15,8 @@ legwheel_can:
     
     knee_velocity_max_rad_s: 1.0
     knee_torque_max_nm: 20.0
+
+    # Wheel velocity control limits. The impedance node clamps /wheel/requested_speed
+    # to this velocity limit before commanding the MD80.
+    wheel_velocity_max_rad_s: 2.0
+    wheel_torque_max_nm: 2.0

@@ -1,13 +1,16 @@
 # legwheel_can
 
-ROS 2 Jazzy C++ package for communicating with two MAB Robotics MD80 motor
+ROS 2 Jazzy C++ package for communicating with MAB Robotics MD80 motor
 controllers through the MAB CANdle-SDK. The package is arranged around a
 safety-first split:
 
 - `md80_zero_node` is for passive encoder observation and zeroing.
-- `md80_impedance_node` is for read-only monitoring or gated fixed-1DOF control.
+- `md80_impedance_node` is for read-only monitoring, gated fixed-1DOF leg
+  control, and wheel velocity control on the same CAN bus.
 - `legwheel_controller_node` is a Python terminal command publisher for
   knee impedance targets, gains, and motor enable/stop status.
+- `wheel_controller_node` is a Python keyboard controller for publishing wheel
+  velocity requests.
 
 The default logical joints are:
 
@@ -15,9 +18,10 @@ The default logical joints are:
 | --- | --- | --- |
 | `hip_joint` | `hip_motor_id` | `461` |
 | `knee_joint` | `knee_motor_id` | `923` |
+| `wheel_joint` | `wheel_motor_id` | `0` placeholder |
 
-Both nodes tolerate partial hardware: hip only, knee only, both motors, or no
-expected motors. Missing motors are logged and skipped.
+The runtime node tolerates partial hardware. Missing motors are logged and
+skipped. Set `wheel_motor_id` to the real MD80 ID before using wheel control.
 
 ## Files Added Or Updated
 
@@ -29,10 +33,14 @@ expected motors. Missing motors are logged and skipped.
 - `src/md80_impedance_node.cpp`: impedance/read-only runtime node.
 - `scripts/legwheel_controller_node.py`: terminal command node for publishing
   knee impedance commands and motor enable/stop status.
+- `scripts/wheel_controller_node.py`: keyboard command node for publishing wheel
+  speed requests.
 - `launch/md80_zero.launch.py`: launches the zeroing node with motor IDs.
 - `launch/md80_impedance.launch.py`: launches the impedance node with motor IDs
   and software limits.
 - `launch/launch_controller.launch.py`: launches only the Python controller node
+  for use in a separate terminal.
+- `launch/wheel_controller.launch.py`: launches only the Python wheel controller
   for use in a separate terminal.
 - `CMakeLists.txt` and `package.xml`: build all package executables, link
   CANdle-SDK where needed, install launch/config files, and declare ROS
@@ -89,6 +97,10 @@ Runtime control is fixed in 1DOF mode:
   is `-0.5`.
 - Hip zero/gain commands are ignored by the C++ node and rejected by the
   controller.
+- Wheel is configured as MD80 `VELOCITY_PID`. `/wheel/requested_speed` is
+  clamped to `wheel_velocity_max_rad_s` and rate-limited in the C++ node before
+  it is sent to the MD80. The wheel also uses `wheel_torque_max_nm` as its MD80
+  maximum torque.
 
 Default launch behavior is read-only. Motors do not power on just because the
 impedance node starts.
@@ -101,7 +113,8 @@ Both nodes:
 
 1. Attach to CANdle over USB at 1 Mbps.
 2. Discover MD80 controllers through CANdle-SDK.
-3. Compare discovered IDs against `hip_motor_id` and `knee_motor_id`.
+3. Compare discovered IDs against `hip_motor_id`, `knee_motor_id`, and
+   `wheel_motor_id`.
 4. Initialize only the expected controllers that are present.
 5. Publish joint state only for connected joints.
 
@@ -109,6 +122,7 @@ The logical joint mapping is fixed in code:
 
 - `hip_motor_id` -> `hip_joint`
 - `knee_motor_id` -> `knee_joint`
+- `wheel_motor_id` -> `wheel_joint`
 
 ### Zeroing Node
 
@@ -146,7 +160,8 @@ Publishes:
 
 | Topic | Type | Purpose |
 | --- | --- | --- |
-| `/legwheel/joint_states` | `sensor_msgs/msg/JointState` | Encoder state for connected motors |
+| `/legwheel/joint_states` | `sensor_msgs/msg/JointState` | Encoder state for connected hip/knee motors |
+| `/wheel/wheel_state` | `sensor_msgs/msg/JointState` | Wheel encoder position, velocity, and torque estimate |
 
 Subscribes:
 
@@ -156,6 +171,7 @@ Subscribes:
 | `/legwheel/spring_zero_position` | `std_msgs/msg/Float64MultiArray` | `[hip_zero_rad, knee_zero_rad]` impedance equilibrium |
 | `/legwheel/spring_constant` | `std_msgs/msg/Float64MultiArray` | `[hip_kp, knee_kp]` live impedance stiffness |
 | `/legwheel/damping_constant` | `std_msgs/msg/Float64MultiArray` | `[hip_kd, knee_kd]` live impedance damping |
+| `/wheel/requested_speed` | `std_msgs/msg/Float64` | Requested wheel speed in rad/s |
 
 The arrays keep two entries for compatibility with existing controller messages.
 In fixed 1DOF control, only the knee entry is applied for zero/spring/damping.
@@ -173,7 +189,8 @@ Control loop:
    - enable connected motors if not already enabled,
    - command knee zero target velocity, zero feed-forward torque, and target
      position,
-   - command hip position to mirror the latest knee encoder position.
+   - command hip position to mirror the latest knee encoder position,
+   - rate-limit and command wheel velocity if the wheel is connected.
 4. If the control gate is closed, do not send target commands.
 
 Hip mirror target:
@@ -261,6 +278,27 @@ damping_constant: [0.05, 0.05]
 It does not enable motors on startup unless launched with
 `auto_enable:=true`.
 
+### Wheel Controller Node
+
+Executable:
+
+```bash
+wheel_controller_node
+```
+
+The wheel controller reads keyboard input and publishes `std_msgs/msg/Float64`
+commands to `/wheel/requested_speed`. Hold `w` for forward wheel motion and `s`
+for reverse. Releasing the key ramps the command back to zero over
+`wheel_speed_rampup_time`. Terminal key release is inferred from key-repeat
+timeout, so keep the controller terminal focused while driving.
+
+| Key | Effect |
+| --- | --- |
+| `w` | Ramp toward `+max_speed` |
+| `s` | Ramp toward `-max_speed` |
+| `+` | Increase `max_speed` by `0.1` rad/s, up to the controller limit |
+| `-` | Decrease `max_speed` by `0.1` rad/s |
+
 ### Launch Files
 
 `md80_impedance.launch.py` starts only the impedance node.
@@ -276,6 +314,12 @@ It does not enable motors on startup unless launched with
 | `auto_enable` | `false` | Makes the controller publish `/legwheel/motor_status=true` on startup |
 | `publish_initial_commands` | `true` | Publishes initial zero, spring, and damping arrays on startup |
 
+`wheel_controller.launch.py` starts only the Python wheel controller node.
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `speed_limit_rad_s` | `2.0` | Controller-side max-speed clamp, matching the default wheel YAML limit |
+
 For normal testing, keep `auto_enable` false and type `e` only after the
 mechanism is ready.
 
@@ -290,7 +334,11 @@ legwheel_can:
   ros__parameters:
     hip_motor_id: 461
     knee_motor_id: 923
+    wheel_motor_id: 0
 ```
+
+`wheel_motor_id` is a placeholder by default. Set it to the real MD80 ID before
+running wheel velocity control.
 
 ### Software Limits
 
@@ -310,6 +358,9 @@ legwheel_can:
     knee_position_max_rad: 0.5
     knee_velocity_max_rad_s: 1.0
     knee_torque_max_nm: 2.0
+
+    wheel_velocity_max_rad_s: 2.0
+    wheel_torque_max_nm: 2.0
 ```
 
 The impedance node refuses to enable control unless all limits are finite and
@@ -327,6 +378,8 @@ Configured in `config/motor_config.json`:
 ```json
 {
   "shutdown_to_startup_deviation_tolerance": 0.1,
+  "wheel_speed_rampup_time": 1.0,
+  "default_max_speed": 0.5,
 
   "initial_hip_zero_position_rad": 0.0,
   "initial_knee_zero_position_rad": 0.0,
@@ -339,9 +392,10 @@ Configured in `config/motor_config.json`:
 }
 ```
 
-The tolerance and zero positions are in radians. The spring constants are in
-Nm/rad, and damping constants are in N/(rad/s). The impedance node reads these
-values on startup and refuses control if they are missing or invalid.
+The tolerance and zero positions are in radians. Wheel speeds are in rad/s and
+the wheel ramp time is in seconds. The spring constants are in Nm/rad, and
+damping constants are in N/(rad/s). The impedance node reads these values on
+startup and refuses control if they are missing or invalid.
 
 ## Build
 
@@ -452,6 +506,38 @@ If the launch terminal does not forward input to the controller, use:
 ```bash
 ros2 topic pub --once /legwheel/controller_command std_msgs/msg/String "{data: 'e'}"
 ros2 topic pub --once /legwheel/controller_command std_msgs/msg/String "{data: 's'}"
+```
+
+### 4. Wheel Velocity Control
+
+Set `wheel_motor_id` in `config/motor_ids.yaml`, then launch the impedance node
+with control armed and enable motors through the legwheel controller:
+
+```bash
+ros2 launch legwheel_can md80_impedance.launch.py enable_control:=true
+ros2 launch legwheel_can launch_controller.launch.py
+```
+
+In the legwheel controller terminal, type:
+
+```bash
+e
+```
+
+In a separate terminal, launch the wheel keyboard controller:
+
+```bash
+ros2 launch legwheel_can wheel_controller.launch.py
+```
+
+Keep that terminal focused. Hold `w` to ramp forward, hold `s` to ramp backward,
+and release the key to ramp back to zero. Use `+` and `-` to adjust the saved
+wheel max speed by `0.1` rad/s.
+
+Wheel state is published on:
+
+```bash
+ros2 topic echo /wheel/wheel_state
 ```
 
 ## Notes
