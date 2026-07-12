@@ -1510,6 +1510,10 @@ private:
   double shutdown_to_startup_deviation_tolerance_{std::numeric_limits<double>::quiet_NaN()};
   double wheel_speed_rampup_time_s_{std::numeric_limits<double>::quiet_NaN()};
   double wheel_default_max_speed_rad_s_{std::numeric_limits<double>::quiet_NaN()};
+  double wheel_velocity_pid_kp_{std::numeric_limits<double>::quiet_NaN()};
+  double wheel_velocity_pid_ki_{std::numeric_limits<double>::quiet_NaN()};
+  double wheel_velocity_pid_kd_{std::numeric_limits<double>::quiet_NaN()};
+  double wheel_velocity_pid_windup_{std::numeric_limits<double>::quiet_NaN()};
   double wheel_requested_speed_rad_s_{0.0};
   double wheel_commanded_speed_rad_s_{0.0};
   std::array<double, kTotalJointCount> motor_position_on_shutdown_{0.0, 0.0, 0.0};
