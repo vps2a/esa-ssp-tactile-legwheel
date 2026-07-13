@@ -19,6 +19,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/bool.hpp"
+#include "std_msgs/msg/float64.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 
 #include "MD.hpp"
@@ -28,6 +29,10 @@ namespace
 {
 constexpr std::size_t kHipIndex = 0;
 constexpr std::size_t kKneeIndex = 1;
+constexpr std::size_t kWheelIndex = 2;
+constexpr std::size_t kLegJointCount = 2;
+constexpr std::size_t kTotalJointCount = 3;
+constexpr double kWheelStopDeadbandNm = 1.0e-4;
 
 std::string md_error_to_string(const mab::MD::Error_t error)
 {
@@ -68,6 +73,8 @@ public:
 
     joint_state_pub_ = create_publisher<sensor_msgs::msg::JointState>(
       "/legwheel/joint_states", rclcpp::SensorDataQoS());
+    wheel_state_pub_ = create_publisher<sensor_msgs::msg::JointState>(
+      "/wheel/wheel_state", rclcpp::SensorDataQoS());
 
     status_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     command_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
@@ -96,6 +103,11 @@ public:
       "/legwheel/damping_constant",
       10,
       std::bind(&Md80ImpedanceNode::handle_damping_constant, this, std::placeholders::_1),
+      command_options);
+    wheel_requested_torque_sub_ = create_subscription<std_msgs::msg::Float64>(
+      "/wheel/requested_torque",
+      10,
+      std::bind(&Md80ImpedanceNode::handle_wheel_requested_torque, this, std::placeholders::_1),
       command_options);
 
     connect_to_candle();
@@ -154,6 +166,7 @@ private:
     JointLimits limits;
     std::unique_ptr<mab::MD> md;
     bool connected{false};
+    bool has_position_limits{true};
     bool control_mode_configured{false};
     bool enabled{false};
     bool knee_impedance_params_configured{false};
@@ -169,6 +182,7 @@ private:
   {
     declare_parameter<int>("hip_motor_id", 461);
     declare_parameter<int>("knee_motor_id", 923);
+    declare_parameter<int>("wheel_motor_id", 0);
     declare_parameter<bool>("limits_provided", false);
 
     declare_parameter<double>("hip_position_min_rad", -0.5);
@@ -179,6 +193,8 @@ private:
     declare_parameter<double>("knee_position_max_rad", 0.5);
     declare_parameter<double>("knee_velocity_max_rad_s", 1.0);
     declare_parameter<double>("knee_torque_max_nm", 2.0);
+    declare_parameter<double>("wheel_velocity_max_rad_s", 2.0);
+    declare_parameter<double>("wheel_torque_max_nm", 8.0);
 
     declare_parameter<double>("max_spring_constant", 50.0);
     declare_parameter<double>("max_damping_constant", 5.0);
@@ -214,6 +230,14 @@ private:
       get_parameter("knee_velocity_max_rad_s").as_double();
     joints_[kKneeIndex].limits.torque_max_nm = get_parameter("knee_torque_max_nm").as_double();
 
+    joints_[kWheelIndex].label = "wheel";
+    joints_[kWheelIndex].joint_name = "wheel_joint";
+    joints_[kWheelIndex].id = get_parameter("wheel_motor_id").as_int();
+    joints_[kWheelIndex].has_position_limits = false;
+    joints_[kWheelIndex].limits.velocity_max_rad_s =
+      get_parameter("wheel_velocity_max_rad_s").as_double();
+    joints_[kWheelIndex].limits.torque_max_nm = get_parameter("wheel_torque_max_nm").as_double();
+
     limits_provided_ = get_parameter("limits_provided").as_bool();
     enable_control_requested_ = get_parameter("enable_control").as_bool();
     publish_rate_hz_ = get_parameter("publish_rate_hz").as_double();
@@ -241,6 +265,10 @@ private:
       "Expected MD80 IDs: hip=%d, knee=%d",
       joints_[kHipIndex].id,
       joints_[kKneeIndex].id);
+    RCLCPP_INFO(
+      get_logger(),
+      "Expected wheel MD80 ID: wheel=%d",
+      joints_[kWheelIndex].id);
   }
 
   void load_motor_config_json()
@@ -263,6 +291,12 @@ private:
     shutdown_to_startup_deviation_tolerance_ = require_json_number(
       contents,
       "shutdown_to_startup_deviation_tolerance");
+    wheel_torque_rampup_time_s_ = require_json_number(
+      contents,
+      "wheel_torque_rampup_time");
+    wheel_default_max_torque_nm_ = require_json_number(
+      contents,
+      "default_max_torque");
 
     joints_[kHipIndex].spring_zero_rad = require_json_number(
       contents,
@@ -285,10 +319,14 @@ private:
 
     RCLCPP_INFO(
       get_logger(),
-      "Loaded motor config from %s: tolerance=%.4f rad, hip_zero=%.4f rad, "
-      "knee_zero=%.4f rad, hip_kp=%.4f, knee_kp=%.4f, hip_kd=%.4f, knee_kd=%.4f.",
+      "Loaded motor config from %s: tolerance=%.4f rad, wheel_torque_ramp=%.4f s, "
+      "default_wheel_max_torque=%.4f Nm, "
+      "hip_zero=%.4f rad, knee_zero=%.4f rad, hip_kp=%.4f, knee_kp=%.4f, "
+      "hip_kd=%.4f, knee_kd=%.4f.",
       motor_config_json_path_.c_str(),
       shutdown_to_startup_deviation_tolerance_,
+      wheel_torque_rampup_time_s_,
+      wheel_default_max_torque_nm_,
       joints_[kHipIndex].spring_zero_rad,
       joints_[kKneeIndex].spring_zero_rad,
       joints_[kHipIndex].kp,
@@ -322,6 +360,12 @@ private:
       throw std::runtime_error(
         "shutdown_to_startup_deviation_tolerance must be finite and positive.");
     }
+    if (!is_finite(wheel_torque_rampup_time_s_) || wheel_torque_rampup_time_s_ <= 0.0) {
+      throw std::runtime_error("wheel_torque_rampup_time must be finite and positive.");
+    }
+    if (!is_finite(wheel_default_max_torque_nm_) || wheel_default_max_torque_nm_ <= 0.0) {
+      throw std::runtime_error("default_max_torque must be finite and positive.");
+    }
   }
 
   void validate_limits()
@@ -346,17 +390,6 @@ private:
 
     for (const auto & joint : joints_) {
       const auto & limits = joint.limits;
-      if (!is_finite(limits.position_min_rad) || !is_finite(limits.position_max_rad) ||
-        limits.position_min_rad >= limits.position_max_rad)
-      {
-        RCLCPP_ERROR(
-          get_logger(),
-          "%s position limits are invalid: min=%.3f max=%.3f",
-          joint.label.c_str(),
-          limits.position_min_rad,
-          limits.position_max_rad);
-        limits_valid_ = false;
-      }
       if (!is_finite(limits.velocity_max_rad_s) || limits.velocity_max_rad_s <= 0.0) {
         RCLCPP_ERROR(
           get_logger(),
@@ -369,6 +402,20 @@ private:
           get_logger(),
           "%s torque limit must be finite and positive.",
           joint.label.c_str());
+        limits_valid_ = false;
+      }
+      if (!joint.has_position_limits) {
+        continue;
+      }
+      if (!is_finite(limits.position_min_rad) || !is_finite(limits.position_max_rad) ||
+        limits.position_min_rad >= limits.position_max_rad)
+      {
+        RCLCPP_ERROR(
+          get_logger(),
+          "%s position limits are invalid: min=%.3f max=%.3f",
+          joint.label.c_str(),
+          limits.position_min_rad,
+          limits.position_max_rad);
         limits_valid_ = false;
       }
       if (!is_finite(joint.spring_zero_rad) ||
@@ -402,6 +449,15 @@ private:
           max_damping_constant_);
         limits_valid_ = false;
       }
+    }
+
+    if (wheel_default_max_torque_nm_ > joints_[kWheelIndex].limits.torque_max_nm) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "default_max_torque %.4f Nm exceeds wheel_torque_max_nm %.4f Nm.",
+        wheel_default_max_torque_nm_,
+        joints_[kWheelIndex].limits.torque_max_nm);
+      limits_valid_ = false;
     }
 
     if (limits_valid_) {
@@ -446,6 +502,15 @@ private:
 
   void connect_motor_if_available(Joint & joint)
   {
+    if (joint.id <= 0) {
+      RCLCPP_WARN(
+        get_logger(),
+        "%s motor ID is %d. Configure a positive MD80 ID to use this motor.",
+        joint.label.c_str(),
+        joint.id);
+      return;
+    }
+
     if (discovered_ids_.find(joint.id) == discovered_ids_.end()) {
       RCLCPP_WARN(
         get_logger(),
@@ -485,7 +550,7 @@ private:
     joint.enabled = false;
     joint.knee_impedance_params_configured = false;
 
-    configure_motor_for_fixed_1dof(joint);
+    configure_motor_for_runtime_control(joint);
 
     RCLCPP_INFO(
       get_logger(),
@@ -494,7 +559,7 @@ private:
       joint.id);
   }
 
-  bool configure_all_motors_for_fixed_1dof()
+  bool configure_all_motors_for_runtime_control()
   {
     bool all_ok = true;
 
@@ -503,7 +568,7 @@ private:
         continue;
       }
 
-      configure_motor_for_fixed_1dof(joint);
+      configure_motor_for_runtime_control(joint);
 
       if (!joint.control_mode_configured) {
         all_ok = false;
@@ -513,15 +578,15 @@ private:
     return all_ok;
   }
 
-  void configure_motor_for_fixed_1dof(Joint & joint)
+  void configure_motor_for_runtime_control(Joint & joint)
   {
     if (!joint.connected) {
       return;
     }
 
-    // Motion modes are intentionally set once, while the motors are still disabled.
-    // The runtime loop must not switch modes: knee is always impedance, hip is always
-    // position PID for the fixed 1DOF mirror behavior.
+    // Motion modes are configured while motors are disabled. The command loop does
+    // not switch modes while sending targets: knee is impedance, hip is position
+    // PID, and wheel is raw torque.
     if (joint.label == "hip") {
       if (check_md(
           joint,
@@ -550,6 +615,32 @@ private:
           joint.id);
       }
       joint.knee_impedance_params_configured = false;
+      return;
+    }
+
+    if (joint.label == "wheel") {
+      if (!check_md(joint, joint.md->setTargetTorque(0.0f), "set initial wheel torque")) {
+        return;
+      }
+      if (!check_md(
+          joint,
+          joint.md->setMotionMode(mab::MdMode_E::RAW_TORQUE),
+          "set raw torque mode"))
+      {
+        return;
+      }
+      if (!check_md(
+          joint,
+          joint.md->setMaxTorque(joint.limits.torque_max_nm),
+          "set max torque"))
+      {
+        return;
+      }
+      joint.control_mode_configured = true;
+      RCLCPP_INFO(
+        get_logger(),
+        "Configured wheel motor ID %d for RAW_TORQUE mode.",
+        joint.id);
     }
   }
 
@@ -562,15 +653,34 @@ private:
 
   void update()
   {
+    const double dt = update_dt_seconds();
+
     std::lock_guard<std::mutex> lock(md_mutex_);
     read_connected_motors();
     publish_joint_states();
+    publish_wheel_state();
 
     if (!control_may_run()) {
       return;
     }
 
     command_fixed_one_dof();
+    command_wheel_torque(dt);
+  }
+
+  double update_dt_seconds()
+  {
+    const auto current_time = now();
+    double dt = 1.0 / publish_rate_hz_;
+    if (last_update_time_.has_value()) {
+      dt = (current_time - last_update_time_.value()).seconds();
+    }
+    last_update_time_ = current_time;
+
+    if (!is_finite(dt) || dt <= 0.0) {
+      return 1.0 / publish_rate_hz_;
+    }
+    return std::clamp(dt, 0.0, 0.1);
   }
 
   void read_connected_motors()
@@ -612,12 +722,13 @@ private:
   {
     sensor_msgs::msg::JointState msg;
     msg.header.stamp = now();
-    msg.name.reserve(joints_.size());
-    msg.position.reserve(joints_.size());
-    msg.velocity.reserve(joints_.size());
-    msg.effort.reserve(joints_.size());
+    msg.name.reserve(kLegJointCount);
+    msg.position.reserve(kLegJointCount);
+    msg.velocity.reserve(kLegJointCount);
+    msg.effort.reserve(kLegJointCount);
 
-    for (const auto & joint : joints_) {
+    for (std::size_t i = 0; i < kLegJointCount; ++i) {
+      const auto & joint = joints_[i];
       if (!joint.connected) {
         continue;
       }
@@ -628,6 +739,22 @@ private:
     }
 
     joint_state_pub_->publish(msg);
+  }
+
+  void publish_wheel_state()
+  {
+    sensor_msgs::msg::JointState msg;
+    msg.header.stamp = now();
+
+    const auto & wheel = joints_[kWheelIndex];
+    if (wheel.connected) {
+      msg.name.push_back(wheel.joint_name);
+      msg.position.push_back(wheel.last_position_rad);
+      msg.velocity.push_back(wheel.last_velocity_rad_s);
+      msg.effort.push_back(wheel.last_effort_nm);
+    }
+
+    wheel_state_pub_->publish(msg);
   }
 
   bool control_may_run() const
@@ -804,6 +931,72 @@ private:
       "set position PID target");
   }
 
+  void command_wheel_torque(const double dt)
+  {
+    auto & wheel = joints_[kWheelIndex];
+    if (!wheel.connected) {
+      return;
+    }
+    if (!wheel.control_mode_configured) {
+      RCLCPP_ERROR_THROTTLE(
+        get_logger(),
+        *get_clock(),
+        2000,
+        "Wheel motor ID %d was not configured for RAW_TORQUE mode. Command skipped.",
+        wheel.id);
+      return;
+    }
+
+    const double target_torque = std::clamp(
+      wheel_requested_torque_nm_,
+      -wheel.limits.torque_max_nm,
+      wheel.limits.torque_max_nm);
+
+    // Rate limit the command inside the hardware node as a final guard against
+    // abrupt keyboard/controller messages causing torque jumps.
+    const double max_delta =
+      (wheel.limits.torque_max_nm / wheel_torque_rampup_time_s_) * dt;
+    const double delta = std::clamp(
+      target_torque - wheel_commanded_torque_nm_,
+      -max_delta,
+      max_delta);
+    wheel_commanded_torque_nm_ += delta;
+
+    if (std::abs(target_torque) < kWheelStopDeadbandNm &&
+      std::abs(wheel_commanded_torque_nm_) < kWheelStopDeadbandNm)
+    {
+      wheel_commanded_torque_nm_ = 0.0;
+    }
+
+    if (!wheel.enabled) {
+      if (std::abs(wheel_commanded_torque_nm_) < kWheelStopDeadbandNm) {
+        return;
+      }
+      if (!check_md(wheel, wheel.md->setTargetTorque(0.0f), "set initial wheel torque")) {
+        return;
+      }
+      if (!motor_status_allows_enable_.load()) {
+        return;
+      }
+      if (!check_md(wheel, wheel.md->enable(), "enable")) {
+        return;
+      }
+      wheel.enabled = true;
+      RCLCPP_WARN(
+        get_logger(),
+        "Wheel motor ID %d enabled in RAW_TORQUE control.",
+        wheel.id);
+    }
+
+    if (!motor_status_allows_enable_.load()) {
+      return;
+    }
+    check_md(
+      wheel,
+      wheel.md->setTargetTorque(static_cast<float>(wheel_commanded_torque_nm_)),
+      "set wheel target torque");
+  }
+
   bool check_md(const Joint & joint, const mab::MD::Error_t result, const std::string & action)
   {
     if (result == mab::MD::Error_t::OK) {
@@ -825,6 +1018,7 @@ private:
       RCLCPP_ERROR(get_logger(), "Received motor_status=false. Disabling motors immediately.");
       motor_status_allows_enable_.store(false);
       disable_all_motors();
+      reset_wheel_torque_command();
       if (startup_suppressed_by_shutdown_deviation_) {
         report_shutdown_position_save_blocked();
         return;
@@ -864,7 +1058,7 @@ private:
       }
       startup_suppressed_by_shutdown_deviation_ = false;
 
-      const bool configured_ok = configure_all_motors_for_fixed_1dof();
+      const bool configured_ok = configure_all_motors_for_runtime_control();
       if (!configured_ok) {
         RCLCPP_ERROR(
           get_logger(),
@@ -880,6 +1074,13 @@ private:
     RCLCPP_WARN(
       get_logger(),
       "Received motor_status=true. Motor modes reconfigured; connected motors may now be enabled by the update loop.");
+  }
+
+  void reset_wheel_torque_command()
+  {
+    std::lock_guard<std::mutex> lock(md_mutex_);
+    wheel_requested_torque_nm_ = 0.0;
+    wheel_commanded_torque_nm_ = 0.0;
   }
 
   void report_shutdown_position_save_blocked()
@@ -979,7 +1180,7 @@ private:
     }
 
     std::lock_guard<std::mutex> lock(md_mutex_);
-    for (std::size_t i = 0; i < joints_.size(); ++i) {
+    for (std::size_t i = 0; i < kLegJointCount; ++i) {
       auto & joint = joints_[i];
       if (!joint.connected) {
         continue;
@@ -1022,15 +1223,45 @@ private:
     update_gain_array(*msg, "damping constant", max_damping_constant_, false);
   }
 
+  void handle_wheel_requested_torque(const std_msgs::msg::Float64::SharedPtr msg)
+  {
+    if (!is_finite(msg->data)) {
+      RCLCPP_ERROR(get_logger(), "Rejecting non-finite /wheel/requested_torque command.");
+      return;
+    }
+
+    std::lock_guard<std::mutex> lock(md_mutex_);
+    const auto & wheel = joints_[kWheelIndex];
+    if (!is_finite(wheel.limits.torque_max_nm) || wheel.limits.torque_max_nm <= 0.0) {
+      RCLCPP_ERROR(get_logger(), "Rejecting wheel torque command because wheel torque limit is invalid.");
+      return;
+    }
+    const double clamped_torque = std::clamp(
+      msg->data,
+      -wheel.limits.torque_max_nm,
+      wheel.limits.torque_max_nm);
+
+    if (clamped_torque != msg->data) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Clamping requested wheel torque from %.4f Nm to %.4f Nm. Limit is %.4f Nm.",
+        msg->data,
+        clamped_torque,
+        wheel.limits.torque_max_nm);
+    }
+
+    wheel_requested_torque_nm_ = clamped_torque;
+  }
+
   bool validate_array_size(
     const std_msgs::msg::Float64MultiArray & msg,
     const std::string & topic_name) const
   {
-    if (msg.data.size() != joints_.size()) {
+    if (msg.data.size() != kLegJointCount) {
       RCLCPP_ERROR(
         get_logger(),
         "Expected %zu values on /legwheel/%s, got %zu.",
-        joints_.size(),
+        kLegJointCount,
         topic_name.c_str(),
         msg.data.size());
       return false;
@@ -1126,7 +1357,7 @@ private:
     const bool update_kp)
   {
     std::lock_guard<std::mutex> lock(md_mutex_);
-    for (std::size_t i = 0; i < joints_.size(); ++i) {
+    for (std::size_t i = 0; i < kLegJointCount; ++i) {
       auto & joint = joints_[i];
       if (!joint.connected) {
         continue;
@@ -1220,7 +1451,7 @@ private:
   }
 
   mab::Candle * candle_{nullptr};
-  std::array<Joint, 2> joints_;
+  std::array<Joint, kTotalJointCount> joints_;
   std::unordered_set<int> discovered_ids_;
 
   bool limits_provided_{false};
@@ -1235,17 +1466,24 @@ private:
   std::string command_limit_policy_{"reject"};
   std::string motor_config_json_path_;
   double shutdown_to_startup_deviation_tolerance_{std::numeric_limits<double>::quiet_NaN()};
-  std::array<double, 2> motor_position_on_shutdown_{0.0, 0.0};
+  double wheel_torque_rampup_time_s_{std::numeric_limits<double>::quiet_NaN()};
+  double wheel_default_max_torque_nm_{std::numeric_limits<double>::quiet_NaN()};
+  double wheel_requested_torque_nm_{0.0};
+  double wheel_commanded_torque_nm_{0.0};
+  std::array<double, kTotalJointCount> motor_position_on_shutdown_{0.0, 0.0, 0.0};
+  std::optional<rclcpp::Time> last_update_time_;
 
   mutable std::mutex md_mutex_;
 
   rclcpp::CallbackGroup::SharedPtr status_callback_group_;
   rclcpp::CallbackGroup::SharedPtr command_callback_group_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr wheel_state_pub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr motor_status_sub_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr spring_zero_sub_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr spring_constant_sub_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr damping_constant_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr wheel_requested_torque_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

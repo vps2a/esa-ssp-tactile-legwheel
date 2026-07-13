@@ -27,7 +27,7 @@ def generate_launch_description():
             ),
             Node(
                 package="legwheel_can",
-                executable="md80_impedance_node",
+                executable="md80_legwheel_node",
                 name="legwheel_can",
                 output="screen",
                 parameters=[

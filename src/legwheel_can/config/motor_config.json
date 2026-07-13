@@ -1,12 +1,14 @@
 {
   "shutdown_to_startup_deviation_tolerance": 0.1,
+  "wheel_torque_rampup_time": 0.4,
+  "default_max_torque": 2.0,
 
   "initial_hip_zero_position_rad": 0.0,
   "initial_knee_zero_position_rad": 0.0,
 
-  "initial_hip_spring_constant": 4.0,
-  "initial_knee_spring_constant": 4.0,
+  "initial_hip_spring_constant": 7.5,
+  "initial_knee_spring_constant": 7.5,
 
-  "initial_hip_damping_constant": 0.05,
-  "initial_knee_damping_constant": 0.05
+  "initial_hip_damping_constant": 1,
+  "initial_knee_damping_constant": 1
 }
