@@ -26,15 +26,15 @@ add_subdirectory(
   ${CMAKE_CURRENT_BINARY_DIR}/CANdle-SDK
 )
 
-add_executable(md80_impedance_node
-  src/md80_impedance_node.cpp
+add_executable(md80_legwheel_node
+  src/md80_legwheel_node.cpp
 )
 
 add_executable(md80_zero_node
   src/md80_zero_node.cpp
 )
 
-ament_target_dependencies(md80_impedance_node
+ament_target_dependencies(md80_legwheel_node
   rclcpp
   sensor_msgs
   std_msgs
@@ -48,7 +48,7 @@ ament_target_dependencies(md80_zero_node
   std_srvs
 )
 
-target_link_libraries(md80_impedance_node
+target_link_libraries(md80_legwheel_node
   candle
   Threads::Threads
 )
@@ -58,11 +58,11 @@ target_link_libraries(md80_zero_node
   Threads::Threads
 )
 
-target_compile_features(md80_impedance_node PUBLIC cxx_std_20)
+target_compile_features(md80_legwheel_node PUBLIC cxx_std_20)
 target_compile_features(md80_zero_node PUBLIC cxx_std_20)
 
 install(TARGETS
-  md80_impedance_node
+  md80_legwheel_node
   md80_zero_node
   DESTINATION lib/${PROJECT_NAME}
 )

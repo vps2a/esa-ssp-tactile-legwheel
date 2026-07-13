@@ -148,11 +148,11 @@ class WheelControllerNode(Node):
         now = time.monotonic()
         with self._lock:
             if character == "w":
-                self._direction = 1
+                self._direction = -1
                 self._last_drive_key_time = now
                 return
             if character == "s":
-                self._direction = -1
+                self._direction = 1
                 self._last_drive_key_time = now
                 return
             if character in ("+", "="):
