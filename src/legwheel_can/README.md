@@ -97,14 +97,9 @@ Runtime control is fixed in 1DOF mode:
   is `-0.5`.
 - Hip zero/gain commands are ignored by the C++ node and rejected by the
   controller.
-- Wheel is configured as MD80 `VELOCITY_PID`. `/wheel/requested_speed` is
-  clamped to `wheel_velocity_max_rad_s` and rate-limited in the C++ node before
-  it is sent to the MD80. The wheel also uses `wheel_torque_max_nm` as its MD80
-  maximum torque.
-- The wheel velocity PID gains are loaded from `motor_config.json` and written
-  through CANdle-SDK before the wheel motor is enabled. This avoids the common
-  failure mode where `setTargetVelocity()` succeeds but the motor does not move
-  because firmware/default velocity gains are zero.
+- Wheel is configured as MD80 `RAW_TORQUE`. `/wheel/requested_torque` is
+  clamped to `wheel_torque_max_nm` and rate-limited in the C++ node before it is
+  sent to the MD80.
 
 Default launch behavior is read-only. Motors do not power on just because the
 impedance node starts.
@@ -175,7 +170,7 @@ Subscribes:
 | `/legwheel/spring_zero_position` | `std_msgs/msg/Float64MultiArray` | `[hip_zero_rad, knee_zero_rad]` impedance equilibrium |
 | `/legwheel/spring_constant` | `std_msgs/msg/Float64MultiArray` | `[hip_kp, knee_kp]` live impedance stiffness |
 | `/legwheel/damping_constant` | `std_msgs/msg/Float64MultiArray` | `[hip_kd, knee_kd]` live impedance damping |
-| `/wheel/requested_speed` | `std_msgs/msg/Float64` | Requested wheel speed in rad/s |
+| `/wheel/requested_torque` | `std_msgs/msg/Float64` | Requested wheel torque in Nm |
 
 The arrays keep two entries for compatibility with existing controller messages.
 In fixed 1DOF control, only the knee entry is applied for zero/spring/damping.
@@ -291,17 +286,17 @@ wheel_controller_node
 ```
 
 The wheel controller reads keyboard input and publishes `std_msgs/msg/Float64`
-commands to `/wheel/requested_speed`. Hold `w` for forward wheel motion and `s`
-for reverse. Releasing the key ramps the command back to zero over
-`wheel_speed_rampup_time`. Terminal key release is inferred from key-repeat
+commands to `/wheel/requested_torque`. Hold `w` for positive wheel torque and
+`s` for negative wheel torque. Releasing the key ramps the command back to zero
+over `wheel_torque_rampup_time`. Terminal key release is inferred from key-repeat
 timeout, so keep the controller terminal focused while driving.
 
 | Key | Effect |
 | --- | --- |
-| `w` | Ramp toward `+max_speed` |
-| `s` | Ramp toward `-max_speed` |
-| `+` | Increase `max_speed` by `0.1` rad/s, up to the controller limit |
-| `-` | Decrease `max_speed` by `0.1` rad/s |
+| `w` | Ramp toward `+max_torque` |
+| `s` | Ramp toward `-max_torque` |
+| `+` | Increase `max_torque` by `0.1` Nm, up to the controller limit |
+| `-` | Decrease `max_torque` by `0.1` Nm |
 
 ### Launch Files
 
@@ -322,7 +317,7 @@ timeout, so keep the controller terminal focused while driving.
 
 | Argument | Default | Meaning |
 | --- | --- | --- |
-| `speed_limit_rad_s` | `2.0` | Controller-side max-speed clamp, matching the default wheel YAML limit |
+| `torque_limit_nm` | `8.0` | Controller-side max-torque clamp, matching the default wheel YAML limit |
 
 For normal testing, keep `auto_enable` false and type `e` only after the
 mechanism is ready.
@@ -364,7 +359,7 @@ legwheel_can:
     knee_torque_max_nm: 2.0
 
     wheel_velocity_max_rad_s: 2.0
-    wheel_torque_max_nm: 2.0
+    wheel_torque_max_nm: 8.0
 ```
 
 The impedance node refuses to enable control unless all limits are finite and
@@ -382,12 +377,8 @@ Configured in `config/motor_config.json`:
 ```json
 {
   "shutdown_to_startup_deviation_tolerance": 0.1,
-  "wheel_speed_rampup_time": 1.0,
-  "default_max_speed": 0.5,
-  "wheel_velocity_pid_kp": 0.05,
-  "wheel_velocity_pid_ki": 0.5,
-  "wheel_velocity_pid_kd": 0.0,
-  "wheel_velocity_pid_windup": 1.5,
+  "wheel_torque_rampup_time": 1.0,
+  "default_max_torque": 3.0,
 
   "initial_hip_zero_position_rad": 0.0,
   "initial_knee_zero_position_rad": 0.0,
@@ -400,11 +391,10 @@ Configured in `config/motor_config.json`:
 }
 ```
 
-The tolerance and zero positions are in radians. Wheel speeds are in rad/s and
-the wheel ramp time is in seconds. The wheel PID values are passed directly to
-CANdle-SDK `setVelocityPIDparam(kp, ki, kd, windup)`. The spring constants are in
-Nm/rad, and damping constants are in N/(rad/s). The impedance node reads these
-values on startup and refuses control if they are missing or invalid.
+The tolerance and zero positions are in radians. Wheel torque values are in Nm
+and the wheel ramp time is in seconds. The spring constants are in Nm/rad, and
+damping constants are in N/(rad/s). The impedance node reads these values on
+startup and refuses control if they are missing or invalid.
 
 ## Build
 

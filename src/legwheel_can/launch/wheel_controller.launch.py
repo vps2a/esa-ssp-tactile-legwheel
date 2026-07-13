@@ -10,14 +10,14 @@ def generate_launch_description():
         [FindPackageShare("legwheel_can"), "config", "motor_config.json"]
     )
 
-    speed_limit = LaunchConfiguration("speed_limit_rad_s")
+    torque_limit = LaunchConfiguration("torque_limit_nm")
 
     return LaunchDescription(
         [
             DeclareLaunchArgument(
-                "speed_limit_rad_s",
-                default_value="2.0",
-                description="Controller-side wheel speed clamp in rad/s.",
+                "torque_limit_nm",
+                default_value="8.0",
+                description="Controller-side wheel torque clamp in Nm.",
             ),
             Node(
                 package="legwheel_can",
@@ -27,7 +27,7 @@ def generate_launch_description():
                 emulate_tty=True,
                 parameters=[
                     {"motor_config_json_path": motor_config},
-                    {"speed_limit_rad_s": speed_limit},
+                    {"torque_limit_nm": torque_limit},
                 ],
             ),
         ]

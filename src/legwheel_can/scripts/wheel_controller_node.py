@@ -17,20 +17,20 @@ from std_msgs.msg import Float64
 
 
 class WheelControllerNode(Node):
-    """Keyboard velocity controller for the wheel motor."""
+    """Keyboard raw-torque controller for the wheel motor."""
 
     def __init__(self) -> None:
         super().__init__("wheel_controller_node")
 
         self.declare_parameter("motor_config_json_path", "")
         self.declare_parameter("publish_rate_hz", 50.0)
-        self.declare_parameter("speed_step_rad_s", 0.1)
-        self.declare_parameter("speed_limit_rad_s", 2.0)
+        self.declare_parameter("torque_step_nm", 0.1)
+        self.declare_parameter("torque_limit_nm", 8.0)
         self.declare_parameter("key_release_timeout_s", 0.4)
 
         self.publish_rate_hz = float(self.get_parameter("publish_rate_hz").value)
-        self.speed_step_rad_s = float(self.get_parameter("speed_step_rad_s").value)
-        self.speed_limit_rad_s = float(self.get_parameter("speed_limit_rad_s").value)
+        self.torque_step_nm = float(self.get_parameter("torque_step_nm").value)
+        self.torque_limit_nm = float(self.get_parameter("torque_limit_nm").value)
         self.key_release_timeout_s = float(
             self.get_parameter("key_release_timeout_s").value
         )
@@ -38,30 +38,30 @@ class WheelControllerNode(Node):
             self.get_parameter("motor_config_json_path").value
         )
 
-        self.ramp_time_s, self.max_speed_rad_s = self._load_motor_config()
+        self.ramp_time_s, self.max_torque_nm = self._load_motor_config()
         self._validate_parameters()
 
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._direction = 0
         self._last_drive_key_time: Optional[float] = None
-        self._current_speed_rad_s = 0.0
+        self._current_torque_nm = 0.0
         self._last_update_time = time.monotonic()
 
-        self.requested_speed_pub = self.create_publisher(
-            Float64, "/wheel/requested_speed", 10
+        self.requested_torque_pub = self.create_publisher(
+            Float64, "/wheel/requested_torque", 10
         )
         self.update_timer = self.create_timer(
-            1.0 / self.publish_rate_hz, self._update_requested_speed
+            1.0 / self.publish_rate_hz, self._update_requested_torque
         )
 
         self.get_logger().info(
             "Wheel controller ready: hold 'w' for forward, 's' for reverse, "
-            "'+'/'-' to adjust max speed."
+            "'+'/'-' to adjust max torque."
         )
         self.get_logger().info(
-            "Initial max_speed=%.3f rad/s, ramp_time=%.3f s."
-            % (self.max_speed_rad_s, self.ramp_time_s)
+            "Initial max_torque=%.3f Nm, ramp_time=%.3f s."
+            % (self.max_torque_nm, self.ramp_time_s)
         )
 
         self._input_thread = threading.Thread(target=self._input_loop, daemon=True)
@@ -69,7 +69,7 @@ class WheelControllerNode(Node):
 
     def stop(self) -> None:
         self._stop_event.set()
-        self._publish_speed(0.0)
+        self._publish_torque(0.0)
         if self._input_thread.is_alive():
             self._input_thread.join(timeout=1.0)
 
@@ -82,27 +82,27 @@ class WheelControllerNode(Node):
             config = json.load(config_file)
 
         return (
-            float(config["wheel_speed_rampup_time"]),
-            float(config["default_max_speed"]),
+            float(config["wheel_torque_rampup_time"]),
+            float(config["default_max_torque"]),
         )
 
     def _validate_parameters(self) -> None:
         values = [
             self.publish_rate_hz,
-            self.speed_step_rad_s,
-            self.speed_limit_rad_s,
+            self.torque_step_nm,
+            self.torque_limit_nm,
             self.key_release_timeout_s,
             self.ramp_time_s,
-            self.max_speed_rad_s,
+            self.max_torque_nm,
         ]
         if any(not math.isfinite(value) or value <= 0.0 for value in values):
             raise ValueError("Wheel controller numeric parameters must be finite and positive.")
-        if self.max_speed_rad_s > self.speed_limit_rad_s:
+        if self.max_torque_nm > self.torque_limit_nm:
             self.get_logger().warning(
-                "default_max_speed %.3f exceeds speed_limit %.3f; clamping."
-                % (self.max_speed_rad_s, self.speed_limit_rad_s)
+                "default_max_torque %.3f exceeds torque_limit %.3f; clamping."
+                % (self.max_torque_nm, self.torque_limit_nm)
             )
-            self.max_speed_rad_s = self.speed_limit_rad_s
+            self.max_torque_nm = self.torque_limit_nm
 
     def _input_loop(self) -> None:
         input_stream = self._open_command_input()
@@ -156,24 +156,24 @@ class WheelControllerNode(Node):
                 self._last_drive_key_time = now
                 return
             if character in ("+", "="):
-                self.max_speed_rad_s = min(
-                    self.speed_limit_rad_s,
-                    self.max_speed_rad_s + self.speed_step_rad_s,
+                self.max_torque_nm = min(
+                    self.torque_limit_nm,
+                    self.max_torque_nm + self.torque_step_nm,
                 )
                 self.get_logger().info(
-                    "Wheel max speed set to %.3f rad/s." % self.max_speed_rad_s
+                    "Wheel max torque set to %.3f Nm." % self.max_torque_nm
                 )
                 return
             if character == "-":
-                self.max_speed_rad_s = max(
+                self.max_torque_nm = max(
                     0.0,
-                    self.max_speed_rad_s - self.speed_step_rad_s,
+                    self.max_torque_nm - self.torque_step_nm,
                 )
                 self.get_logger().info(
-                    "Wheel max speed set to %.3f rad/s." % self.max_speed_rad_s
+                    "Wheel max torque set to %.3f Nm." % self.max_torque_nm
                 )
 
-    def _update_requested_speed(self) -> None:
+    def _update_requested_torque(self) -> None:
         now = time.monotonic()
         with self._lock:
             if (
@@ -182,30 +182,30 @@ class WheelControllerNode(Node):
             ):
                 self._direction = 0
 
-            target_speed = self._direction * self.max_speed_rad_s
+            target_torque = self._direction * self.max_torque_nm
             dt = max(0.0, min(0.1, now - self._last_update_time))
             self._last_update_time = now
 
-            ramp_reference_speed = max(
-                abs(self._current_speed_rad_s),
-                self.max_speed_rad_s,
-                self.speed_step_rad_s,
+            ramp_reference_torque = max(
+                abs(self._current_torque_nm),
+                self.max_torque_nm,
+                self.torque_step_nm,
             )
-            max_delta = (ramp_reference_speed / self.ramp_time_s) * dt
-            delta = max(-max_delta, min(max_delta, target_speed - self._current_speed_rad_s))
-            self._current_speed_rad_s += delta
+            max_delta = (ramp_reference_torque / self.ramp_time_s) * dt
+            delta = max(-max_delta, min(max_delta, target_torque - self._current_torque_nm))
+            self._current_torque_nm += delta
 
-            if abs(target_speed) < 1.0e-4 and abs(self._current_speed_rad_s) < 1.0e-4:
-                self._current_speed_rad_s = 0.0
+            if abs(target_torque) < 1.0e-4 and abs(self._current_torque_nm) < 1.0e-4:
+                self._current_torque_nm = 0.0
 
-            speed = self._current_speed_rad_s
+            torque = self._current_torque_nm
 
-        self._publish_speed(speed)
+        self._publish_torque(torque)
 
-    def _publish_speed(self, speed_rad_s: float) -> None:
+    def _publish_torque(self, torque_nm: float) -> None:
         msg = Float64()
-        msg.data = float(speed_rad_s)
-        self.requested_speed_pub.publish(msg)
+        msg.data = float(torque_nm)
+        self.requested_torque_pub.publish(msg)
 
 
 def main(args=None) -> None:
