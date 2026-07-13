@@ -333,11 +333,8 @@ legwheel_can:
   ros__parameters:
     hip_motor_id: 461
     knee_motor_id: 923
-    wheel_motor_id: 0
+    wheel_motor_id: 689
 ```
-
-`wheel_motor_id` is a placeholder by default. Set it to the real MD80 ID before
-running wheel velocity control.
 
 ### Software Limits
 
