@@ -25,6 +25,9 @@ setup(
     entry_points={
         'console_scripts': [
             'run_experiment = legwheel_experiments.cli:main',
+            'state_machine_test = legwheel_experiments.cli:sample_transition_run', #TODO: delete this later
+            'state_machine_abort_test = legwheel_experiments.cli:sample_abort_run', #TODO: delete this later
+            'create_run = legwheel_experiments.cli:create_new_run_directory', #TODO: delete this later
         ],
     },
 )
