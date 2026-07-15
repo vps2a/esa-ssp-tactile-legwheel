@@ -3,6 +3,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from legwheel_experiments.state_machine import ExperimentState
 
 import yaml
 
@@ -13,8 +14,7 @@ class RunRecorder:
 
     def start_run(self, run_config: dict[str, Any], experiment_config_path: Path) -> Path:    
         self.run_directory = self._create_run(run_config)
-        marker = self.run_directory / "RUNNING"
-        marker.touch(exist_ok=False)
+        self._change_marker(ExperimentState.RUNNING.name)
         return self.run_directory
 
     def has_active_run(self) -> bool:
@@ -25,12 +25,26 @@ class RunRecorder:
         return running_marker.exists()
     
     def mark_complete(self) -> None:
-        marker = self.run_directory / "COMPLETE"
-        marker.touch(exist_ok=False)
+        self._change_marker(ExperimentState.COMPLETE.name)
     
     def mark_aborted(self, reason: str) -> None:
-        marker = self.run_directory / "ABORTED"
+        self._change_marker(ExperimentState.ABORTING.name)
+
+
+    def _change_marker(self, new_state: str) -> None:
+        if self.run_directory is None:
+            raise RuntimeError("No active run to change state.")
+    
+        #Delete the current marker from the directory if it exists (state markers taken from the ExperimentState enum)
+        for state in ExperimentState:
+            marker = self.run_directory / state.name
+            if marker.exists():
+                marker.unlink()
+        
+        #Creating the new marker
+        marker = self.run_directory / new_state
         marker.touch(exist_ok=False)
+
 
     def _find_next_run_number(self) -> int:
         run_numbers = []
