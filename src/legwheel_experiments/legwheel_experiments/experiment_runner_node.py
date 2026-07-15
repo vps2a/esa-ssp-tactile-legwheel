@@ -12,6 +12,9 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 
+import queue
+import threading
+
 class ExperimentRunnerNode(Node):
     def __init__(self):
         super().__init__("experiment_runner")
@@ -26,6 +29,22 @@ class ExperimentRunnerNode(Node):
         #These store when the node received them
         self._leg_state_received_at_s = None
         self._wheel_state_received_at_s = None
+
+        #Initializing the preflight complete event
+        #unset = preflight has not completed
+        #set   = preflight completed
+        self._preflight_complete_event = threading.Event()
+
+        #Initializing the arm request and result queues
+        #The two queues communicate in opposite directions:
+        # CLI ──arm request──▶ ROS node
+        # CLI ◀──result────── ROS node
+        self._arm_request_queue: queue.Queue[None] = queue.Queue(maxsize=1)
+
+        self._arm_result_queue: queue.Queue[tuple[bool, str]] = queue.Queue(
+            maxsize=1
+        )
+
 
         self._motor_status_publisher = self.create_publisher(
             Bool,
@@ -86,6 +105,12 @@ class ExperimentRunnerNode(Node):
             0.1,
             self._preflight_callback,
         )
+        #Adding also an arm request timer
+        self._arm_request_timer = self.create_timer(
+            0.1,
+            self._process_arm_request,
+        )
+
 
         self.get_logger().info("Experiment Runner Node initialized.")
 
@@ -139,6 +164,67 @@ class ExperimentRunnerNode(Node):
 
         self.disable_motors()
 
+    # == Arming processing functions ==
+
+    def _process_arm_request(self) -> None:
+        if self._state_machine.state not in (
+            ExperimentState.WAITING_FOR_ARM,
+            ExperimentState.ARMED,
+        ):
+            return
+
+        # Continue enforcing disabled commands in both states.
+        self.enter_safe_mode()
+
+        try:
+            self._arm_request_queue.get_nowait()
+        except queue.Empty:
+            return
+        if self._state_machine.state is not ExperimentState.WAITING_FOR_ARM:
+                self._store_arm_result(
+                    accepted=False,
+                    reason="Arm request rejected: experiment is not waiting for arm",
+                )
+                return
+
+        failure_reason = self._get_preflight_failure_reason()
+
+        if failure_reason is not None:
+            self._store_arm_result(
+                accepted=False,
+                reason=f"Arm request rejected: {failure_reason}",
+            )
+            return
+
+        self._state_machine.transition_to(
+            ExperimentState.ARMED
+        )
+
+        self._store_arm_result(
+            accepted=True,
+            reason="Arm request accepted; motors remain disabled",
+        )
+
+    def _store_arm_result(
+        self,
+        accepted: bool,
+        reason: str,
+    ) -> None:
+        try:
+            self._arm_result_queue.put_nowait(
+                (accepted, reason)
+            )
+        except queue.Full:
+            self.get_logger().error(
+                "Could not store arm result: result queue is full"
+            )
+
+        if accepted:
+            self.get_logger().info(reason)
+        else:
+            self.get_logger().warning(reason)
+
+
     # == CLI readiness notifications ==
 
     #Helper functions to give CLI a methode to change the configuration and recording status
@@ -157,9 +243,9 @@ class ExperimentRunnerNode(Node):
 
         self.enter_safe_mode()
 
-        #TODO: DELETE these later
-        self.set_configuration_valid()
-        self.set_recording_started()
+        # #TODO: DELETE these later
+        # self.set_configuration_valid()
+        # self.set_recording_started()
 
         failure_reason = self._get_preflight_failure_reason()
 
@@ -172,6 +258,8 @@ class ExperimentRunnerNode(Node):
         self._state_machine.transition_to(
             ExperimentState.WAITING_FOR_ARM
         )
+
+        self._preflight_complete_event.set()
 
     def _set_preflight_status(self, status: str) -> None: #Publish status changes only when they change
         if status == self._preflight_status:
@@ -208,6 +296,25 @@ class ExperimentRunnerNode(Node):
         return None
 
     # == Read-only public info ==
+
+    def wait_for_preflight(self, timeout_s: float | None = None) -> bool:
+        return self._preflight_complete_event.wait(timeout=timeout_s)
+    
+    def submit_arm_request(self) -> bool:
+        try:
+            self._arm_request_queue.put_nowait(None)
+        except queue.Full:
+            return False
+        return True
+        
+    def wait_for_arm_result(
+        self,
+        timeout_s: float | None = None,
+    ) -> tuple[bool, str] | None:
+        try:
+            return self._arm_result_queue.get(timeout=timeout_s)
+        except queue.Empty:
+            return None
 
     def preflight_status(self) -> str:
         return self._preflight_status

@@ -1,10 +1,16 @@
 import argparse
+import threading
+import rclpy
 
 from pathlib import Path
+from rclpy.executors import SingleThreadedExecutor
 
 from legwheel_experiments.schemas import load_experiment_config
 from legwheel_experiments.state_machine import ExperimentStateMachine, ExperimentState
 from legwheel_experiments.data_recorder import RunRecorder
+from legwheel_experiments.experiment_runner_node import (
+    ExperimentRunnerNode,
+)
 
 #Helper functions
 
@@ -141,28 +147,116 @@ def main():
 
     recorder = RunRecorder(experiment_directory)
 
+
+    run_directory = recorder.start_run(run_config = run_config, experiment_config_path = experiment_config_path)
+    print(f"Run directory created at: {run_directory}")
+
+    # == Initialising ROS and starting the experiment runner node ==
+
+    node = None
+    executor = None
+    executor_thread = None
+
     try:
-        run_directory = recorder.start_run(run_config = run_config, experiment_config_path = experiment_config_path)
+        rclpy.init()
+        node = ExperimentRunnerNode()
+        print("We're here!")
+        #TODO: Create real verifications later
+        node.set_configuration_valid()
+        node.set_recording_started()   
 
-        print(f"Run directory created at: {run_directory}")
+        # == Threading ==
+        executor = SingleThreadedExecutor()
+        executor.add_node(node)
 
-        #Temporary run placeholder
-        input(
-            "Now simulated the run as 'RUNNING'. Press Enter to mark the run as complete..."
+        executor_thread = threading.Thread(
+            target=executor.spin,
+            name="experiment_runner_executor",
+            daemon=True,
         )
 
-        recorder.mark_complete()
-        print(f"Run marked as complete. Run directory: {run_directory}")
-              
+        executor_thread.start()
+
+        # == Waiting for preflight checks ==
+        print("\nWaiting for preflight checks...")
+
+        while rclpy.ok():
+            if node.wait_for_preflight(timeout_s=5.0):
+                break
+
+        print(f"Preflight: {node.preflight_status()}")
+
+        #Double-checking just in case
+        if node.experiment_state() is not ExperimentState.WAITING_FOR_ARM:
+            raise RuntimeError(
+                "Preflight ended without reaching WAITING_FOR_ARM"
+            )
+
+        print()
+        print("Preflight passed.")
+        print("The motors are currently disabled.")
+        input("Review the robot and test area before continuing. Press Enter to continue...")
+        input("Ensure the leg is in vertical position. Press Enter to continue...")
+        print()
+
+        # == Arming the motors ==
+
+        operator_input = input(
+            "Type ARM exactly to accept arming, or anything else to cancel: "
+        )
+
+        if operator_input != "ARM":
+            print("Arming cancelled. Motors remain disabled.")
+            return
+        
+        request_submitted = node.submit_arm_request()
+
+        if not request_submitted:
+            print("An arm request is already pending.")
+            return
+        
+        arm_result = node.wait_for_arm_result(
+            timeout_s=2.0
+        )
+
+        if arm_result is None:
+            print("Arm request timed out. Motors remain disabled.")
+            return
+
+        accepted, reason = arm_result
+        print(reason)
+
+        if not accepted:
+            return
+
+        if node.experiment_state() is not ExperimentState.ARMED:
+            raise RuntimeError(
+                "Arm request was accepted, but the state is not ARMED"
+            )
+
+        print("Logical ARMED state reached.")
+        print("No motor-enable command has been published.")
+
     except KeyboardInterrupt:
-        print("\nRun interrupted by user")
-        if recorder.has_active_run():
-            recorder.mark_aborted(reason = "Run interrupted by user")
+        print("\nExperiment runner interrupted by user.")
+    
+    finally:
+        if node is not None:
+            node.enter_safe_mode()
 
-    except Exception as error:
-        print(f"An error occurred during the run: {error}")
-        recorder.mark_aborted(reason = str(error))
+        if executor is not None:
+            executor.shutdown()
 
+        if executor_thread is not None:
+            executor_thread.join(timeout=2.0)
+
+        if node is not None:
+            node.destroy_node()
+
+        if rclpy.ok():
+            rclpy.shutdown()
+
+# ===== OLD DEBUGGING FUNCTIONS =====
 
 def create_new_run_directory() -> Path:
     #ask the user via a ui where to save the data
