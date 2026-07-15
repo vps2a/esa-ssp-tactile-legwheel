@@ -28,6 +28,7 @@ setup(
             'state_machine_test = legwheel_experiments.cli:sample_transition_run', #TODO: delete this later
             'state_machine_abort_test = legwheel_experiments.cli:sample_abort_run', #TODO: delete this later
             'create_run = legwheel_experiments.cli:create_new_run_directory', #TODO: delete this later
+            'experiment_runner_node = legwheel_experiments.experiment_runner_node:main',
         ],
     },
 )
