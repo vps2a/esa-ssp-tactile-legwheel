@@ -4,6 +4,7 @@ import rclpy
 
 from pathlib import Path
 from rclpy.executors import SingleThreadedExecutor
+from typing import Any
 
 from legwheel_experiments.schemas import load_experiment_config
 from legwheel_experiments.state_machine import ExperimentStateMachine, ExperimentState
@@ -50,7 +51,7 @@ def ask_float(prompt: str, minimum: float | None = None, maximum: float | None =
 
         return value
 
-def collect_run_configuration() -> dict:
+def collect_run_configuration() -> dict[str, Any]:
     print("\n=== Run Configuration ===")
     print("Please provide the following parameters for the experiment run:")
 
@@ -93,7 +94,10 @@ def collect_run_configuration() -> dict:
         }
     }
 
-def print_run_configuration(experiment_config_path: Path, run_config: dict) -> None:
+def print_run_configuration(
+    experiment_config_path: Path,
+    run_config: dict[str, Any],
+) -> None:
     print("\n=== Run Configuration Summary ===")
     print(f"Experiment configuration file: {experiment_config_path}")
     print(f"Run length (in loops): {run_config['run_length_loops']}")
@@ -235,7 +239,10 @@ def main():
             )
 
         print("Logical ARMED state reached.")
-        print("No motor-enable command has been published.")
+        print("The wheel torque command will remain zero.")
+        input("The leg is about to move. Press Enter to start the 3 second ramp...")
+        node.run_experiment_after_arm(run_config)
+        print("Post-arm leg parameter ramp completed.")
 
     except KeyboardInterrupt:
         print("\nExperiment runner interrupted by user.")

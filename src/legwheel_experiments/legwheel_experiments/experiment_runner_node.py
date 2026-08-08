@@ -1,19 +1,22 @@
+from collections.abc import Sequence
+from numbers import Real
+from typing import Any
+
+import queue
+import rclpy
+import threading
+import time
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 from std_msgs.msg import Float64
 from std_msgs.msg import Float64MultiArray
-from sensor_msgs.msg import JointState
+
 from legwheel_experiments.state_machine import (
     ExperimentState,
     ExperimentStateMachine,
 )
-
-import time
-import rclpy
-from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
-
-import queue
-import threading
 
 class ExperimentRunnerNode(Node):
     def __init__(self):
@@ -75,6 +78,10 @@ class ExperimentRunnerNode(Node):
             "/wheel/requested_torque",
             10,
         )
+
+        self._last_commanded_stiffness = [0.0, 0.0]
+        self._last_commanded_damping = [0.0, 0.0]
+        self._last_commanded_zero_position = [0.0, 0.0]
 
         self._leg_state_subscription = self.create_subscription(
             JointState,
@@ -151,6 +158,11 @@ class ExperimentRunnerNode(Node):
 
     # == Safe publishing ==
     
+    def _publish_zero_wheel_torque(self) -> None:
+        torque_message = Float64()
+        torque_message.data = 0.0
+        self._wheel_torque_publisher.publish(torque_message)
+
     def disable_motors(self) -> None:
         message = Bool()
         message.data = False
@@ -158,9 +170,7 @@ class ExperimentRunnerNode(Node):
 
     def enter_safe_mode(self) -> None:
     #This is the first function that is gonna be published after startup to make sure the motors are disabled
-        torque_message = Float64()
-        torque_message.data = 0.0
-        self._wheel_torque_publisher.publish(torque_message)
+        self._publish_zero_wheel_torque()
 
         self.disable_motors()
 
@@ -325,9 +335,12 @@ class ExperimentRunnerNode(Node):
     # === Running the experiment ===
 
     def enable_motors(self) -> None:
-        if self._state_machine.state is not ExperimentState.ARMED:
+        if self._state_machine.state not in (
+            ExperimentState.ARMED,
+            ExperimentState.RUNNING,
+        ):
             raise RuntimeError(
-                "Cannot enable motors: experiment is not armed"
+                "Cannot enable motors: experiment is not armed or running"
             )
 
         message = Bool()
@@ -335,81 +348,150 @@ class ExperimentRunnerNode(Node):
         self._motor_status_publisher.publish(message)
         self.get_logger().info("Motors enabled.")
 
-    def run_experiment_after_arm(self, run_config: dict[str, any]) -> None:
+    def run_experiment_after_arm(self, run_config: dict[str, Any]) -> None:
         if self._state_machine.state is not ExperimentState.ARMED:
             raise RuntimeError(
                 "Cannot run experiment: experiment is not armed"
             )
 
-        self.get_logger().info("Running the experiment...")
+        leg_parameters = run_config["leg_parameters"]
+        knee_stiffness = leg_parameters["knee_stiffness_nm_per_rad"]
+        knee_damping = leg_parameters["knee_damping_nms_per_rad"]
+        knee_zero_position = leg_parameters["knee_spring_zeroposition_rad"]
+
+        if not all(
+            self._is_numeric(value)
+            for value in (knee_stiffness, knee_damping, knee_zero_position)
+        ):
+            raise ValueError(
+                "Knee stiffness, damping, and zero position must be numeric"
+            )
+
+        # Current CLI collects knee-only scalar values. Keep joint 0 passive
+        # and apply the requested knee parameters to joint 1 for now.
+        stiffness = [0.0, float(knee_stiffness)]
+        damping = [0.0, float(knee_damping)]
+        zero_position = [0.0, float(knee_zero_position)]
+
+        self._publish_zero_wheel_torque()
+
         self._state_machine.transition_to(
             ExperimentState.RUNNING
         )
-        # Changing the marker
-        self._change_marker(ExperimentState.RUNNING.name)
 
-        # Turning the motors on
         self.enable_motors()
 
-        #Configuring the wheel to go down to the target position, stiffness and damping
-        input("The leg is about to move to its desired position. Press Enter to continue...")
-        self._configure_legwheel_stiffness_and_zeropos(run_config["stiffness"], run_config["damping"], run_config["zero_position"])
+        self._configure_legwheel_stiffness_and_zeropos(
+            stiffness=stiffness,
+            damping=damping,
+            zero_position=zero_position,
+        )
 
-        #Executing the run
+        self.get_logger().info("Post-arm leg parameter ramp completed.")
 
-    def _configure_legwheel_stiffness_and_zeropos(self, stiffness: list[float], damping: list[float], zero_pos: list[float]) -> None:
+    def _configure_legwheel_stiffness_and_zeropos(
+        self,
+        stiffness: Sequence[float],
+        damping: Sequence[float],
+        zero_position: Sequence[float],
+    ) -> None:
+        stiffness_target = self._validate_two_numeric_values(
+            "stiffness",
+            stiffness,
+        )
+        damping_target = self._validate_two_numeric_values(
+            "damping",
+            damping,
+        )
+        zero_position_target = self._validate_two_numeric_values(
+            "zero_position",
+            zero_position,
+        )
+
         #The stiffness and zeroposition are adjusted over a ramp time with a duration of 3 seconds
-        duration = 3 #seconds
+        duration_s = 3.0
+        publish_period_s = 0.05
 
-        if self._stiffness_publisher.get_last_published() is None:
-            last_stiffness = [0.0] * len(stiffness)
-        else:
-            last_stiffness = self._stiffness_publisher.get_last_published().data
-        
-        if self._damping_publisher.get_last_published() is None:
-            last_damping = [0.0] * len(damping)
-        else:
-            last_damping = self._damping_publisher.get_last_published().data
-
-        if self._zero_position_publisher.get_last_published() is None:
-            last_zeropos = [0.0] * len(zero_pos)
-        else:
-            last_zeropos = self._zero_position_publisher.get_last_published().data
+        last_stiffness = self._last_commanded_stiffness
+        last_damping = self._last_commanded_damping
+        last_zero_position = self._last_commanded_zero_position
 
         #now iterating over the duration and publishing the intermediate values
         start_time = time.monotonic()
-        while time.monotonic() - start_time < duration:
+        while time.monotonic() - start_time < duration_s:
             elapsed = time.monotonic() - start_time
-            ratio = elapsed / duration
+            ratio = elapsed / duration_s
 
             intermediate_stiffness = [
                 last + (target - last) * ratio
-                for last, target in zip(last_stiffness, stiffness)
+                for last, target in zip(last_stiffness, stiffness_target)
             ]
             intermediate_damping = [
                 last + (target - last) * ratio
-                for last, target in zip(last_damping, damping)
+                for last, target in zip(last_damping, damping_target)
             ]
             intermediate_zeropos = [
                 last + (target - last) * ratio
-                for last, target in zip(last_zeropos, zero_pos)
+                for last, target in zip(last_zero_position, zero_position_target)
             ]
 
-            #Publishing the intermediate values
-            stiffness_message = Float64MultiArray()
-            stiffness_message.data = intermediate_stiffness
-            self._stiffness_publisher.publish(stiffness_message)
-
-            damping_message = Float64MultiArray()
-            damping_message.data = intermediate_damping
-            self._damping_publisher.publish(damping_message)
-
-            zeropos_message = Float64MultiArray()
-            zeropos_message.data = intermediate_zeropos
-            self._zero_position_publisher.publish(zeropos_message)
+            self._publish_leg_parameters(
+                stiffness=intermediate_stiffness,
+                damping=intermediate_damping,
+                zero_position=intermediate_zeropos,
+            )
 
             #Sleeping for a short time before the next iteration
-            time.sleep(0.05)
+            time.sleep(publish_period_s)
+
+        self._publish_leg_parameters(
+            stiffness=stiffness_target,
+            damping=damping_target,
+            zero_position=zero_position_target,
+        )
+
+    def _publish_leg_parameters(
+        self,
+        stiffness: list[float],
+        damping: list[float],
+        zero_position: list[float],
+    ) -> None:
+        stiffness_message = Float64MultiArray()
+        stiffness_message.data = stiffness
+        self._stiffness_publisher.publish(stiffness_message)
+
+        damping_message = Float64MultiArray()
+        damping_message.data = damping
+        self._damping_publisher.publish(damping_message)
+
+        zero_position_message = Float64MultiArray()
+        zero_position_message.data = zero_position
+        self._zero_position_publisher.publish(zero_position_message)
+
+        self._last_commanded_stiffness = list(stiffness)
+        self._last_commanded_damping = list(damping)
+        self._last_commanded_zero_position = list(zero_position)
+
+    @staticmethod
+    def _validate_two_numeric_values(
+        name: str,
+        values: Sequence[float],
+    ) -> list[float]:
+        if (
+            isinstance(values, (str, bytes))
+            or not isinstance(values, Sequence)
+            or len(values) != 2
+        ):
+            raise ValueError(f"{name} must contain exactly 2 numeric values")
+
+        if not all(ExperimentRunnerNode._is_numeric(value) for value in values):
+            raise ValueError(f"{name} must contain exactly 2 numeric values")
+
+        return [float(value) for value in values]
+
+    @staticmethod
+    def _is_numeric(value: Any) -> bool:
+        return isinstance(value, Real) and not isinstance(value, bool)
 
         
 
