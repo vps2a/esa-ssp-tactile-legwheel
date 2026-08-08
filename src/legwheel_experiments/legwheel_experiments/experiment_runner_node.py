@@ -321,6 +321,97 @@ class ExperimentRunnerNode(Node):
 
     def experiment_state(self) -> ExperimentState:
         return self._state_machine.state
+    
+    # === Running the experiment ===
+
+    def enable_motors(self) -> None:
+        if self._state_machine.state is not ExperimentState.ARMED:
+            raise RuntimeError(
+                "Cannot enable motors: experiment is not armed"
+            )
+
+        message = Bool()
+        message.data = True
+        self._motor_status_publisher.publish(message)
+        self.get_logger().info("Motors enabled.")
+
+    def run_experiment_after_arm(self, run_config: dict[str, any]) -> None:
+        if self._state_machine.state is not ExperimentState.ARMED:
+            raise RuntimeError(
+                "Cannot run experiment: experiment is not armed"
+            )
+
+        self.get_logger().info("Running the experiment...")
+        self._state_machine.transition_to(
+            ExperimentState.RUNNING
+        )
+        # Changing the marker
+        self._change_marker(ExperimentState.RUNNING.name)
+
+        # Turning the motors on
+        self.enable_motors()
+
+        #Configuring the wheel to go down to the target position, stiffness and damping
+        input("The leg is about to move to its desired position. Press Enter to continue...")
+        self._configure_legwheel_stiffness_and_zeropos(run_config["stiffness"], run_config["damping"], run_config["zero_position"])
+
+        #Executing the run
+
+    def _configure_legwheel_stiffness_and_zeropos(self, stiffness: list[float], damping: list[float], zero_pos: list[float]) -> None:
+        #The stiffness and zeroposition are adjusted over a ramp time with a duration of 3 seconds
+        duration = 3 #seconds
+
+        if self._stiffness_publisher.get_last_published() is None:
+            last_stiffness = [0.0] * len(stiffness)
+        else:
+            last_stiffness = self._stiffness_publisher.get_last_published().data
+        
+        if self._damping_publisher.get_last_published() is None:
+            last_damping = [0.0] * len(damping)
+        else:
+            last_damping = self._damping_publisher.get_last_published().data
+
+        if self._zero_position_publisher.get_last_published() is None:
+            last_zeropos = [0.0] * len(zero_pos)
+        else:
+            last_zeropos = self._zero_position_publisher.get_last_published().data
+
+        #now iterating over the duration and publishing the intermediate values
+        start_time = time.monotonic()
+        while time.monotonic() - start_time < duration:
+            elapsed = time.monotonic() - start_time
+            ratio = elapsed / duration
+
+            intermediate_stiffness = [
+                last + (target - last) * ratio
+                for last, target in zip(last_stiffness, stiffness)
+            ]
+            intermediate_damping = [
+                last + (target - last) * ratio
+                for last, target in zip(last_damping, damping)
+            ]
+            intermediate_zeropos = [
+                last + (target - last) * ratio
+                for last, target in zip(last_zeropos, zero_pos)
+            ]
+
+            #Publishing the intermediate values
+            stiffness_message = Float64MultiArray()
+            stiffness_message.data = intermediate_stiffness
+            self._stiffness_publisher.publish(stiffness_message)
+
+            damping_message = Float64MultiArray()
+            damping_message.data = intermediate_damping
+            self._damping_publisher.publish(damping_message)
+
+            zeropos_message = Float64MultiArray()
+            zeropos_message.data = intermediate_zeropos
+            self._zero_position_publisher.publish(zeropos_message)
+
+            #Sleeping for a short time before the next iteration
+            time.sleep(0.05)
+
+        
 
 
 def main(args=None):
