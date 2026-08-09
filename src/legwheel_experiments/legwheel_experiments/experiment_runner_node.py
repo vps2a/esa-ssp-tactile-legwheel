@@ -43,6 +43,7 @@ class ExperimentRunnerNode(Node):
         # CLI ──arm request──▶ ROS node
         # CLI ◀──result────── ROS node
         self._arm_request_queue: queue.Queue[None] = queue.Queue(maxsize=1)
+        self._arm_request_completed_event = threading.Event()
 
         self._arm_result_queue: queue.Queue[tuple[bool, str]] = queue.Queue(
             maxsize=1
@@ -104,14 +105,17 @@ class ExperimentRunnerNode(Node):
 
         self._preflight_status = "Preflight has not started"
 
-        #Entering preflight
+        # === Entering preflight ===
+
         self._state_machine.transition_to(
             ExperimentState.PREFLIGHT
         )
+        
         self._preflight_timer = self.create_timer(
             0.1,
             self._preflight_callback,
         )
+
         #Adding also an arm request timer
         self._arm_request_timer = self.create_timer(
             0.1,
@@ -215,6 +219,8 @@ class ExperimentRunnerNode(Node):
             reason="Arm request accepted; motors remain disabled",
         )
 
+        self._arm_request_completed_event.set()
+
     def _store_arm_result(
         self,
         accepted: bool,
@@ -252,10 +258,6 @@ class ExperimentRunnerNode(Node):
             return
 
         self.enter_safe_mode()
-
-        # #TODO: DELETE these later
-        # self.set_configuration_valid()
-        # self.set_recording_started()
 
         failure_reason = self._get_preflight_failure_reason()
 
@@ -375,9 +377,6 @@ class ExperimentRunnerNode(Node):
 
         self._publish_zero_wheel_torque()
 
-        self._state_machine.transition_to(
-            ExperimentState.RUNNING
-        )
 
         self.enable_motors()
 
@@ -414,7 +413,7 @@ class ExperimentRunnerNode(Node):
 
         last_stiffness = self._last_commanded_stiffness
         last_damping = self._last_commanded_damping
-        last_zero_position = self._last_commanded_zero_position
+        last_zero_position = self._current_position_from_encoder()
 
         #now iterating over the duration and publishing the intermediate values
         start_time = time.monotonic()
@@ -448,6 +447,18 @@ class ExperimentRunnerNode(Node):
             stiffness=stiffness_target,
             damping=damping_target,
             zero_position=zero_position_target,
+        )
+
+    def _current_position_from_encoder(self) -> list[float]:
+        if self._latest_leg_state is None:
+            raise RuntimeError("Cannot read leg position: no leg telemetry")
+
+        if self.leg_state_age_s() > self._maximum_state_age_s:
+            raise RuntimeError("Cannot rely on leg position data: leg telemetry is stale")
+
+        return self._validate_two_numeric_values(
+            "leg encoder position",
+            self._latest_leg_state.position,
         )
 
     def _publish_leg_parameters(

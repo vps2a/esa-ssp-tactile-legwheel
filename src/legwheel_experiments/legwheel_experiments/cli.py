@@ -243,6 +243,8 @@ def main():
         input("The leg is about to move. Press Enter to start the 3 second ramp...")
         node.run_experiment_after_arm(run_config)
         print("Post-arm leg parameter ramp completed.")
+        #TODO: Remove this line
+        input("Temporary stop. Press Enter to finish...")
 
     except KeyboardInterrupt:
         print("\nExperiment runner interrupted by user.")
