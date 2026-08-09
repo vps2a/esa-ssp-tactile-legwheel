@@ -20,6 +20,8 @@ class RunRecorder:
     def has_active_run(self) -> bool:
         if self.run_directory is None:
             return False
+        
+    #TODO Fix the markers so they represent the acutal state machine state
 
         running_marker = self.run_directory / "RUNNING"
         return running_marker.exists()

@@ -344,7 +344,7 @@ class ExperimentRunnerNode(Node):
         self._motor_status_publisher.publish(message)
         self.get_logger().info("Motors enabled.")
 
-    def run_experiment_after_arm(self, run_config: dict[str, Any]) -> None:
+    def run_experiment_after_arm(self, run_config: dict[str, Any], experiment_config: dict[str, Any]) -> None:
         if self._state_machine.state is not ExperimentState.ARMED:
             raise RuntimeError(
                 "Cannot run experiment: experiment is not armed"
@@ -381,7 +381,110 @@ class ExperimentRunnerNode(Node):
             zero_position=zero_position,
         )
 
-        self.get_logger().info("Post-arm leg parameter ramp completed.")
+        self.get_logger().info("Post-arm leg parameter ramp completed. Wheel movement will begin in 3 seconds.")
+
+        time.sleep(3.0)
+
+        self._wheel_control(run_config, experiment_config)
+
+        self._state_machine.transition_to(ExperimentState.STOPPING)
+        self._configure_legwheel_stiffness_and_zeropos(
+            stiffness = [0.0, 30], # These values have been chosen arbitrarily as they just work
+            damping = [0.0, 1],
+            zero_position = [0.0, 0.0]
+        )
+
+        self.get_logger().info("Experiment run completed. Leg parameters ramped back to safe values.")
+        self.get_logger().info("Disabling motors and entering safe mode.")
+        self.enter_safe_mode()
+        self.get_logger().info("Motors disabled and safe mode entered.")
+        self._state_machine.transition_to(ExperimentState.COMPLETE)
+
+    def _wheel_control(self, run_config: dict[str, Any], experiment_config: dict[str, Any]) -> None:
+        try:
+            target_torque = run_config["wheel_parameters"]["commanded_wheel_torque_nm"]
+            run_length_loops = run_config["run_length_loops"]
+            wheel_torque_ramp_time = run_config["wheel_parameters"]["wheel_torque_ramp_time_sec"]
+        except KeyError as e:
+            raise ValueError(f"Missing run parameter in run configuration: {e}")
+
+        try:
+            beam_radius = experiment_config.rig_config["beam_radius_m"]
+            wheel_radius = experiment_config.wheel_config["wheel_radius_mm"] / 1000.0  # Convert mm to m
+            wheel_width = experiment_config.wheel_config["wheel_width_mm"] / 1000.0  # Convert mm to m
+        except KeyError as e:
+            raise ValueError(f"Missing wheel configuration in experiment configuration: {e}")
+        
+        #Validating that all of those are numeric
+        if not all(
+            self._is_numeric(value)
+            for value in (target_torque, beam_radius, wheel_radius, wheel_width)
+        ):
+            raise ValueError(
+                "Wheel torque and configuration parameters must be numeric"
+            )
+        
+        # Calculating the distance that it needs to travel
+        distance_to_travel_m = 2 * 3.14159 * (beam_radius-0.5*wheel_width) * run_length_loops #Assuming wheel's centerline as the reference diameter
+        target_wheel_rotations = distance_to_travel_m / (2 * 3.14159 * wheel_radius)
+
+        self.get_logger().info(f"[WHEEL] Wheel will rotate {target_wheel_rotations:.2f} times to cover the distance of {distance_to_travel_m:.2f} meters.")
+
+        self.get_logger().info(f"[WHEEL] Target torque: {target_torque:.2f} Nm, ramp time: {wheel_torque_ramp_time:.2f} seconds. Beginning ramp up...")
+        # Toruqe ramp-up
+        current_torque = Float64()
+        current_torque.data = 0
+        self._wheel_torque_publisher.publish(current_torque)
+
+        start_time = time.monotonic()
+        start_wheel_position = self._latest_wheel_state.position[0] if self._latest_wheel_state else 0.0
+        while time.monotonic() - start_time < wheel_torque_ramp_time:
+            elapsed = time.monotonic() - start_time
+            ratio = elapsed / wheel_torque_ramp_time
+            intermediate_torque = target_torque * ratio
+
+            current_torque.data = intermediate_torque
+            self._wheel_torque_publisher.publish(-current_torque)
+
+            time.sleep(0.05)
+        ramp_end_wheel_position = self._latest_wheel_state.position[0] if self._latest_wheel_state else 0.0
+        wheel_ramp_up_rotation_rad = ramp_end_wheel_position - start_wheel_position
+        wheel_ramp_up_distance = wheel_ramp_up_rotation_rad * wheel_radius
+
+        self.get_logger().info(f"[WHEEL] Wheel ramp-up completed. Wheel rotated {wheel_ramp_up_rotation_rad:.2f} radians, covering a distance of {wheel_ramp_up_distance:.2f} meters during ramp-up.")
+
+        self.get_logger().info(f"[WHEEL] Target torque reached. Maintaining torque for the duration of the run. Beginning distance measurement")
+
+        mid_run_distance_to_travel = distance_to_travel_m - 2*wheel_ramp_up_distance # To account for ramp down time as well
+
+        while mid_run_distance_to_travel > 0:
+            current_wheel_position = self._latest_wheel_state.position[0] if self._latest_wheel_state else 0.0
+            wheel_rotation_rad = current_wheel_position - ramp_end_wheel_position
+            wheel_distance_traveled = wheel_rotation_rad * wheel_radius
+
+            mid_run_distance_to_travel = distance_to_travel_m - wheel_distance_traveled
+
+            self.get_logger().info(f"[WHEEL] Distance remaining: {mid_run_distance_to_travel:.2f} meters")
+            time.sleep(0.2)
+        
+        self.get_logger().info(f"[WHEEL] Target distance reached. Beginning ramp down...")
+
+        ramp_down_start_time = time.monotonic()
+        while time.monotonic() - ramp_down_start_time < wheel_torque_ramp_time:
+            elapsed = time.monotonic() - ramp_down_start_time
+            ratio = elapsed / wheel_torque_ramp_time
+            intermediate_torque = target_torque * (1 - ratio)
+
+            current_torque.data = intermediate_torque
+            self._wheel_torque_publisher.publish(-current_torque)
+
+            time.sleep(0.05)
+
+        #Publishing zero torque just in case
+        self._publish_zero_wheel_torque()
+
+        self.get_logger().info(f"[WHEEL] Wheel ramp-down completed. Wheel movement finished.")
+        
 
     def _configure_legwheel_stiffness_and_zeropos(
         self,

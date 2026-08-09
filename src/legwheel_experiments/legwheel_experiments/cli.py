@@ -65,6 +65,7 @@ def collect_run_configuration() -> dict[str, Any]:
 
     commanded_wheel_torque_nm = ask_float("Commanded wheel torque (in Nm): ", minimum=0, maximum=8)
     maximium_wheel_speed_rad_per_sec = ask_float("Maximum wheel speed (in rad/s): ", minimum=0, maximum=4)
+    wheel_torque_ramp_time_sec = ask_float("Wheel ramp time (in seconds): ", minimum=0.05, maximum=5)
 
     print("[DATA ACQUISITION] Please provide the following parameters for data acquisition:")
     
@@ -84,7 +85,8 @@ def collect_run_configuration() -> dict[str, Any]:
         },
         "wheel_parameters": {
             "commanded_wheel_torque_nm": commanded_wheel_torque_nm,
-            "maximium_wheel_speed_rad_per_sec": maximium_wheel_speed_rad_per_sec
+            "maximium_wheel_speed_rad_per_sec": maximium_wheel_speed_rad_per_sec,
+            "wheel_torque_ramp_time_sec": wheel_torque_ramp_time_sec
         },
         "data_acquisition_rates": {
             "camera_rate_hz": camera_rate_hz,
@@ -164,7 +166,6 @@ def main():
     try:
         rclpy.init()
         node = ExperimentRunnerNode()
-        print("We're here!")
         #TODO: Create real verifications later
         node.set_configuration_valid()
         node.set_recording_started()   
@@ -241,10 +242,14 @@ def main():
         print("Logical ARMED state reached.")
         print("The wheel torque command will remain zero.")
         input("The leg is about to move. Press Enter to start the 3 second ramp...")
-        node.run_experiment_after_arm(run_config)
-        print("Post-arm leg parameter ramp completed.")
-        #TODO: Remove this line
-        input("Temporary stop. Press Enter to finish...")
+
+        #TODO Add a rosbag and other recording command here to record the experiment data
+
+        node.run_experiment_after_arm(run_config, experiment_config)
+        recorder.mark_complete()
+
+        #TODO Add rosbag complete recording
+
 
     except KeyboardInterrupt:
         print("\nExperiment runner interrupted by user.")
