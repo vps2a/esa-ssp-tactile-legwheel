@@ -64,7 +64,6 @@ def collect_run_configuration() -> dict[str, Any]:
     knee_damping_nms_per_rad = ask_float("Knee damping (in Nms/rad): ", minimum=0, maximum=5)
 
     commanded_wheel_torque_nm = ask_float("Commanded wheel torque (in Nm): ", minimum=0, maximum=8)
-    maximium_wheel_speed_rad_per_sec = ask_float("Maximum wheel speed (in rad/s): ", minimum=0, maximum=4)
     wheel_torque_ramp_time_sec = ask_float("Wheel ramp time (in seconds): ", minimum=0.05, maximum=5)
 
     print("[DATA ACQUISITION] Please provide the following parameters for data acquisition:")
@@ -85,7 +84,6 @@ def collect_run_configuration() -> dict[str, Any]:
         },
         "wheel_parameters": {
             "commanded_wheel_torque_nm": commanded_wheel_torque_nm,
-            "maximium_wheel_speed_rad_per_sec": maximium_wheel_speed_rad_per_sec,
             "wheel_torque_ramp_time_sec": wheel_torque_ramp_time_sec
         },
         "data_acquisition_rates": {

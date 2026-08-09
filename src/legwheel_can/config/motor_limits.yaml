@@ -16,7 +16,5 @@ legwheel_can:
     knee_velocity_max_rad_s: 1.0
     knee_torque_max_nm: 20.0
 
-    # Wheel telemetry/command safety limits. The impedance node publishes wheel
-    # encoder velocity, but wheel actuation is commanded as raw torque.
-    wheel_velocity_max_rad_s: 2.0
+    # Wheel actuation is commanded as raw torque.
     wheel_torque_max_nm: 8.0
