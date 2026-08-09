@@ -392,13 +392,14 @@ class ExperimentRunnerNode(Node):
 
         self._state_machine.transition_to(ExperimentState.STOPPING)
         self._configure_legwheel_stiffness_and_zeropos(
-            stiffness = [0.0, 30], # These values have been chosen arbitrarily as they just work
+            stiffness = [0.0, 50], # These values have been chosen arbitrarily as they just work
             damping = [0.0, 1],
             zero_position = [0.0, 0.0]
         )
 
         self.get_logger().info("Experiment run completed. Leg parameters ramped back to safe values.")
-        self.get_logger().info("Disabling motors and entering safe mode.")
+        self.get_logger().info("Disabling motors and entering safe mode in 3 seconds.")
+        time.sleep(3.0)
         self.enter_safe_mode()
         self.get_logger().info("Motors disabled and safe mode entered.")
         self._state_machine.transition_to(ExperimentState.COMPLETE)
@@ -448,7 +449,7 @@ class ExperimentRunnerNode(Node):
 
             time.sleep(0.05)
         ramp_end_wheel_position = self._latest_wheel_state.position[0] if self._latest_wheel_state else 0.0
-        wheel_ramp_up_rotation_rad = ramp_end_wheel_position - start_wheel_position
+        wheel_ramp_up_rotation_rad = abs(ramp_end_wheel_position - start_wheel_position)
         wheel_ramp_up_distance = wheel_ramp_up_rotation_rad * wheel_radius
 
         self.get_logger().info(f"[WHEEL] Wheel ramp-up completed. Wheel rotated {wheel_ramp_up_rotation_rad:.2f} radians, covering a distance of {wheel_ramp_up_distance:.2f} meters during ramp-up.")
@@ -459,7 +460,7 @@ class ExperimentRunnerNode(Node):
 
         while mid_run_distance_to_travel > 0:
             current_wheel_position = self._latest_wheel_state.position[0] if self._latest_wheel_state else 0.0
-            wheel_rotation_rad = current_wheel_position - ramp_end_wheel_position
+            wheel_rotation_rad = abs(current_wheel_position - ramp_end_wheel_position)
             wheel_distance_traveled = wheel_rotation_rad * wheel_radius
 
             mid_run_distance_to_travel = distance_to_travel_m - wheel_distance_traveled
@@ -482,7 +483,10 @@ class ExperimentRunnerNode(Node):
         #Publishing zero torque just in case
         self._publish_zero_wheel_torque()
 
-        self.get_logger().info(f"[WHEEL] Wheel ramp-down completed. Wheel movement finished.")
+        total_wheel_rotation = abs(self._latest_wheel_state.position[0] - start_wheel_position) if self._latest_wheel_state else 0.0
+        total_distance_travelled = total_wheel_rotation * wheel_radius
+
+        self.get_logger().info(f"[WHEEL] Wheel ramp-down completed. Wheel movement finished. Total distance travelled = {total_distance_travelled} meters, which is {total_distance_travelled/distance_to_travel_m*100:.2f}% of the target distance.")
         
 
     def _configure_legwheel_stiffness_and_zeropos(
