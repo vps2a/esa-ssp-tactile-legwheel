@@ -402,9 +402,9 @@ class ExperimentRunnerNode(Node):
 
     def _wheel_control(self, run_config: dict[str, Any], experiment_config: dict[str, Any]) -> None:
         try:
-            target_torque = run_config["wheel_parameters"]["commanded_wheel_torque_nm"]
+            target_torque = float(run_config["wheel_parameters"]["commanded_wheel_torque_nm"])
             run_length_loops = run_config["run_length_loops"]
-            wheel_torque_ramp_time = run_config["wheel_parameters"]["wheel_torque_ramp_time_sec"]
+            wheel_torque_ramp_time = float(run_config["wheel_parameters"]["wheel_torque_ramp_time_sec"])
         except KeyError as e:
             raise ValueError(f"Missing run parameter in run configuration: {e}")
 
@@ -433,7 +433,7 @@ class ExperimentRunnerNode(Node):
         self.get_logger().info(f"[WHEEL] Target torque: {target_torque:.2f} Nm, ramp time: {wheel_torque_ramp_time:.2f} seconds. Beginning ramp up...")
         # Toruqe ramp-up
         current_torque = Float64()
-        current_torque.data = 0
+        current_torque.data = 0.0
         self._wheel_torque_publisher.publish(current_torque)
 
         start_time = time.monotonic()
@@ -443,7 +443,7 @@ class ExperimentRunnerNode(Node):
             ratio = elapsed / wheel_torque_ramp_time
             intermediate_torque = target_torque * ratio
 
-            current_torque.data = intermediate_torque
+            current_torque.data = float(intermediate_torque)
             self._wheel_torque_publisher.publish(-current_torque)
 
             time.sleep(0.05)
@@ -475,7 +475,7 @@ class ExperimentRunnerNode(Node):
             ratio = elapsed / wheel_torque_ramp_time
             intermediate_torque = target_torque * (1 - ratio)
 
-            current_torque.data = intermediate_torque
+            current_torque.data = float(intermediate_torque)
             self._wheel_torque_publisher.publish(-current_torque)
 
             time.sleep(0.05)
