@@ -43,7 +43,6 @@ class ExperimentRunnerNode(Node):
         # CLI ──arm request──▶ ROS node
         # CLI ◀──result────── ROS node
         self._arm_request_queue: queue.Queue[None] = queue.Queue(maxsize=1)
-        self._arm_request_completed_event = threading.Event()
 
         self._arm_result_queue: queue.Queue[tuple[bool, str]] = queue.Queue(
             maxsize=1
@@ -181,10 +180,7 @@ class ExperimentRunnerNode(Node):
     # == Arming processing functions ==
 
     def _process_arm_request(self) -> None:
-        if self._state_machine.state not in (
-            ExperimentState.WAITING_FOR_ARM,
-            ExperimentState.ARMED,
-        ):
+        if self._state_machine.state is not ExperimentState.WAITING_FOR_ARM: # States at which we are spamming motor_status = false message
             return
 
         # Continue enforcing disabled commands in both states.
@@ -218,8 +214,6 @@ class ExperimentRunnerNode(Node):
             accepted=True,
             reason="Arm request accepted; motors remain disabled",
         )
-
-        self._arm_request_completed_event.set()
 
     def _store_arm_result(
         self,
@@ -377,6 +371,7 @@ class ExperimentRunnerNode(Node):
 
         self._publish_zero_wheel_torque()
 
+        self._state_machine.transition_to(ExperimentState.RUNNING)
 
         self.enable_motors()
 
