@@ -160,11 +160,14 @@ class ExperimentRunnerNode(Node):
         return time.monotonic() - self._wheel_state_received_at_s
 
     # == Safe publishing ==
+
+    def _publish_wheel_torque(self, torque_nm: float) -> None:
+        msg = Float64()
+        msg.data = float(torque_nm)
+        self._wheel_torque_publisher.publish(msg)
     
     def _publish_zero_wheel_torque(self) -> None:
-        torque_message = Float64()
-        torque_message.data = 0.0
-        self._wheel_torque_publisher.publish(torque_message)
+        self._publish_wheel_torque(0.0)
 
     def disable_motors(self) -> None:
         message = Bool()
@@ -432,9 +435,7 @@ class ExperimentRunnerNode(Node):
 
         self.get_logger().info(f"[WHEEL] Target torque: {target_torque:.2f} Nm, ramp time: {wheel_torque_ramp_time:.2f} seconds. Beginning ramp up...")
         # Toruqe ramp-up
-        current_torque = Float64()
-        current_torque.data = 0.0
-        self._wheel_torque_publisher.publish(current_torque)
+        self._publish_wheel_torque(0.0)
 
         start_time = time.monotonic()
         start_wheel_position = self._latest_wheel_state.position[0] if self._latest_wheel_state else 0.0
@@ -443,8 +444,7 @@ class ExperimentRunnerNode(Node):
             ratio = elapsed / wheel_torque_ramp_time
             intermediate_torque = target_torque * ratio
 
-            current_torque.data = float(intermediate_torque)
-            self._wheel_torque_publisher.publish(-current_torque)
+            self._publish_wheel_torque(-intermediate_torque)
 
             time.sleep(0.05)
         ramp_end_wheel_position = self._latest_wheel_state.position[0] if self._latest_wheel_state else 0.0
@@ -475,8 +475,7 @@ class ExperimentRunnerNode(Node):
             ratio = elapsed / wheel_torque_ramp_time
             intermediate_torque = target_torque * (1 - ratio)
 
-            current_torque.data = float(intermediate_torque)
-            self._wheel_torque_publisher.publish(-current_torque)
+            self._publish_wheel_torque(-intermediate_torque)
 
             time.sleep(0.05)
 
