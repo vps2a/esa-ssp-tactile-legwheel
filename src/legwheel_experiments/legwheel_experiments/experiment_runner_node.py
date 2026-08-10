@@ -106,6 +106,7 @@ class ExperimentRunnerNode(Node):
         self._recording_started = False #means the CLI successfully loaded and validated the experiment YAML.
 
         self._preflight_status = "Preflight has not started"
+        self._passed_preflight_checks: set[str] = set()
 
         # === Entering preflight ===
 
@@ -259,6 +260,8 @@ class ExperimentRunnerNode(Node):
 
         self.enter_safe_mode()
 
+        self._log_preflight_passes()
+
         failure_reason = self._get_preflight_failure_reason()
 
         if failure_reason is not None:
@@ -279,31 +282,68 @@ class ExperimentRunnerNode(Node):
 
         self._preflight_status = status
         self.get_logger().info(status)
-    
+
+    def _preflight_checks(self) -> tuple[tuple[str, bool, str], ...]:
+        return (
+            (
+                "Experiment configuration is valid",
+                self._configuration_valid,
+                "Waiting for valid experiment configuration",
+            ),
+            (
+                "Recording has started",
+                self._recording_started,
+                "Waiting for recording to start",
+            ),
+            (
+                "Leg telemetry received",
+                self.has_leg_state(),
+                "Waiting for leg telemetry",
+            ),
+            (
+                "Wheel telemetry received",
+                self.has_wheel_state(),
+                "Waiting for wheel telemetry",
+            ),
+            (
+                "Leg telemetry is fresh",
+                self.leg_state_age_s() <= self._maximum_state_age_s,
+                "Leg telemetry is stale",
+            ),
+            (
+                "Wheel telemetry is fresh",
+                self.wheel_state_age_s() <= self._maximum_state_age_s,
+                "Wheel telemetry is stale",
+            ),
+            (
+                "Subscriber found for /legwheel/motor_status",
+                self._motor_status_publisher.get_subscription_count() > 0,
+                "Waiting for a subscriber to /legwheel/motor_status",
+            ),
+            (
+                "Subscriber found for /wheel/requested_torque",
+                self._wheel_torque_publisher.get_subscription_count() > 0,
+                "Waiting for a subscriber to /wheel/requested_torque",
+            ),
+        )
+
+    def _log_preflight_passes(self) -> None:
+        pass_prefix = "[\033[32mPASS\033[0m]"
+
+        for pass_message, passed, _ in self._preflight_checks():
+            if not passed:
+                return
+
+            if pass_message in self._passed_preflight_checks:
+                continue
+
+            self._passed_preflight_checks.add(pass_message)
+            self.get_logger().info(f"{pass_prefix} {pass_message}")
+
     def _get_preflight_failure_reason(self) -> str | None:
-        if not self._configuration_valid:
-            return "Waiting for valid experiment configuration"
-
-        if not self._recording_started:
-            return "Waiting for recording to start"
-
-        if not self.has_leg_state():
-            return "Waiting for leg telemetry"
-
-        if not self.has_wheel_state():
-            return "Waiting for wheel telemetry"
-
-        if self.leg_state_age_s() > self._maximum_state_age_s:
-            return "Leg telemetry is stale"
-
-        if self.wheel_state_age_s() > self._maximum_state_age_s:
-            return "Wheel telemetry is stale"
-
-        if self._motor_status_publisher.get_subscription_count() == 0:
-            return "Waiting for a subscriber to /legwheel/motor_status"
-
-        if self._wheel_torque_publisher.get_subscription_count() == 0:
-            return "Waiting for a subscriber to /wheel/requested_torque"
+        for _, passed, failure_reason in self._preflight_checks():
+            if not passed:
+                return failure_reason
 
         return None
 
