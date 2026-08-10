@@ -456,14 +456,16 @@ class ExperimentRunnerNode(Node):
 
         self.get_logger().info(f"[WHEEL] Target torque reached. Maintaining torque for the duration of the run. Beginning distance measurement")
 
-        mid_run_distance_to_travel = distance_to_travel_m - 2*wheel_ramp_up_distance # To account for ramp down time as well
+        mid_run_distance_target = distance_to_travel_m - 2*wheel_ramp_up_distance # To account for ramp down time as well
+        mid_run_distance_to_travel = mid_run_distance_target
 
+        #TODO Replace this with encoder reading
         while mid_run_distance_to_travel > 0:
             current_wheel_position = self._latest_wheel_state.position[0] if self._latest_wheel_state else 0.0
             wheel_rotation_rad = abs(current_wheel_position - ramp_end_wheel_position)
             wheel_distance_traveled = wheel_rotation_rad * wheel_radius
 
-            mid_run_distance_to_travel = distance_to_travel_m - wheel_distance_traveled
+            mid_run_distance_to_travel = mid_run_distance_target - wheel_distance_traveled
 
             self.get_logger().info(f"[WHEEL] Distance remaining: {mid_run_distance_to_travel:.2f} meters")
             time.sleep(0.2)
