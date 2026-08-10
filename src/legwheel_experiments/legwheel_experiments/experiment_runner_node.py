@@ -26,7 +26,7 @@ class ExperimentRunnerNode(Node):
         self._state_machine = ExperimentStateMachine()
 
         #Setting the wheel drive timeout
-        self._wheel_drive_timeout_s = 5
+        self._wheel_drive_timeout_s = 120
 
         #Initialising the legwheel states
         #These store the ROS messages

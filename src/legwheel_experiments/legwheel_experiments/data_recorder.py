@@ -12,8 +12,11 @@ class RunRecorder:
         self.experiment_directory = experiment_directory
         self.run_directory: Path | None = None
 
-    def start_run(self, run_config: dict[str, Any], experiment_config_path: Path) -> Path:    
-        self.run_directory = self._create_run(run_config)
+    def start_run(self, run_config: dict[str, Any], experiment_config_path: Path) -> Path:
+        self.run_directory = self._create_run(
+            run_config=run_config,
+            experiment_config_path=experiment_config_path,
+        )
         self._change_marker(ExperimentState.RUNNING.name)
         return self.run_directory
 
@@ -62,7 +65,13 @@ class RunRecorder:
 
         return max(run_numbers, default=0) + 1
 
-    def _create_run(self, run_config: dict[str, Any]) -> Path:
+    def _create_run(self, run_config: dict[str, Any], experiment_config_path: Path) -> Path:
+
+        if not experiment_config_path.is_file():
+            raise FileNotFoundError(
+                f"Experiment config snapshot source does not exist: {experiment_config_path}"
+            )
+
         run_number = self._find_next_run_number()
         self.run_directory = (
             self.experiment_directory / f"run_{run_number}"
@@ -76,12 +85,10 @@ class RunRecorder:
             yaml.safe_dump(run_config, file, sort_keys=False)
 
         #Taking the configuration snapshot and copying it into the run directory
-        source = self.experiment_directory / "exp_1_config.yaml"
         destination = (
             self.run_directory / "experiment_config_snapshot.yaml"
         )
-
-        shutil.copy2(source, destination)
+        shutil.copy2(experiment_config_path, destination)
 
         #TODO: Full metadata needs to be created
         #Writing experiment metadata
@@ -90,6 +97,8 @@ class RunRecorder:
             "experiment_id": self.experiment_directory.name,
             "start_time_utc": datetime.now(timezone.utc).isoformat(),
             "abort_reason": None,
+            "experiment_config_source": str(experiment_config_path),
+            "experiment_config_filename": experiment_config_path.name,
         }
 
         with (self.run_directory / "metadata.json").open(
