@@ -25,6 +25,9 @@ class ExperimentRunnerNode(Node):
         #Initialising the state machine
         self._state_machine = ExperimentStateMachine()
 
+        #Setting the wheel drive timeout
+        self._wheel_drive_timeout_s = 5
+
         #Initialising the legwheel states
         #These store the ROS messages
         self._latest_leg_state = None
@@ -435,61 +438,93 @@ class ExperimentRunnerNode(Node):
         self.get_logger().info(f"[WHEEL] Wheel will rotate {target_wheel_rotations:.2f} times to cover the distance of {distance_to_travel_m:.2f} meters.")
 
         self.get_logger().info(f"[WHEEL] Target torque: {target_torque:.2f} Nm, ramp time: {wheel_torque_ramp_time:.2f} seconds. Beginning ramp up...")
-        # Toruqe ramp-up
-        self._publish_wheel_torque(0.0)
 
-        start_time = time.monotonic()
-        start_wheel_position = self._latest_wheel_state.position[0] if self._latest_wheel_state else 0.0
-        while time.monotonic() - start_time < wheel_torque_ramp_time:
-            elapsed = time.monotonic() - start_time
-            ratio = elapsed / wheel_torque_ramp_time
-            intermediate_torque = target_torque * ratio
+        try:
+            # == Toruqe ramp-up ==
 
-            self._publish_wheel_torque(-intermediate_torque)
+            self._publish_wheel_torque(0.0)
 
-            time.sleep(0.05)
-        ramp_end_wheel_position = self._latest_wheel_state.position[0] if self._latest_wheel_state else 0.0
-        wheel_ramp_up_rotation_rad = abs(ramp_end_wheel_position - start_wheel_position)
-        wheel_ramp_up_distance = wheel_ramp_up_rotation_rad * wheel_radius
+            start_time = time.monotonic()
+            start_wheel_position = self._current_wheel_position_from_encoder()
+            while time.monotonic() - start_time < wheel_torque_ramp_time:
+                # Checking if the wheel telemetry is still valid
+                self._current_wheel_position_from_encoder()
 
-        self.get_logger().info(f"[WHEEL] Wheel ramp-up completed. Wheel rotated {wheel_ramp_up_rotation_rad:.2f} radians, covering a distance of {wheel_ramp_up_distance:.2f} meters during ramp-up.")
+                elapsed = time.monotonic() - start_time
+                ratio = elapsed / wheel_torque_ramp_time
+                intermediate_torque = target_torque * ratio
+                self._publish_wheel_torque(-intermediate_torque)
 
-        self.get_logger().info(f"[WHEEL] Target torque reached. Maintaining torque for the duration of the run. Beginning distance measurement")
+                time.sleep(0.05)
+            ramp_end_wheel_position = self._current_wheel_position_from_encoder()
+            wheel_ramp_up_rotation_rad = abs(ramp_end_wheel_position - start_wheel_position)
+            wheel_ramp_up_distance = wheel_ramp_up_rotation_rad * wheel_radius
 
-        mid_run_distance_target = distance_to_travel_m - 2*wheel_ramp_up_distance # To account for ramp down time as well
-        mid_run_distance_to_travel = mid_run_distance_target
+            self.get_logger().info(f"[WHEEL] Wheel ramp-up completed. Wheel rotated {wheel_ramp_up_rotation_rad:.2f} radians, covering a distance of {wheel_ramp_up_distance:.2f} meters during ramp-up.")
 
-        #TODO Replace this with encoder reading
-        while mid_run_distance_to_travel > 0:
-            current_wheel_position = self._latest_wheel_state.position[0] if self._latest_wheel_state else 0.0
-            wheel_rotation_rad = abs(current_wheel_position - ramp_end_wheel_position)
-            wheel_distance_traveled = wheel_rotation_rad * wheel_radius
+            self.get_logger().info(f"[WHEEL] Target torque reached. Maintaining torque for the duration of the run. Beginning distance measurement")
 
-            mid_run_distance_to_travel = mid_run_distance_target - wheel_distance_traveled
+            # == Mid-run ==
 
-            self.get_logger().info(f"[WHEEL] Distance remaining: {mid_run_distance_to_travel:.2f} meters")
-            time.sleep(0.2)
-        
-        self.get_logger().info(f"[WHEEL] Target distance reached. Beginning ramp down...")
+            mid_run_distance_target = distance_to_travel_m - 2*wheel_ramp_up_distance # To account for ramp down time as well
+            mid_run_distance_to_travel = mid_run_distance_target
+            mid_run_start_time = time.monotonic()
 
-        ramp_down_start_time = time.monotonic()
-        while time.monotonic() - ramp_down_start_time < wheel_torque_ramp_time:
-            elapsed = time.monotonic() - ramp_down_start_time
-            ratio = elapsed / wheel_torque_ramp_time
-            intermediate_torque = target_torque * (1 - ratio)
+            #TODO Replace this with encoder reading
+            while mid_run_distance_to_travel > 0:
+                current_wheel_position = self._current_wheel_position_from_encoder()
+                wheel_rotation_rad = abs(current_wheel_position - ramp_end_wheel_position)
+                wheel_distance_traveled = wheel_rotation_rad * wheel_radius
 
-            self._publish_wheel_torque(-intermediate_torque)
+                mid_run_distance_to_travel = mid_run_distance_target - wheel_distance_traveled
 
-            time.sleep(0.05)
+                self.get_logger().info(f"[WHEEL] Distance remaining: {mid_run_distance_to_travel:.2f} meters")
 
-        #Publishing zero torque just in case
-        self._publish_zero_wheel_torque()
+                # Checking timeout scenario
+                if time.monotonic() - mid_run_start_time > self._wheel_drive_timeout_s:
+                    self.get_logger().error(f"[WHEEL] Wheel drive timeout reached. Stopping wheel movement.")
+                    break
 
-        total_wheel_rotation = abs(self._latest_wheel_state.position[0] - start_wheel_position) if self._latest_wheel_state else 0.0
+                time.sleep(0.2)
+            
+            self.get_logger().info(f"[WHEEL] Target distance reached. Beginning ramp down...")
+
+            # == Torque ramp-down ==
+
+            ramp_down_start_time = time.monotonic()
+            while time.monotonic() - ramp_down_start_time < wheel_torque_ramp_time:
+                # Checking if the wheel telemetry is still valid
+                self._current_wheel_position_from_encoder()
+
+                elapsed = time.monotonic() - ramp_down_start_time
+                ratio = elapsed / wheel_torque_ramp_time
+                intermediate_torque = target_torque * (1 - ratio)
+                self._publish_wheel_torque(-intermediate_torque)
+                time.sleep(0.05)
+
+        finally: # Ensuring that the wheel torque is set to zero at the end of the run, even if an error occurs
+            self._publish_zero_wheel_torque()
+
+        total_wheel_rotation = abs(self._current_wheel_position_from_encoder() - start_wheel_position)
         total_distance_travelled = total_wheel_rotation * wheel_radius
 
         self.get_logger().info(f"[WHEEL] Wheel ramp-down completed. Wheel movement finished. Total distance travelled = {total_distance_travelled} meters, which is {total_distance_travelled/distance_to_travel_m*100:.2f}% of the target distance.")
-        
+
+    def _current_wheel_position_from_encoder(self) -> float:
+        if self._latest_wheel_state is None:
+            raise RuntimeError("Cannot read wheel position: no wheel telemetry")
+
+        if self.wheel_state_age_s() > self._maximum_state_age_s:
+            raise RuntimeError("Cannot rely on wheel position data: wheel telemetry is stale")
+
+        if len(self._latest_wheel_state.position) < 1:
+            raise RuntimeError("Cannot read wheel position: wheel telemetry has no position value")
+
+        position = self._latest_wheel_state.position[0]
+        if not self._is_numeric(position):
+            raise RuntimeError("Cannot read wheel position: wheel position is not numeric")
+
+        return float(position)
 
     def _configure_legwheel_stiffness_and_zeropos(
         self,
@@ -516,7 +551,7 @@ class ExperimentRunnerNode(Node):
 
         last_stiffness = self._last_commanded_stiffness
         last_damping = self._last_commanded_damping
-        last_zero_position = self._current_position_from_encoder()
+        last_zero_position = self._current_leg_position_from_encoder()
 
         #now iterating over the duration and publishing the intermediate values
         start_time = time.monotonic()
@@ -552,7 +587,7 @@ class ExperimentRunnerNode(Node):
             zero_position=zero_position_target,
         )
 
-    def _current_position_from_encoder(self) -> list[float]:
+    def _current_leg_position_from_encoder(self) -> list[float]:
         if self._latest_leg_state is None:
             raise RuntimeError("Cannot read leg position: no leg telemetry")
 
