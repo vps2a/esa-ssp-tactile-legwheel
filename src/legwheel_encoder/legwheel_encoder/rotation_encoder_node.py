@@ -40,6 +40,8 @@ class RotationEncoderNode(Node):
         self.last_ticks = None
         self.last_time = None
 
+        self.last_tick_value = None
+
         self.joint_state_pub = self.create_publisher(
             JointState,
             "/rotation_encoder/joint_state",
@@ -73,16 +75,20 @@ class RotationEncoderNode(Node):
 
         try:
             ticks = int(line)
-            print(f"Received ticks: {ticks}")
-            if (abs(ticks - last_tick_value) > 3) and ticks_initialised:
-                self.get_logger().warning(f"Tick value difference too big - received: {ticks}, last: {last_tick_value}")
-                return
-            ticks_initialised = True
-            last_tick_value = ticks
+            self.get_logger().debug(f"Received ticks: {ticks}")
 
         except ValueError:
             self.get_logger().warning(f"Invalid encoder line: {line}")
             return
+
+        # Rejecting false tick values that are too far from the last accepted value (greater than 3 ticks difference)
+        if self.last_tick_value is not None:
+            if abs(ticks - self.last_tick_value) > 3:
+                self.get_logger().warning(f"Rejecting false tick value: {ticks}; last accepted tick value: {self.last_tick_value}")
+                return
+            
+        #Updating only after the reading has been accepted
+        self.last_tick_value = ticks
 
         if self.zero_ticks is None:
             self.zero_ticks = ticks
