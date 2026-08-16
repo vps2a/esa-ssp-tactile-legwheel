@@ -21,7 +21,7 @@ class RotationEncoderNode(Node):
         super().__init__("rotation_encoder_node")
 
         self.declare_parameter("port", "/dev/ttyUSB0")
-        self.declare_parameter("baudrate", 115200)
+        self.declare_parameter("baudrate", 9600)
         self.declare_parameter("ticks_per_revolution", 62.5)
         self.declare_parameter("publish_rate_hz", 100.0)
         self.declare_parameter("invert_direction", False)
@@ -33,6 +33,8 @@ class RotationEncoderNode(Node):
         self.invert_direction = self.get_parameter("invert_direction").value
 
         self.serial = serial.Serial(self.port, self.baudrate, timeout=0.01)
+        self.get_logger().info(f"Opened serial port {self.port} at {self.baudrate} baud.")
+        self.serial.reset_input_buffer()
 
         self.zero_ticks = None
         self.last_ticks = None
@@ -61,11 +63,23 @@ class RotationEncoderNode(Node):
     def timer_callback(self):
         line = self.serial.readline().decode("utf-8").strip()
 
+        #Rejecting the false ticks as well
+        ticks_initialised = False
+        if not ticks_initialised:
+            last_tick_value = 0
+
         if not line:
             return
 
         try:
             ticks = int(line)
+            print(f"Received ticks: {ticks}")
+            if (abs(ticks - last_tick_value) > 3) and ticks_initialised:
+                self.get_logger().warning(f"Tick value difference too big - received: {ticks}, last: {last_tick_value}")
+                return
+            ticks_initialised = True
+            last_tick_value = ticks
+
         except ValueError:
             self.get_logger().warning(f"Invalid encoder line: {line}")
             return
