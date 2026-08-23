@@ -13,29 +13,33 @@ class DepthVisualizerNode(Node):
 
         self.declare_parameter("min_depth_m", 0.3)
         self.declare_parameter("max_depth_m", 2.5)
+        self.declare_parameter("depth_topic", "/iphone/depth/image_raw")
+        self.declare_parameter("visualization_topic", "/iphone/depth/image_viz")
 
         self.min_depth_m = float(self.get_parameter("min_depth_m").value)
         self.max_depth_m = float(self.get_parameter("max_depth_m").value)
+        depth_topic = self.get_parameter("depth_topic").value
+        visualization_topic = self.get_parameter("visualization_topic").value
 
         self.sub = self.create_subscription(
             Image,
-            "/iphone/depth/image_raw",
+            depth_topic,
             self.depth_callback,
             10,
         )
 
         self.pub = self.create_publisher(
             Image,
-            "/iphone/depth/image_viz",
+            visualization_topic,
             10,
         )
 
-        self.get_logger().info("Depth visualizer started")
+        self.get_logger().info(f"Depth visualizer started on {depth_topic}")
 
     def depth_callback(self, msg):
-        if msg.encoding != "32FC1":
+        if msg.encoding not in ("32FC1", "16UC1"):
             self.get_logger().warn_once(
-                f"Expected 32FC1 depth image, got {msg.encoding}"
+                f"Expected 32FC1 or 16UC1 depth image, got {msg.encoding}"
             )
             return
 
@@ -50,9 +54,18 @@ class DepthVisualizerNode(Node):
         output = bytearray()
         depth_range = self.max_depth_m - self.min_depth_m
 
-        for i in range(0, len(msg.data), 4):
-            depth_m = struct.unpack("f", msg.data[i:i + 4])[0]
+        if msg.encoding == "32FC1":
+            depth_values = (
+                struct.unpack("f", msg.data[i:i + 4])[0]
+                for i in range(0, len(msg.data), 4)
+            )
+        else:
+            depth_values = (
+                struct.unpack("H", msg.data[i:i + 2])[0] * 0.001
+                for i in range(0, len(msg.data), 2)
+            )
 
+        for depth_m in depth_values:
             normalized = (depth_m - self.min_depth_m) / depth_range
             normalized = max(0.0, min(1.0, normalized))
 

@@ -26,3 +26,13 @@ ssh parallels@[IP_address]
 
 Remember to source ROS2 on each new ssh session with:
 source /opt/ros/jazzy/setup.bash
+
+## Orbbec Gemini 336 RGB-D Camera
+
+The real RGB-D camera is integrated through Orbbec's ROS 2 wrapper and launched from the `legwheel_rgbd` package:
+
+```bash
+ros2 launch legwheel_rgbd gemini_336.launch.py
+```
+
+See [docs/orbbec_gemini_336_setup.md](docs/orbbec_gemini_336_setup.md) for the full dependency, udev-rule, build, and verification workflow.
