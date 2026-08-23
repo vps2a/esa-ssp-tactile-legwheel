@@ -13,8 +13,8 @@ class DepthVisualizerNode(Node):
 
         self.declare_parameter("min_depth_m", 0.3)
         self.declare_parameter("max_depth_m", 2.5)
-        self.declare_parameter("depth_topic", "/iphone/depth/image_raw")
-        self.declare_parameter("visualization_topic", "/iphone/depth/image_viz")
+        self.declare_parameter("depth_topic", "/camera/rgbd/depth/image_raw")
+        self.declare_parameter("visualization_topic", "/camera/rgbd/depth/image_viz")
 
         self.min_depth_m = float(self.get_parameter("min_depth_m").value)
         self.max_depth_m = float(self.get_parameter("max_depth_m").value)

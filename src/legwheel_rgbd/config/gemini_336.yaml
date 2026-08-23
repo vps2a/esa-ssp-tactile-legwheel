@@ -6,8 +6,11 @@ enable_color: true
 enable_depth: true
 enable_left_ir: false
 enable_right_ir: false
-enable_accel: false
-enable_gyro: false
+enable_accel: true
+enable_gyro: true
+enable_sync_output_accel_gyro: true
+accel_rate: 100hz
+gyro_rate: 100hz
 enable_point_cloud: false
 enable_colored_point_cloud: false
 publish_tf: true

@@ -8,6 +8,7 @@ The Gemini 336 is driven through Orbbec's ROS 2 wrapper and exposed to this proj
 - Branch: `v2-main`
 - Camera launch file: `gemini_330_series.launch.py`
 - LegWheel wrapper launch file: `ros2 launch legwheel_rgbd gemini_336.launch.py`
+- LegWheel camera config: `src/legwheel_rgbd/config/camera_config.yaml`
 
 The Orbbec wrapper currently lists the Gemini 336 in the Gemini 330 series and recommends the `gemini_330_series.launch.py` launch file.
 
@@ -57,9 +58,10 @@ In another terminal:
 ```bash
 source install/setup.bash
 ros2 topic list | grep legwheel_rgbd
-ros2 topic hz /legwheel_rgbd/color/image_raw
-ros2 topic hz /legwheel_rgbd/depth/image_raw
-ros2 topic echo --once /legwheel_rgbd/depth/camera_info
+ros2 topic hz /camera/rgbd/rgb/image_raw
+ros2 topic hz /camera/rgbd/depth/image_raw
+ros2 topic hz /camera/imu
+ros2 topic echo --once /camera/rgbd/depth/camera_info
 ```
 
 Optional point cloud:
@@ -70,18 +72,28 @@ ros2 launch legwheel_rgbd gemini_336.launch.py enable_point_cloud:=true
 
 ## Expected topics
 
-With the default `camera_name:=legwheel_rgbd`, Orbbec topics are namespaced under `/legwheel_rgbd`, including:
+With the default `camera_name:=legwheel_rgbd`, raw Orbbec topics are namespaced under `/legwheel_rgbd`, including:
 
 - `/legwheel_rgbd/color/image_raw`
 - `/legwheel_rgbd/color/camera_info`
 - `/legwheel_rgbd/depth/image_raw`
 - `/legwheel_rgbd/depth/camera_info`
+- `/legwheel_rgbd/gyro_accel/sample`
 - `/legwheel_rgbd/depth/points` when point cloud output is enabled
+
+The LegWheel bridge node republishes those streams at the rates in `camera_config.yaml`:
+
+- `/camera/rgbd/rgb/image_raw`
+- `/camera/rgbd/rgb/camera_info`
+- `/camera/rgbd/depth/image_raw`
+- `/camera/rgbd/depth/camera_info`
+- `/camera/imu`
 
 ## Notes for implementation
 
 - Depend on ROS messages and topics from `orbbec_camera`; do not call the Orbbec SDK directly from LegWheel code unless a ROS topic/service cannot provide the data.
-- Keep reusable camera parameters in `src/legwheel_rgbd/config/gemini_336.yaml`.
+- Keep Orbbec driver parameters in `src/legwheel_rgbd/config/gemini_336.yaml`.
+- Keep LegWheel publish rates and topic names in `src/legwheel_rgbd/config/camera_config.yaml`.
 - Use `serial_number` or `usb_port` launch arguments once multiple cameras are connected.
 - Start with point clouds disabled during bring-up to reduce USB and CPU load.
 - The Gemini 336 should be on a USB 3 port. If frames drop at high resolution, lower `color_width`, `color_height`, `depth_width`, `depth_height`, or FPS in the config file.
