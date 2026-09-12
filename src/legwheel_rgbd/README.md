@@ -58,6 +58,23 @@ source install/setup.bash
 package alongside `legwheel_rgbd`. No separate application-level Orbbec SDK
 installation is required for this integration.
 
+### Confirm the workspace driver is selected
+
+Always source the workspace after the base ROS installation:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+ros2 pkg prefix orbbec_camera
+```
+
+The final command must print a path inside this workspace, ending in
+`install/orbbec_camera`. A result under `/opt/ros/jazzy` means ROS is using a
+system-installed Orbbec driver instead. That binary can be incompatible with
+the installed ROS libraries and must not be mixed with this workspace's source
+build. Re-run `vcs import`, build the workspace, and source `install/setup.bash`
+again before launching the camera.
+
 To refresh the imported source later, run:
 
 ```bash
