@@ -4,6 +4,10 @@ align_mode: SW
 align_target_stream: COLOR
 enable_color: true
 enable_depth: true
+color_qos: SENSOR_DATA
+color_camera_info_qos: SENSOR_DATA
+depth_qos: SENSOR_DATA
+depth_camera_info_qos: SENSOR_DATA
 enable_left_ir: false
 enable_right_ir: false
 enable_accel: true

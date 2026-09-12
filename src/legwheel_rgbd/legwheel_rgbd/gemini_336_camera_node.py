@@ -164,9 +164,23 @@ class Gemini336CameraNode(Node):
             missing_sources.append(self.get_parameter("source_imu_topic").value)
 
         if missing_sources:
-            self.get_logger().warn(
-                "Waiting for Gemini 336 source topics: " + ", ".join(missing_sources)
+            source_status = "; ".join(
+                self._describe_source_topic(topic) for topic in missing_sources
             )
+            self.get_logger().warn(
+                "Waiting for Gemini 336 source topics: " + source_status
+            )
+
+    def _describe_source_topic(self, topic):
+        publishers = self.get_publishers_info_by_topic(topic)
+        if not publishers:
+            return f"{topic} (no publishers discovered)"
+
+        publisher_names = ", ".join(
+            f"{publisher.node_namespace.rstrip('/')}/{publisher.node_name}"
+            for publisher in publishers
+        )
+        return f"{topic} ({len(publishers)} publisher(s): {publisher_names})"
 
 
 def main(args=None):
