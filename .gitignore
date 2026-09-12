@@ -26,3 +26,6 @@ venv/
 # OS/editor junk
 .DS_Store
 *~
+
+# Imported by vcs from dependencies.repos.
+src/third_party/OrbbecSDK_ROS2/
