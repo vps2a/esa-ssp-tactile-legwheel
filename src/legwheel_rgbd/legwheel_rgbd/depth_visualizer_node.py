@@ -4,6 +4,7 @@ import struct
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 
 
@@ -25,13 +26,13 @@ class DepthVisualizerNode(Node):
             Image,
             depth_topic,
             self.depth_callback,
-            10,
+            qos_profile_sensor_data,
         )
 
         self.pub = self.create_publisher(
             Image,
             visualization_topic,
-            10,
+            qos_profile_sensor_data,
         )
 
         self.get_logger().info(f"Depth visualizer started on {depth_topic}")
