@@ -835,7 +835,8 @@ class ExperimentRunnerNode(Node):
 
         last_stiffness = self._last_commanded_stiffness
         last_damping = self._last_commanded_damping
-        last_zero_position = self._current_leg_position_from_encoder()
+        last_zero_position = self._last_commanded_zero_position
+        #last_zero_position = self._current_leg_position_from_encoder()
 
         #now iterating over the duration and publishing the intermediate values
         start_time = time.monotonic()

@@ -263,7 +263,7 @@ def validate_run_config(config: RunConfig) -> None:
         config.leg_parameters.get("knee_spring_zeroposition_rad"),
         "leg_parameters.knee_spring_zeroposition_rad",
         minimum=0.0,
-        maximum=1.0,
+        maximum=1.5,
     )
     require_number(
         config.leg_parameters.get("knee_damping_nms_per_rad"),
