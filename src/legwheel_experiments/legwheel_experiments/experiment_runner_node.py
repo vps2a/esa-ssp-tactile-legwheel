@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from numbers import Real
 from typing import Any
 
@@ -379,10 +379,10 @@ class ExperimentRunnerNode(Node):
         self._recording_started = True
 
     def adjust_spring_zero_position(self, run_config: RunConfig) -> None:
-        """Gradually apply a validated knee zero position while waiting to run."""
-        if self._state_machine.state is not ExperimentState.ARMED:
+        """Gradually apply a validated knee zero position after the initial ramp."""
+        if self._state_machine.state is not ExperimentState.RUNNING:
             raise RuntimeError(
-                "Spring zero position can only be adjusted while the experiment is armed"
+                "Spring zero position can only be adjusted during experiment setup"
             )
 
         # Reuse the schema limits so this public control path cannot bypass the CLI.
@@ -587,6 +587,7 @@ class ExperimentRunnerNode(Node):
         self,
         run_config: RunConfig,
         experiment_config: ExperimentConfig,
+        spring_zero_position_callback: Callable[[RunConfig], RunConfig] | None = None,
     ) -> None:
         if self._state_machine.state is not ExperimentState.ARMED:
             raise RuntimeError(
@@ -626,9 +627,19 @@ class ExperimentRunnerNode(Node):
             zero_position=zero_position,
         )
 
-        self.get_logger().info("Post-arm leg parameter ramp completed. Wheel movement will begin in 3 seconds.")
+        # Keep torque at zero for the existing three-second settle period.
+        self.get_logger().info(
+            "Post-arm leg parameter ramp completed. Wheel movement remains disabled "
+            "while the mechanism settles for 3 seconds."
+        )
 
         time.sleep(3.0)
+
+        if spring_zero_position_callback is not None:
+            # The CLI owns terminal I/O and recording; the node owns when it is safe
+            # to ask and applies each callback-requested value through its ramp helper.
+            run_config = spring_zero_position_callback(run_config)
+            validate_run_config(run_config)
 
         self._wheel_control(run_config, experiment_config)
 
