@@ -12,6 +12,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
@@ -27,7 +28,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'fake_rgbd_publisher_node = legwheel_rgbd.fake_rgbd_publisher_node:main',
+            'gemini_336_camera_node = legwheel_rgbd.gemini_336_camera_node:main',
             'depth_visualizer_node = legwheel_rgbd.depth_visualizer_node:main',
             'sensorstream_bridge_node = legwheel_rgbd.sensorstream_bridge_node:main',
         ],
