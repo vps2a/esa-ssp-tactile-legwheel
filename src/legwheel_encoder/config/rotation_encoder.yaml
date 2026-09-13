@@ -1,0 +1,8 @@
+rotation_encoder_node:
+  ros__parameters:
+    port: "/dev/ttyUSB0"
+    baudrate: 9600
+    ticks_per_rig_revolution: 83.3
+    publish_rate_hz: 100.0
+    invert_direction: false
+    zero_on_start: true

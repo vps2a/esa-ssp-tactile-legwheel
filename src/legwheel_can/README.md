@@ -6,11 +6,11 @@ safety-first split:
 
 - `md80_zero_node` is for passive encoder observation and zeroing.
 - `md80_impedance_node` is for read-only monitoring, gated fixed-1DOF leg
-  control, and wheel velocity control on the same CAN bus.
+  control, and wheel raw-torque control on the same CAN bus.
 - `legwheel_controller_node` is a Python terminal command publisher for
   knee impedance targets, gains, and motor enable/stop status.
 - `wheel_controller_node` is a Python keyboard controller for publishing wheel
-  velocity requests.
+  torque requests.
 
 The default logical joints are:
 
@@ -26,7 +26,7 @@ skipped. Set `wheel_motor_id` to the real MD80 ID before using wheel control.
 ## Files Added Or Updated
 
 - `config/motor_ids.yaml`: maps logical hip/knee joints to MD80 CAN IDs.
-- `config/motor_limits.yaml`: software position, velocity, and torque limits.
+- `config/motor_limits.yaml`: software leg position/velocity limits and torque limits.
 - `config/motor_config.json`: startup zero/gain defaults and runtime safety
   settings that are not ROS YAML parameters.
 - `src/md80_zero_node.cpp`: passive calibration and zeroing node.
@@ -34,7 +34,7 @@ skipped. Set `wheel_motor_id` to the real MD80 ID before using wheel control.
 - `scripts/legwheel_controller_node.py`: terminal command node for publishing
   knee impedance commands and motor enable/stop status.
 - `scripts/wheel_controller_node.py`: keyboard command node for publishing wheel
-  speed requests.
+  torque requests.
 - `launch/md80_zero.launch.py`: launches the zeroing node with motor IDs.
 - `launch/md80_impedance.launch.py`: launches the impedance node with motor IDs
   and software limits.
@@ -189,7 +189,7 @@ Control loop:
    - command knee zero target velocity, zero feed-forward torque, and target
      position,
    - command hip position to mirror the latest knee encoder position,
-   - rate-limit and command wheel velocity if the wheel is connected.
+   - rate-limit and command wheel torque if the wheel is connected.
 4. If the control gate is closed, do not send target commands.
 
 Hip mirror target:
@@ -355,7 +355,6 @@ legwheel_can:
     knee_velocity_max_rad_s: 1.0
     knee_torque_max_nm: 2.0
 
-    wheel_velocity_max_rad_s: 2.0
     wheel_torque_max_nm: 8.0
 ```
 
@@ -364,7 +363,7 @@ valid:
 
 - `limits_provided == true`
 - position min is less than position max,
-- velocity limit is positive,
+- leg velocity limits are positive,
 - torque limit is positive.
 
 ### Motor Runtime Config
@@ -504,7 +503,7 @@ ros2 topic pub --once /legwheel/controller_command std_msgs/msg/String "{data: '
 ros2 topic pub --once /legwheel/controller_command std_msgs/msg/String "{data: 's'}"
 ```
 
-### 4. Wheel Velocity Control
+### 4. Wheel Torque Control
 
 Set `wheel_motor_id` in `config/motor_ids.yaml`, then launch the impedance node
 with control armed and enable motors through the legwheel controller:
@@ -527,8 +526,8 @@ ros2 launch legwheel_can wheel_controller.launch.py
 ```
 
 Keep that terminal focused. Hold `w` to ramp forward, hold `s` to ramp backward,
-and release the key to ramp back to zero. Use `+` and `-` to adjust the saved
-wheel max speed by `0.1` rad/s.
+and release the key to ramp back to zero. Use `+` and `-` to adjust the wheel
+max torque by `0.1` Nm.
 
 Wheel state is published on:
 

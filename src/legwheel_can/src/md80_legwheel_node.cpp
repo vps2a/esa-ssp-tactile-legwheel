@@ -193,7 +193,6 @@ private:
     declare_parameter<double>("knee_position_max_rad", 0.5);
     declare_parameter<double>("knee_velocity_max_rad_s", 1.0);
     declare_parameter<double>("knee_torque_max_nm", 2.0);
-    declare_parameter<double>("wheel_velocity_max_rad_s", 2.0);
     declare_parameter<double>("wheel_torque_max_nm", 8.0);
 
     declare_parameter<double>("max_spring_constant", 50.0);
@@ -234,8 +233,6 @@ private:
     joints_[kWheelIndex].joint_name = "wheel_joint";
     joints_[kWheelIndex].id = get_parameter("wheel_motor_id").as_int();
     joints_[kWheelIndex].has_position_limits = false;
-    joints_[kWheelIndex].limits.velocity_max_rad_s =
-      get_parameter("wheel_velocity_max_rad_s").as_double();
     joints_[kWheelIndex].limits.torque_max_nm = get_parameter("wheel_torque_max_nm").as_double();
 
     limits_provided_ = get_parameter("limits_provided").as_bool();
@@ -390,7 +387,9 @@ private:
 
     for (const auto & joint : joints_) {
       const auto & limits = joint.limits;
-      if (!is_finite(limits.velocity_max_rad_s) || limits.velocity_max_rad_s <= 0.0) {
+      if (joint.has_position_limits &&
+        (!is_finite(limits.velocity_max_rad_s) || limits.velocity_max_rad_s <= 0.0))
+      {
         RCLCPP_ERROR(
           get_logger(),
           "%s velocity limit must be finite and positive.",
@@ -705,10 +704,14 @@ private:
 
       const auto velocity = joint.md->getVelocity();
       if (velocity.second == mab::MD::Error_t::OK) {
-        joint.last_velocity_rad_s = std::clamp(
-          static_cast<double>(velocity.first),
-          -joint.limits.velocity_max_rad_s,
-          joint.limits.velocity_max_rad_s);
+        if (joint.has_position_limits) {
+          joint.last_velocity_rad_s = std::clamp(
+            static_cast<double>(velocity.first),
+            -joint.limits.velocity_max_rad_s,
+            joint.limits.velocity_max_rad_s);
+        } else {
+          joint.last_velocity_rad_s = static_cast<double>(velocity.first);
+        }
       }
 
       const auto torque = joint.md->getTorque();

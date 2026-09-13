@@ -1,0 +1,16 @@
+gemini_336_camera_node:
+  ros__parameters:
+    rgbd_publish_rate_hz: 30.0
+    imu_publish_rate_hz: 100.0
+
+    source_rgb_topic: /legwheel_rgbd/color/image_raw
+    source_rgb_camera_info_topic: /legwheel_rgbd/color/camera_info
+    source_depth_topic: /legwheel_rgbd/depth/image_raw
+    source_depth_camera_info_topic: /legwheel_rgbd/depth/camera_info
+    source_imu_topic: /legwheel_rgbd/gyro_accel/sample
+
+    rgb_topic: /camera/rgbd/rgb/image_raw
+    rgb_camera_info_topic: /camera/rgbd/rgb/camera_info
+    depth_topic: /camera/rgbd/depth/image_raw
+    depth_camera_info_topic: /camera/rgbd/depth/camera_info
+    imu_topic: /camera/imu

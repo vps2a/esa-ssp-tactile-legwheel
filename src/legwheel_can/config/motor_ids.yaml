@@ -2,5 +2,5 @@ legwheel_can:
   ros__parameters:
     hip_motor_id: 461
     knee_motor_id: 923
-    # Set this to the real wheel MD80 ID before using wheel velocity control.
+    # Set this to the real wheel MD80 ID before using wheel torque control.
     wheel_motor_id: 689

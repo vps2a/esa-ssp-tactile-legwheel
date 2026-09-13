@@ -9,10 +9,10 @@ class SensorStreamBridgeNode(Node):
         super().__init__("sensorstream_bridge_node")
 
         self.declare_parameter("connection", "usb")
-        self.declare_parameter("rgb_topic", "/iphone/rgb/image_raw")
-        self.declare_parameter("depth_topic", "/iphone/depth/image_raw")
-        self.declare_parameter("camera_info_topic", "/iphone/rgb/camera_info")
-        self.declare_parameter("imu_topic", "/iphone/imu")
+        self.declare_parameter("rgb_topic", "/camera/rgbd/rgb/image_raw")
+        self.declare_parameter("depth_topic", "/camera/rgbd/depth/image_raw")
+        self.declare_parameter("camera_info_topic", "/camera/rgbd/rgb/camera_info")
+        self.declare_parameter("imu_topic", "/camera/imu")
 
         connection = self.get_parameter("connection").value
 

@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 import os
 from glob import glob
 
-package_name = 'legwheel_rgbd'
+package_name = 'legwheel_encoder'
 
 setup(
     name=package_name,
@@ -13,12 +13,12 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
-        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='parallels',
-    maintainer_email='parallels@todo.todo',
+    maintainer_email='f.szczebak@gmail.com',
     description='TODO: Package description',
     license='TODO: License declaration',
     extras_require={
@@ -28,9 +28,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'gemini_336_camera_node = legwheel_rgbd.gemini_336_camera_node:main',
-            'depth_visualizer_node = legwheel_rgbd.depth_visualizer_node:main',
-            'sensorstream_bridge_node = legwheel_rgbd.sensorstream_bridge_node:main',
+            'rotation_encoder_node = legwheel_encoder.rotation_encoder_node:main',
         ],
     },
 )
