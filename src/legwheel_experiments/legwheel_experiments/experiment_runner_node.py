@@ -8,7 +8,7 @@ import threading
 import time
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import Image, Imu, JointState
 from std_msgs.msg import Bool
 from std_msgs.msg import Float64
 from std_msgs.msg import Float64MultiArray
@@ -37,6 +37,19 @@ class ExperimentRunnerNode(Node):
         self._leg_state_received_at_s = None
         self._wheel_state_received_at_s = None
         self._encoder_state_received_at_s = None
+
+        #Initialising Camera States
+        self._latest_camera_rgb = None
+        self._latest_camera_depth = None
+        self._latest_camera_imu = None
+
+        self._camera_rgb_received_at_s = None
+        self._camera_depth_received_at_s = None
+        self._camera_imu_received_at_s = None
+
+        # Allow some scheduling margin while still detecting a stopped camera quickly.
+        self._maximum_camera_image_age_s = 1.0
+        self._maximum_camera_imu_age_s = 0.5
 
         #Initializing the preflight complete event
         #unset = preflight has not completed
@@ -109,6 +122,27 @@ class ExperimentRunnerNode(Node):
             qos_profile_sensor_data,
         )
 
+        self._camera_rgb_subscription = self.create_subscription(
+            Image,
+            "/camera/rgbd/rgb/image_raw",
+            self._camera_rgb_callback,
+            qos_profile_sensor_data,
+        )
+
+        self._camera_depth_subscription = self.create_subscription(
+            Image,
+            "/camera/rgbd/depth/image_raw",
+            self._camera_depth_callback,
+            qos_profile_sensor_data,
+        )
+
+        self._camera_imu_subscription = self.create_subscription(
+            Imu,
+            "/camera/imu",
+            self._camera_imu_callback,
+            qos_profile_sensor_data,
+        )
+
         self._maximum_state_age_s = 0.5 #telemetry sample older than 0.5 seconds is considered stale
 
         self._configuration_valid = False #means the CLI successfully loaded and validated the experiment YAML.
@@ -155,6 +189,18 @@ class ExperimentRunnerNode(Node):
         self._latest_encoder_state = message
         self._encoder_state_received_at_s = time.monotonic()
 
+    def _camera_rgb_callback(self, message: Image) -> None:
+        self._latest_camera_rgb = message
+        self._camera_rgb_received_at_s = time.monotonic()
+
+    def _camera_depth_callback(self, message: Image) -> None:
+        self._latest_camera_depth = message
+        self._camera_depth_received_at_s = time.monotonic()
+
+    def _camera_imu_callback(self, message: Imu) -> None:
+        self._latest_imu_state = message
+        self._imu_state_received_at_s = time.monotonic()
+
     # == Telemetry helper functions and inspection ==
     def has_leg_state(self) -> bool:
         return self._latest_leg_state is not None
@@ -165,8 +211,17 @@ class ExperimentRunnerNode(Node):
     def has_encoder_state(self) -> bool:
         return self._latest_encoder_state is not None
     
-        #Calculate telemetry age
-        #If no message has arrived, the age is treated as infinity - this is useful for checking if the telemetry is stale
+    def has_camera_rgb(self) -> bool:
+        return self._latest_camera_rgb is not None
+
+    def has_camera_depth(self) -> bool:
+        return self._latest_camera_depth is not None
+
+    def has_camera_imu(self) -> bool:
+        return self._latest_camera_imu is not None
+        
+    #Calculate telemetry age
+    #If no message has arrived, the age is treated as infinity - this is useful for checking if the telemetry is stale
     def leg_state_age_s(self) -> float:
         if self._leg_state_received_at_s is None:
             return float("inf")
@@ -184,6 +239,21 @@ class ExperimentRunnerNode(Node):
             return float("inf")
 
         return time.monotonic() - self._encoder_state_received_at_s
+    
+    def camera_rgb_age_s(self) -> float:
+        if self._camera_rgb_received_at_s is None:
+            return float("inf")
+        return time.monotonic() - self._camera_rgb_received_at_s
+
+    def camera_depth_age_s(self) -> float:
+        if self._camera_depth_received_at_s is None:
+            return float("inf")
+        return time.monotonic() - self._camera_depth_received_at_s
+
+    def camera_imu_age_s(self) -> float:
+        if self._camera_imu_received_at_s is None:
+            return float("inf")
+        return time.monotonic() - self._camera_imu_received_at_s
 
     # == Safe publishing ==
 

@@ -66,13 +66,13 @@ def collect_run_configuration() -> dict[str, Any]:
     commanded_wheel_torque_nm = ask_float("Commanded wheel torque (in Nm): ", minimum=0, maximum=8)
     wheel_torque_ramp_time_sec = ask_float("Wheel ramp time (in seconds): ", minimum=0.05, maximum=5)
 
-    print("[DATA ACQUISITION] Please provide the following parameters for data acquisition:")
+    #print("[DATA ACQUISITION] Please provide the following parameters for data acquisition:")
     
     #TODO: Create default values for those
-    camera_rate_hz = ask_float("Camera rate (in Hz): ", minimum=0, maximum=100)
-    leg_motor_telemetry_rate_hz = ask_float("Leg motor telemetry rate (in Hz): ", minimum=0, maximum=100)
-    wheel_motor_telemetry_rate_hz = ask_float("Wheel motor telemetry rate (in Hz): ", minimum=0, maximum=100)
-    encoder_data_rate_hz = ask_float("Encoder data rate (in Hz): ", minimum=0, maximum=100)
+    # camera_rate_hz = ask_float("Camera rate (in Hz): ", minimum=0, maximum=100)
+    # leg_motor_telemetry_rate_hz = ask_float("Leg motor telemetry rate (in Hz): ", minimum=0, maximum=100)
+    # wheel_motor_telemetry_rate_hz = ask_float("Wheel motor telemetry rate (in Hz): ", minimum=0, maximum=100)
+    # encoder_data_rate_hz = ask_float("Encoder data rate (in Hz): ", minimum=0, maximum=100)
 
     return {
         "run_length_loops": run_length_loops,
@@ -85,13 +85,13 @@ def collect_run_configuration() -> dict[str, Any]:
         "wheel_parameters": {
             "commanded_wheel_torque_nm": commanded_wheel_torque_nm,
             "wheel_torque_ramp_time_sec": wheel_torque_ramp_time_sec
-        },
-        "data_acquisition_rates": {
-            "camera_rate_hz": camera_rate_hz,
-            "leg_motor_telemetry_rate_hz": leg_motor_telemetry_rate_hz,
-            "wheel_motor_telemetry_rate_hz": wheel_motor_telemetry_rate_hz,
-            "encoder_data_rate_hz": encoder_data_rate_hz
         }
+        # "data_acquisition_rates": {
+        #     "camera_rate_hz": camera_rate_hz,
+        #     "leg_motor_telemetry_rate_hz": leg_motor_telemetry_rate_hz,
+        #     "wheel_motor_telemetry_rate_hz": wheel_motor_telemetry_rate_hz,
+        #     "encoder_data_rate_hz": encoder_data_rate_hz
+        # }
     }
 
 def print_run_configuration(
@@ -106,9 +106,6 @@ def print_run_configuration(
         print(f"  {key}: {value}")
     print("[WHEEL PARAMETERS]")
     for key, value in run_config["wheel_parameters"].items():
-        print(f"  {key}: {value}")
-    print("[DATA ACQUISITION RATES]")
-    for key, value in run_config["data_acquisition_rates"].items():
         print(f"  {key}: {value}")
 
     #TODO Add more stuff in to complete the summary
@@ -150,7 +147,6 @@ def main():
     #Now creating the run recorder
 
     recorder = RunRecorder(experiment_directory)
-
 
     run_directory = recorder.start_run(run_config = run_config, experiment_config_path = experiment_config_path)
     print(f"Run directory created at: {run_directory}")

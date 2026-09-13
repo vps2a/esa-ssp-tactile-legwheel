@@ -84,11 +84,28 @@ class RunRecorder:
         with run_config_path.open("w", encoding="utf-8") as file:
             yaml.safe_dump(run_config, file, sort_keys=False)
 
-        #Taking the configuration snapshot and copying it into the run directory
+        #Taking the configuration snapshots and copying it into the run directory
         destination = (
-            self.run_directory / "experiment_config_snapshot.yaml"
+            self.run_directory / f"experiment_config_run_{run_number}_snapshot.yaml"
         )
         shutil.copy2(experiment_config_path, destination)
+
+        # Define the source paths for the additional configuration files
+        camera_config_path = Path("src/legwheel_rgbd/config/camera_config.yaml")
+        gemini_config_path = Path("src/legwheel_rgbd/config/gemini_336.yaml")
+
+        # Check if the files exist before proceeding
+        if not camera_config_path.is_file():
+            raise FileNotFoundError(f"Camera config file does not exist: {camera_config_path}")
+        if not gemini_config_path.is_file():
+            raise FileNotFoundError(f"Gemini config file does not exist: {gemini_config_path}")
+
+        camera_config_destination = self.run_directory / f"camera_config_run_{run_number}_snapshot.yaml"
+        gemini_config_destination = self.run_directory / f"gemini_336_run_{run_number}_snapshot.yaml"
+
+        # Copy the files to the destination paths
+        shutil.copy2(camera_config_path, camera_config_destination)
+        shutil.copy2(gemini_config_path, gemini_config_destination)
 
         #TODO: Full metadata needs to be created
         #Writing experiment metadata
