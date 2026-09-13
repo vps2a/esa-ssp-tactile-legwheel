@@ -198,8 +198,8 @@ class ExperimentRunnerNode(Node):
         self._camera_depth_received_at_s = time.monotonic()
 
     def _camera_imu_callback(self, message: Imu) -> None:
-        self._latest_imu_state = message
-        self._imu_state_received_at_s = time.monotonic()
+        self._latest_camera_imu = message
+        self._camera_imu_received_at_s = time.monotonic()
 
     # == Telemetry helper functions and inspection ==
     def has_leg_state(self) -> bool:
@@ -382,11 +382,11 @@ class ExperimentRunnerNode(Node):
                 self._configuration_valid,
                 "Waiting for valid experiment configuration",
             ),
-            (
-                "Recording has started",
-                self._recording_started,
-                "Waiting for recording to start",
-            ),
+            # (
+            #     "Recording has started",
+            #     self._recording_started,
+            #     "Waiting for recording to start",
+            # ),
             (
                 "Leg telemetry received",
                 self.has_leg_state(),
@@ -416,6 +416,36 @@ class ExperimentRunnerNode(Node):
                 "Encoder telemtry is fresh",
                 self.encoder_state_age_s() <= self._maximum_state_age_s,
                 "Encoder telemetry is stale",
+            ),
+            (
+                "Camera RGB telemetry received",
+                self.has_camera_rgb(),
+                "Waiting for camera RGB telemetry",
+            ),
+            (
+                "Camera depth telemetry received",
+                self.has_camera_depth(),
+                "Waiting for camera depth telemetry",
+            ),
+            (
+                "Camera IMU telemetry received",
+                self.has_camera_imu(),
+                "Waiting for camera IMU telemetry",
+            ),
+            (
+                "Camera RGB telemetry is fresh",
+                self.camera_rgb_age_s() <= self._maximum_camera_image_age_s,
+                "Camera RGB telemetry is stale",
+            ),
+            (
+                "Camera depth telemetry is fresh",
+                self.camera_depth_age_s() <= self._maximum_camera_image_age_s,
+                "Camera depth telemetry is stale",
+            ),
+            (
+                "Camera IMU telemetry is fresh",
+                self.camera_imu_age_s() <= self._maximum_camera_imu_age_s,
+                "Camera IMU telemetry is stale",
             ),
             (
                 "Subscriber found for /legwheel/motor_status",

@@ -1,6 +1,7 @@
 import argparse
 import threading
 import rclpy
+import sys
 
 from pathlib import Path
 from rclpy.executors import SingleThreadedExecutor
@@ -9,9 +10,8 @@ from typing import Any
 from legwheel_experiments.schemas import load_experiment_config
 from legwheel_experiments.state_machine import ExperimentStateMachine, ExperimentState
 from legwheel_experiments.data_recorder import RunRecorder
-from legwheel_experiments.experiment_runner_node import (
-    ExperimentRunnerNode,
-)
+from legwheel_experiments.rosbag_recorder import RosbagRecorder
+from legwheel_experiments.experiment_runner_node import ExperimentRunnerNode
 
 #Helper functions
 
@@ -67,8 +67,6 @@ def collect_run_configuration() -> dict[str, Any]:
     wheel_torque_ramp_time_sec = ask_float("Wheel ramp time (in seconds): ", minimum=0.05, maximum=5)
 
     #print("[DATA ACQUISITION] Please provide the following parameters for data acquisition:")
-    
-    #TODO: Create default values for those
     # camera_rate_hz = ask_float("Camera rate (in Hz): ", minimum=0, maximum=100)
     # leg_motor_telemetry_rate_hz = ask_float("Leg motor telemetry rate (in Hz): ", minimum=0, maximum=100)
     # wheel_motor_telemetry_rate_hz = ask_float("Wheel motor telemetry rate (in Hz): ", minimum=0, maximum=100)
@@ -157,12 +155,16 @@ def main():
     executor = None
     executor_thread = None
 
+    # Creating rosbag variables
+    bag_recorder = None
+    experiment_completed = False
+
     try:
         rclpy.init()
         node = ExperimentRunnerNode()
         #TODO: Create real verifications later
         node.set_configuration_valid()
-        node.set_recording_started()   
+        # node.set_recording_started()   
 
         # == Threading ==
         executor = SingleThreadedExecutor()
@@ -233,22 +235,44 @@ def main():
                 "Arm request was accepted, but the state is not ARMED"
             )
 
-        print("Logical ARMED state reached.")
-        print("The wheel torque command will remain zero.")
-        input("The leg is about to move. Press Enter to start the 3 second ramp...")
+        bag_recorder = RosbagRecorder(run_directory)
+        bag_directory = bag_recorder.start()
+        node.set_recording_started()
+        print(f"[ROSBAG] Started rosbag recording in: {bag_directory}")
 
-        #TODO Add a rosbag and other recording command here to record the experiment data
+        print("The wheel torque command will remain zero.")
+
+        print(
+            f"[DEBUG] stdin: isatty={sys.stdin.isatty()}, "
+            f"closed={sys.stdin.closed}"
+        )
+
+        try:
+            input("The leg is about to move. Press Enter to start the 3 second ramp...\n")
+        except EOFError:
+            print("Interactive input was unavailable; aborting before motor motion.")
+            return
 
         node.run_experiment_after_arm(run_config, experiment_config)
-        recorder.mark_complete()
-
-        #TODO Add rosbag complete recording
+        experiment_completed = True
 
 
     except KeyboardInterrupt:
         print("\nExperiment runner interrupted by user.")
     
     finally:
+        if bag_recorder is not None:
+            try:
+                bag_recorder.stop()
+                print("[ROSBAG] Rosbag recording stopped and finalized.")
+            except Exception as error:
+                print(f"[ROSBAG] Failed to finalize rosbag: {error}")
+
+        if experiment_completed:
+            recorder.mark_complete()
+        elif recorder.has_active_run():
+            recorder.mark_aborted("Experiment did not complete")
+
         if node is not None:
             node.enter_safe_mode()
 
