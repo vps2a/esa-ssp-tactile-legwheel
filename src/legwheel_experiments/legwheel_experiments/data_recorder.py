@@ -1,20 +1,40 @@
+from dataclasses import asdict
 import json
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+
+from legwheel_experiments.schemas import (
+    ExperimentConfig,
+    RunConfig,
+    validate_experiment_config,
+    validate_run_config,
+)
 from legwheel_experiments.state_machine import ExperimentState
 
 import yaml
 
 class RunRecorder:
+    """Create a run directory and preserve the validated configuration inputs."""
+
     def __init__(self, experiment_directory: Path) -> None:
         self.experiment_directory = experiment_directory
         self.run_directory: Path | None = None
 
-    def start_run(self, run_config: dict[str, Any], experiment_config_path: Path) -> Path:
+    def start_run(
+        self,
+        run_config: RunConfig,
+        experiment_config: ExperimentConfig,
+        experiment_config_path: Path,
+    ) -> Path:
+        """Validate again at the recording boundary, then create the run snapshot."""
+        # This protects callers other than the CLI from recording unchecked data.
+        validate_run_config(run_config)
+        validate_experiment_config(experiment_config)
+
         self.run_directory = self._create_run(
             run_config=run_config,
+            experiment_config=experiment_config,
             experiment_config_path=experiment_config_path,
         )
         self._change_marker(ExperimentState.RUNNING.name)
@@ -65,7 +85,13 @@ class RunRecorder:
 
         return max(run_numbers, default=0) + 1
 
-    def _create_run(self, run_config: dict[str, Any], experiment_config_path: Path) -> Path:
+    def _create_run(
+        self,
+        run_config: RunConfig,
+        experiment_config: ExperimentConfig,
+        experiment_config_path: Path,
+    ) -> Path:
+        """Write the run configuration and copy its source configuration files."""
 
         if not experiment_config_path.is_file():
             raise FileNotFoundError(
@@ -82,7 +108,8 @@ class RunRecorder:
         run_config_path = self.run_directory / "run_config.yaml"
 
         with run_config_path.open("w", encoding="utf-8") as file:
-            yaml.safe_dump(run_config, file, sort_keys=False)
+            # asdict records the immutable dataclass as ordinary YAML data.
+            yaml.safe_dump(asdict(run_config), file, sort_keys=False)
 
         #Taking the configuration snapshots and copying it into the run directory
         destination = (
@@ -111,7 +138,7 @@ class RunRecorder:
         #Writing experiment metadata
         metadata = {
             "run_id": self.run_directory.name,
-            "experiment_id": self.experiment_directory.name,
+            "experiment_id": experiment_config.experiment_id,
             "start_time_utc": datetime.now(timezone.utc).isoformat(),
             "abort_reason": None,
             "experiment_config_source": str(experiment_config_path),

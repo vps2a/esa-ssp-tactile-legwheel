@@ -17,6 +17,12 @@ from legwheel_experiments.state_machine import (
     ExperimentState,
     ExperimentStateMachine,
 )
+from legwheel_experiments.schemas import (
+    ExperimentConfig,
+    RunConfig,
+    validate_experiment_config,
+    validate_run_config,
+)
 
 class ExperimentRunnerNode(Node):
     def __init__(self):
@@ -145,7 +151,8 @@ class ExperimentRunnerNode(Node):
 
         self._maximum_state_age_s = 0.5 #telemetry sample older than 0.5 seconds is considered stale
 
-        self._configuration_valid = False #means the CLI successfully loaded and validated the experiment YAML.
+        # This remains false until both run and experiment configuration checks pass.
+        self._configuration_valid = False
         self._recording_started = False #means the CLI successfully loaded and validated the experiment YAML.
 
         self._preflight_status = "Preflight has not started"
@@ -336,9 +343,22 @@ class ExperimentRunnerNode(Node):
 
     # == CLI readiness notifications ==
 
-    #Helper functions to give CLI a methode to change the configuration and recording status
-    def set_configuration_valid(self) -> None:
+    # The CLI calls this safety boundary before the node can pass preflight.
+    def set_configuration_valid(
+        self,
+        experiment_config: ExperimentConfig,
+        run_config: RunConfig,
+    ) -> None:
+        """Revalidate both configurations before allowing the preflight gate to pass."""
+        # A failed repeat validation must also revoke an earlier successful result.
+        self._configuration_valid = False
+        # The node repeats validation so no other caller can set the flag blindly.
+        validate_experiment_config(experiment_config)
+        validate_run_config(run_config)
         self._configuration_valid = True
+        self.get_logger().info(
+            "Experiment and run configurations passed validation."
+        )
 
     def set_recording_started(self) -> None:
         self._recording_started = True
@@ -522,13 +542,17 @@ class ExperimentRunnerNode(Node):
         self._motor_status_publisher.publish(message)
         self.get_logger().info("Motors enabled.")
 
-    def run_experiment_after_arm(self, run_config: dict[str, Any], experiment_config: dict[str, Any]) -> None:
+    def run_experiment_after_arm(
+        self,
+        run_config: RunConfig,
+        experiment_config: ExperimentConfig,
+    ) -> None:
         if self._state_machine.state is not ExperimentState.ARMED:
             raise RuntimeError(
                 "Cannot run experiment: experiment is not armed"
             )
 
-        leg_parameters = run_config["leg_parameters"]
+        leg_parameters = run_config.leg_parameters
         knee_stiffness = leg_parameters["knee_stiffness_nm_per_rad"]
         knee_damping = leg_parameters["knee_damping_nms_per_rad"]
         knee_zero_position = leg_parameters["knee_spring_zeroposition_rad"]
@@ -579,11 +603,17 @@ class ExperimentRunnerNode(Node):
         self.get_logger().info("Motors disabled and safe mode entered.")
         self._state_machine.transition_to(ExperimentState.COMPLETE)
 
-    def _wheel_control(self, run_config: dict[str, Any], experiment_config: dict[str, Any]) -> None:
+    def _wheel_control(
+        self,
+        run_config: RunConfig,
+        experiment_config: ExperimentConfig,
+    ) -> None:
         try:
-            target_torque = float(run_config["wheel_parameters"]["commanded_wheel_torque_nm"])
-            run_length_loops = run_config["run_length_loops"]
-            wheel_torque_ramp_time = float(run_config["wheel_parameters"]["wheel_torque_ramp_time_sec"])
+            target_torque = float(run_config.wheel_parameters["commanded_wheel_torque_nm"])
+            run_length_loops = run_config.run_length_loops
+            wheel_torque_ramp_time = float(
+                run_config.wheel_parameters["wheel_torque_ramp_time_sec"]
+            )
         except KeyError as e:
             raise ValueError(f"Missing run parameter in run configuration: {e}")
 

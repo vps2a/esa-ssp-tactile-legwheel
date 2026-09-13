@@ -7,7 +7,7 @@ from pathlib import Path
 from rclpy.executors import SingleThreadedExecutor
 from typing import Any
 
-from legwheel_experiments.schemas import load_experiment_config
+from legwheel_experiments.schemas import RunConfig, load_experiment_config, make_run_config
 from legwheel_experiments.state_machine import ExperimentStateMachine, ExperimentState
 from legwheel_experiments.data_recorder import RunRecorder
 from legwheel_experiments.rosbag_recorder import RosbagRecorder
@@ -94,16 +94,17 @@ def collect_run_configuration() -> dict[str, Any]:
 
 def print_run_configuration(
     experiment_config_path: Path,
-    run_config: dict[str, Any],
+    run_config: RunConfig,
 ) -> None:
+    """Display the validated values that will be saved and sent to the node."""
     print("\n=== Run Configuration Summary ===")
     print(f"Experiment configuration file: {experiment_config_path}")
-    print(f"Run length (in loops): {run_config['run_length_loops']}")
+    print(f"Run length (in loops): {run_config.run_length_loops}")
     print("[LEG PARAMETERS]")
-    for key, value in run_config["leg_parameters"].items():
+    for key, value in run_config.leg_parameters.items():
         print(f"  {key}: {value}")
     print("[WHEEL PARAMETERS]")
-    for key, value in run_config["wheel_parameters"].items():
+    for key, value in run_config.wheel_parameters.items():
         print(f"  {key}: {value}")
 
     #TODO Add more stuff in to complete the summary
@@ -134,7 +135,14 @@ def main():
     
     print(f"Loaded experiment : {experiment_config.experiment_id}")
 
-    run_config = collect_run_configuration()
+    raw_run_config = collect_run_configuration()
+
+    # Validate the operator input before showing confirmation or creating files.
+    try:
+        run_config = make_run_config(raw_run_config)
+    except ValueError as error:
+        print(f"Invalid run configuration: {error}")
+        return
 
     print_run_configuration(experiment_config_path, run_config)
 
@@ -146,7 +154,11 @@ def main():
 
     recorder = RunRecorder(experiment_directory)
 
-    run_directory = recorder.start_run(run_config = run_config, experiment_config_path = experiment_config_path)
+    run_directory = recorder.start_run(
+        run_config=run_config,
+        experiment_config=experiment_config,
+        experiment_config_path=experiment_config_path,
+    )
     print(f"Run directory created at: {run_directory}")
 
     # == Initialising ROS and starting the experiment runner node ==
@@ -162,8 +174,8 @@ def main():
     try:
         rclpy.init()
         node = ExperimentRunnerNode()
-        #TODO: Create real verifications later
-        node.set_configuration_valid()
+        # The node only passes this gate after it validates both configurations.
+        node.set_configuration_valid(experiment_config, run_config)
         # node.set_recording_started()   
 
         # == Threading ==
