@@ -226,6 +226,21 @@ class ExperimentRunnerNode(Node):
 
     def has_camera_imu(self) -> bool:
         return self._latest_camera_imu is not None
+
+    def has_two_numeric_leg_positions(self) -> bool:
+        """Check that leg telemetry can safely drive the two-joint command arrays."""
+        if self._latest_leg_state is None:
+            return False
+
+        try:
+            self._validate_two_numeric_values(
+                "leg joint positions",
+                self._latest_leg_state.position,
+            )
+        except ValueError:
+            return False
+
+        return True
         
     #Calculate telemetry age
     #If no message has arrived, the age is treated as infinity - this is useful for checking if the telemetry is stale
@@ -363,6 +378,27 @@ class ExperimentRunnerNode(Node):
     def set_recording_started(self) -> None:
         self._recording_started = True
 
+    def adjust_spring_zero_position(self, run_config: RunConfig) -> None:
+        """Gradually apply a validated knee zero position while waiting to run."""
+        if self._state_machine.state is not ExperimentState.ARMED:
+            raise RuntimeError(
+                "Spring zero position can only be adjusted while the experiment is armed"
+            )
+
+        # Reuse the schema limits so this public control path cannot bypass the CLI.
+        validate_run_config(run_config)
+        knee_zero_position = run_config.leg_parameters[
+            "knee_spring_zeroposition_rad"
+        ]
+
+        # Joint 0 remains passive; joint 1 is the knee controlled by the CLI.
+        self._configure_legwheel_stiffness_and_zeropos(
+            stiffness=self._last_commanded_stiffness,
+            damping=self._last_commanded_damping,
+            zero_position=[0.0, float(knee_zero_position)],
+        )
+        self.get_logger().info("Spring zero position adjustment completed.")
+
     # == Preflight ==
 
     #Preflight status helper functions
@@ -411,6 +447,11 @@ class ExperimentRunnerNode(Node):
                 "Leg telemetry received",
                 self.has_leg_state(),
                 "Waiting for leg telemetry",
+            ),
+            (
+                "Leg telemetry has two numeric joint positions",
+                self.has_two_numeric_leg_positions(),
+                "Waiting for two numeric leg joint positions",
             ),
             (
                 "Wheel telemetry received",
@@ -571,6 +612,8 @@ class ExperimentRunnerNode(Node):
         damping = [0.0, float(knee_damping)]
         zero_position = [0.0, float(knee_zero_position)]
 
+        # Final telemetry-shape check before changing state or enabling motors.
+        self._current_leg_position_from_encoder()
         self._publish_zero_wheel_torque()
 
         self._state_machine.transition_to(ExperimentState.RUNNING)

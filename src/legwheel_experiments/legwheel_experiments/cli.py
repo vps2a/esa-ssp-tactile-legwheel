@@ -1,5 +1,7 @@
 import argparse
+from dataclasses import asdict
 import threading
+import time
 import rclpy
 import sys
 
@@ -128,6 +130,103 @@ def confirm_run_creation() -> bool:
         else:
             print("Invalid input. Please enter 'y' for yes or 'n' for no.")
 
+
+def choose_run_number(recorder: RunRecorder) -> tuple[int, bool]:
+    """Let the operator use the suggested number or explicitly overwrite a run."""
+    suggested_number = recorder.find_next_run_number()
+
+    while True:
+        choice = input(
+            f"The next available run number is {suggested_number}. "
+            "Use it? (y/n): "
+        ).strip().lower()
+
+        if choice == "y":
+            return suggested_number, False
+        if choice != "n":
+            print("Invalid input. Please enter 'y' or 'n'.")
+            continue
+
+        raw_number = input("Enter the existing run number to overwrite: ").strip()
+        try:
+            run_number = int(raw_number)
+            target_directory = recorder.run_directory_for_number(run_number)
+        except ValueError:
+            print("Run number must be a positive integer.")
+            continue
+
+        if not target_directory.is_dir() or target_directory.is_symlink():
+            print(f"No normal run directory exists at: {target_directory}")
+            continue
+
+        confirmation = input(
+            f'All data in {target_directory} will be deleted. Type "OVERWRITE" '
+            "to continue: "
+        )
+        if confirmation == "OVERWRITE":
+            return run_number, True
+
+        print("Overwrite cancelled. No files were deleted.")
+
+
+def adjust_spring_zero_position(
+    node: ExperimentRunnerNode,
+    run_config: RunConfig,
+) -> RunConfig:
+    """Interactively adjust zero position using schema validation and a node ramp."""
+    while True:
+        choice = input(
+            "Would you like to adjust the spring zero position? (y/n): "
+        ).strip().lower()
+        if choice == "n":
+            return run_config
+        if choice == "y":
+            break
+        print("Invalid input. Please enter 'y' or 'n'.")
+
+    while True:
+        current_zero_position = run_config.leg_parameters[
+            "knee_spring_zeroposition_rad"
+        ]
+        response = input(
+            "[SPRING ZEROPOS ADJUST] The current set spring zero position is "
+            f"{current_zero_position}. Enter new value to set or type \"ready\" "
+            "to confirm the current position: "
+        ).strip()
+
+        if response.lower() == "ready":
+            return run_config
+
+        try:
+            requested_zero_position = float(response)
+        except ValueError:
+            print('Enter a number or type "ready".')
+            continue
+
+        # Rebuilding the config runs the same limits from schemas.py as initial input.
+        raw_run_config = asdict(run_config)
+        raw_run_config["leg_parameters"][
+            "knee_spring_zeroposition_rad"
+        ] = requested_zero_position
+        try:
+            updated_run_config = make_run_config(raw_run_config)
+        except ValueError as error:
+            print(f"Invalid spring zero position: {error}")
+            continue
+
+        # The node ramps to the new value instead of applying a step command.
+        node.adjust_spring_zero_position(updated_run_config)
+        run_config = updated_run_config
+        print("Spring zero position updated gradually.")
+
+
+def confirm_experiment_start() -> None:
+    """Require an explicit final operator confirmation before motor motion begins."""
+    while True:
+        if input('Type "START" to begin the run: ') == "START":
+            return
+        print('Run has not started. Type "START" exactly to continue.')
+
 def main():
     print("=== LEGWHEEL EXPERIMENT RUNNER ===")
 
@@ -162,11 +261,14 @@ def main():
     #Now creating the run recorder
 
     recorder = RunRecorder(experiment_directory)
+    run_number, overwrite_existing = choose_run_number(recorder)
 
     run_directory = recorder.start_run(
         run_config=run_config,
         experiment_config=experiment_config,
         experiment_config_path=experiment_config_path,
+        run_number=run_number,
+        overwrite_existing=overwrite_existing,
     )
     print(f"Run directory created at: {run_directory}")
 
@@ -268,6 +370,14 @@ def main():
         except EOFError:
             print("Interactive input was unavailable; aborting before motor motion.")
             return
+
+        # Wheel torque remains at zero while the mechanism settles before adjustment.
+        print("Waiting 3 seconds for the wheel to settle into position...")
+        time.sleep(3.0)
+        run_config = adjust_spring_zero_position(node, run_config)
+        # Save only the operator-confirmed value, after every schema check has passed.
+        recorder.update_run_config(run_config)
+        confirm_experiment_start()
 
         node.run_experiment_after_arm(run_config, experiment_config)
         experiment_completed = True
