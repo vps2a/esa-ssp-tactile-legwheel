@@ -7,7 +7,7 @@ from pathlib import Path
 from rclpy.executors import SingleThreadedExecutor
 from typing import Any
 
-from legwheel_experiments.schemas import RunConfig, load_experiment_config, make_run_config
+from legwheel_experiments.schemas import RunConfig, load_experiment_config, make_run_config, ExperimentConfig
 from legwheel_experiments.state_machine import ExperimentStateMachine, ExperimentState
 from legwheel_experiments.data_recorder import RunRecorder
 from legwheel_experiments.rosbag_recorder import RosbagRecorder
@@ -93,12 +93,11 @@ def collect_run_configuration() -> dict[str, Any]:
     }
 
 def print_run_configuration(
-    experiment_config_path: Path,
+    experiment_config: ExperimentConfig,
     run_config: RunConfig,
 ) -> None:
     """Display the validated values that will be saved and sent to the node."""
     print("\n=== Run Configuration Summary ===")
-    print(f"Experiment configuration file: {experiment_config_path}")
     print(f"Run length (in loops): {run_config.run_length_loops}")
     print("[LEG PARAMETERS]")
     for key, value in run_config.leg_parameters.items():
@@ -108,6 +107,16 @@ def print_run_configuration(
         print(f"  {key}: {value}")
 
     #TODO Add more stuff in to complete the summary
+
+    print("\n=== Experiment Configuration Summary ===")
+    print(f"Experiment ID: {experiment_config.experiment_id}")
+    print("[RIG CONFIG]") 
+    for key, value in experiment_config.rig_config.items():
+        print(f"  {key}: {value}")
+    print("[CAMERA CONFIG]")
+    print("  Camera Angle (in degrees): ", experiment_config.electronics_hardware["camera"]["camera_config"]["camera_front_angle_deg"])
+    print("[ENVIRONMENT]")
+    print("  Environment Description: ", experiment_config.environment["environment_description"])
 
 def confirm_run_creation() -> bool:
     while True:
@@ -144,7 +153,7 @@ def main():
         print(f"Invalid run configuration: {error}")
         return
 
-    print_run_configuration(experiment_config_path, run_config)
+    print_run_configuration(experiment_config, run_config)
 
     if not confirm_run_creation():
         print("Run creation cancelled by the user.")

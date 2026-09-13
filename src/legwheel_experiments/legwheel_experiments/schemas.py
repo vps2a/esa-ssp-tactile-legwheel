@@ -256,7 +256,7 @@ def validate_run_config(config: RunConfig) -> None:
     require_number(
         config.leg_parameters.get("knee_stiffness_nm_per_rad"),
         "leg_parameters.knee_stiffness_nm_per_rad",
-        minimum=0.0,
+        minimum=3.0,
         maximum=50.0,
     )
     require_number(
