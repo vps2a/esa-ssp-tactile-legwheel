@@ -1,6 +1,7 @@
 import argparse
 from dataclasses import asdict
 import threading
+import time
 import rclpy
 import sys
 
@@ -170,18 +171,14 @@ def choose_run_number(recorder: RunRecorder) -> tuple[int, bool]:
 
 def adjust_spring_zero_position(
     node: ExperimentRunnerNode,
-    recorder: RunRecorder,
     run_config: RunConfig,
 ) -> RunConfig:
-    """Interactively adjust, save, and confirm zero position after the node ramp."""
+    """Interactively adjust zero position using schema validation and a node ramp."""
     while True:
         choice = input(
             "Would you like to adjust the spring zero position? (y/n): "
         ).strip().lower()
         if choice == "n":
-            # The unchanged value is still confirmed and recorded before START.
-            recorder.update_run_config(run_config)
-            confirm_experiment_start()
             return run_config
         if choice == "y":
             break
@@ -198,7 +195,7 @@ def adjust_spring_zero_position(
         ).strip()
 
         if response.lower() == "ready":
-            break
+            return run_config
 
         try:
             requested_zero_position = float(response)
@@ -221,11 +218,6 @@ def adjust_spring_zero_position(
         node.adjust_spring_zero_position(updated_run_config)
         run_config = updated_run_config
         print("Spring zero position updated gradually.")
-
-    # Persist the final value only once the operator has confirmed it with ready/no.
-    recorder.update_run_config(run_config)
-    confirm_experiment_start()
-    return run_config
 
 
 def confirm_experiment_start() -> None:
@@ -379,20 +371,16 @@ def main():
             print("Interactive input was unavailable; aborting before motor motion.")
             return
 
-        # This callback is invoked by the node only after its initial motor checks
-        # and gradual leg-parameter ramp have completed.
-        def spring_zero_position_callback(current_run_config: RunConfig) -> RunConfig:
-            return adjust_spring_zero_position(
-                node,
-                recorder,
-                current_run_config,
-            )
+        # Wheel torque remains at zero while the mechanism settles before adjustment.
+        
+        print("Waiting 3 seconds for the wheel to settle into position...")
+        time.sleep(3.0)
+        run_config = adjust_spring_zero_position(node, run_config)
+        # Save only the operator-confirmed value, after every schema check has passed.
+        recorder.update_run_config(run_config)
+        confirm_experiment_start()
 
-        node.run_experiment_after_arm(
-            run_config,
-            experiment_config,
-            spring_zero_position_callback=spring_zero_position_callback,
-        )
+        node.run_experiment_after_arm(run_config, experiment_config)
         experiment_completed = True
 
 
