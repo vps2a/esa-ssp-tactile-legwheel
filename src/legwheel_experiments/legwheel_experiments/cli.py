@@ -242,11 +242,6 @@ def main():
 
         print("The wheel torque command will remain zero.")
 
-        print(
-            f"[DEBUG] stdin: isatty={sys.stdin.isatty()}, "
-            f"closed={sys.stdin.closed}"
-        )
-
         try:
             input("The leg is about to move. Press Enter to start the 3 second ramp...\n")
         except EOFError:
