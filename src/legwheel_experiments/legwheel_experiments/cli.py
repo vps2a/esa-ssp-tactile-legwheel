@@ -52,6 +52,20 @@ def ask_float(prompt: str, minimum: float | None = None, maximum: float | None =
 
         return value
 
+
+def ask_run_notes() -> str:
+    """Optionally collect free-text notes to save with this run's configuration."""
+    while True:
+        choice = input(
+            "Would you like to add notes to this run configuration? (y/n): "
+        ).strip().lower()
+        if choice == "y":
+            return input("Run notes: ").strip()
+        if choice == "n":
+            return ""
+        print("Invalid input. Please enter 'y' or 'n'.")
+
+
 def collect_run_configuration() -> dict[str, Any]:
     print("\n=== Run Configuration ===")
     print("Please provide the following parameters for the experiment run:")
@@ -66,6 +80,8 @@ def collect_run_configuration() -> dict[str, Any]:
 
     commanded_wheel_torque_nm = ask_float("Commanded wheel torque (in Nm): ", minimum=0, maximum=8)
     wheel_torque_ramp_time_sec = ask_float("Wheel ramp time (in seconds): ", minimum=0.05, maximum=5)
+
+    notes = ask_run_notes()
 
     #print("[DATA ACQUISITION] Please provide the following parameters for data acquisition:")
     # camera_rate_hz = ask_float("Camera rate (in Hz): ", minimum=0, maximum=100)
@@ -84,7 +100,8 @@ def collect_run_configuration() -> dict[str, Any]:
         "wheel_parameters": {
             "commanded_wheel_torque_nm": commanded_wheel_torque_nm,
             "wheel_torque_ramp_time_sec": wheel_torque_ramp_time_sec
-        }
+        },
+        "notes": notes,
         # "data_acquisition_rates": {
         #     "camera_rate_hz": camera_rate_hz,
         #     "leg_motor_telemetry_rate_hz": leg_motor_telemetry_rate_hz,
@@ -106,6 +123,8 @@ def print_run_configuration(
     print("[WHEEL PARAMETERS]")
     for key, value in run_config.wheel_parameters.items():
         print(f"  {key}: {value}")
+    if run_config.notes:
+        print(f"[NOTES]\n  {run_config.notes}")
 
     #TODO Add more stuff in to complete the summary
 

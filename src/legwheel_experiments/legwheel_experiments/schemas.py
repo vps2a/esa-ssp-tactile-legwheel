@@ -35,6 +35,7 @@ class RunConfig:
     run_length_loops: float
     leg_parameters: dict[str, float]
     wheel_parameters: dict[str, float]
+    notes: str = ""
 
 
 # Top-level scalar values and YAML mappings must be checked differently.
@@ -230,6 +231,9 @@ def make_run_config(raw_config: dict[str, Any]) -> RunConfig:
             run_length_loops=raw_config["run_length_loops"],
             leg_parameters=leg_parameters,
             wheel_parameters=wheel_parameters,
+            # Notes were added after the initial configuration format, so runs
+            # constructed by older callers remain valid without them.
+            notes=raw_config.get("notes", ""),
         )
     except KeyError as error:
         raise ValueError(
@@ -240,7 +244,6 @@ def make_run_config(raw_config: dict[str, Any]) -> RunConfig:
         raise ValueError("leg_parameters must be a mapping.")
     if not isinstance(config.wheel_parameters, dict):
         raise ValueError("wheel_parameters must be a mapping.")
-
     validate_run_config(config)
     return config
 
@@ -251,6 +254,8 @@ def validate_run_config(config: RunConfig) -> None:
         raise ValueError("leg_parameters must be a mapping.")
     if not isinstance(config.wheel_parameters, dict):
         raise ValueError("wheel_parameters must be a mapping.")
+    if not isinstance(config.notes, str):
+        raise ValueError("notes must be text.")
 
     require_number(config.run_length_loops, "run_length_loops", minimum=0.0, maximum=2.0)
     require_number(
