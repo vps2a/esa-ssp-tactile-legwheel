@@ -12,7 +12,10 @@ from legwheel_experiments.schemas import RunConfig, load_experiment_config, make
 from legwheel_experiments.state_machine import ExperimentStateMachine, ExperimentState
 from legwheel_experiments.data_recorder import RunRecorder
 from legwheel_experiments.rosbag_recorder import RosbagRecorder
-from legwheel_experiments.experiment_runner_node import ExperimentRunnerNode
+from legwheel_experiments.experiment_runner_node import (
+    ExperimentAbortedError,
+    ExperimentRunnerNode,
+)
 
 #Helper functions
 
@@ -27,6 +30,15 @@ def parse_arguments() -> argparse.Namespace:
         type=Path,
         required=True,
         help="Path to the experiment configuration YAML file"
+    )
+
+    parser.add_argument(
+        "--record-raw-camera-topics",
+        action="store_true",
+        help=(
+            "Also record the vendor /legwheel_rgbd camera inputs for debugging. "
+            "This substantially increases rosbag bandwidth and size."
+        ),
     )
 
     return parser.parse_args()
@@ -405,7 +417,13 @@ def main():
             )
             # adjust_spring_zero_position returns only after the user types START.
             # A recorder startup failure aborts before wheel control can begin.
-            bag_recorder = RosbagRecorder(run_directory)
+            # Re-check the asynchronous camera guard after the operator input and
+            # before allocating a high-bandwidth recorder.
+            node.ensure_run_may_continue()
+            bag_recorder = RosbagRecorder(
+                run_directory,
+                include_raw_camera_topics=arguments.record_raw_camera_topics,
+            )
             bag_directory = bag_recorder.start()
             node.set_recording_started()
             print(f"[ROSBAG] Started rosbag recording in: {bag_directory}")
@@ -418,11 +436,17 @@ def main():
         )
         experiment_completed = True
 
-
+    except ExperimentAbortedError as error:
+        print(f"\nExperiment aborted by runtime safety guard: {error}")
     except KeyboardInterrupt:
         print("\nExperiment runner interrupted by user.")
     
     finally:
+        # Make the mechanism safe before any file or process cleanup. Publishing
+        # while rosbag is still active also records the final zero/disable commands.
+        if node is not None:
+            node.enter_safe_mode()
+
         if bag_recorder is not None:
             try:
                 bag_recorder.stop()
@@ -433,10 +457,8 @@ def main():
         if experiment_completed:
             recorder.mark_complete()
         elif recorder.has_active_run():
-            recorder.mark_aborted("Experiment did not complete")
-
-        if node is not None:
-            node.enter_safe_mode()
+            abort_reason = None if node is None else node.abort_reason()
+            recorder.mark_aborted(abort_reason or "Experiment did not complete")
 
         if executor is not None:
             executor.shutdown()

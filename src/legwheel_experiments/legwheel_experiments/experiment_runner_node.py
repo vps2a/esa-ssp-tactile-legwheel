@@ -23,6 +23,15 @@ from legwheel_experiments.schemas import (
     validate_experiment_config,
     validate_run_config,
 )
+from legwheel_experiments.stream_health import (
+    AdvancingStampMonitor,
+    message_stamp_nanoseconds,
+)
+
+
+class ExperimentAbortedError(RuntimeError):
+    """Raised in the control thread after an asynchronous safety abort."""
+
 
 class ExperimentRunnerNode(Node):
     def __init__(self):
@@ -49,13 +58,23 @@ class ExperimentRunnerNode(Node):
         self._latest_camera_depth = None
         self._latest_camera_imu = None
 
-        self._camera_rgb_received_at_s = None
-        self._camera_depth_received_at_s = None
-        self._camera_imu_received_at_s = None
-
-        # Allow some scheduling margin while still detecting a stopped camera quickly.
-        self._maximum_camera_image_age_s = 1.0
+        # The camera has delivered roughly 5-15 Hz in practice. A two-second
+        # image timeout tolerates brief USB/processing stalls without allowing a
+        # frozen stream to survive a meaningful portion of an experiment.
+        self._maximum_camera_image_age_s = 2.0
         self._maximum_camera_imu_age_s = 0.5
+        self._minimum_camera_stamp_advances = 3
+        self._camera_stamp_monitors = {
+            "RGB": AdvancingStampMonitor(self._minimum_camera_stamp_advances),
+            "depth": AdvancingStampMonitor(self._minimum_camera_stamp_advances),
+            "IMU": AdvancingStampMonitor(self._minimum_camera_stamp_advances),
+        }
+
+        # The ROS executor owns the watchdog timer while the CLI thread performs
+        # the blocking experiment sequence. The event safely communicates an
+        # asynchronous camera failure back to that control thread.
+        self._runtime_abort_event = threading.Event()
+        self._runtime_abort_reason: str | None = None
 
         #Initializing the preflight complete event
         #unset = preflight has not completed
@@ -175,6 +194,11 @@ class ExperimentRunnerNode(Node):
             self._process_arm_request,
         )
 
+        self._runtime_camera_guard_timer = self.create_timer(
+            0.1,
+            self._runtime_camera_guard_callback,
+        )
+
 
         self.get_logger().info("Experiment Runner Node initialized.")
 
@@ -198,15 +222,22 @@ class ExperimentRunnerNode(Node):
 
     def _camera_rgb_callback(self, message: Image) -> None:
         self._latest_camera_rgb = message
-        self._camera_rgb_received_at_s = time.monotonic()
+        self._observe_camera_stamp("RGB", message)
 
     def _camera_depth_callback(self, message: Image) -> None:
         self._latest_camera_depth = message
-        self._camera_depth_received_at_s = time.monotonic()
+        self._observe_camera_stamp("depth", message)
 
     def _camera_imu_callback(self, message: Imu) -> None:
         self._latest_camera_imu = message
-        self._camera_imu_received_at_s = time.monotonic()
+        self._observe_camera_stamp("IMU", message)
+
+    def _observe_camera_stamp(self, stream_name: str, message) -> None:
+        """Update freshness only for a new sensor timestamp."""
+        self._camera_stamp_monitors[stream_name].observe(
+            message_stamp_nanoseconds(message),
+            time.monotonic(),
+        )
 
     # == Telemetry helper functions and inspection ==
     def has_leg_state(self) -> bool:
@@ -263,19 +294,13 @@ class ExperimentRunnerNode(Node):
         return time.monotonic() - self._encoder_state_received_at_s
     
     def camera_rgb_age_s(self) -> float:
-        if self._camera_rgb_received_at_s is None:
-            return float("inf")
-        return time.monotonic() - self._camera_rgb_received_at_s
+        return self._camera_stamp_monitors["RGB"].age_s(time.monotonic())
 
     def camera_depth_age_s(self) -> float:
-        if self._camera_depth_received_at_s is None:
-            return float("inf")
-        return time.monotonic() - self._camera_depth_received_at_s
+        return self._camera_stamp_monitors["depth"].age_s(time.monotonic())
 
     def camera_imu_age_s(self) -> float:
-        if self._camera_imu_received_at_s is None:
-            return float("inf")
-        return time.monotonic() - self._camera_imu_received_at_s
+        return self._camera_stamp_monitors["IMU"].age_s(time.monotonic())
 
     # == Safe publishing ==
 
@@ -380,6 +405,7 @@ class ExperimentRunnerNode(Node):
 
     def adjust_spring_zero_position(self, run_config: RunConfig) -> None:
         """Gradually apply a validated knee zero position after the initial ramp."""
+        self._raise_if_runtime_abort_requested()
         if self._state_machine.state is not ExperimentState.RUNNING:
             raise RuntimeError(
                 "Spring zero position can only be adjusted during experiment setup"
@@ -494,6 +520,21 @@ class ExperimentRunnerNode(Node):
                 "Waiting for camera IMU telemetry",
             ),
             (
+                "Camera RGB timestamps are advancing",
+                self._camera_stamp_monitors["RGB"].ready,
+                "Waiting for several advancing camera RGB timestamps",
+            ),
+            (
+                "Camera depth timestamps are advancing",
+                self._camera_stamp_monitors["depth"].ready,
+                "Waiting for several advancing camera depth timestamps",
+            ),
+            (
+                "Camera IMU timestamps are advancing",
+                self._camera_stamp_monitors["IMU"].ready,
+                "Waiting for several advancing camera IMU timestamps",
+            ),
+            (
                 "Camera RGB telemetry is fresh",
                 self.camera_rgb_age_s() <= self._maximum_camera_image_age_s,
                 "Camera RGB telemetry is stale",
@@ -566,6 +607,14 @@ class ExperimentRunnerNode(Node):
 
     def experiment_state(self) -> ExperimentState:
         return self._state_machine.state
+
+    def abort_reason(self) -> str | None:
+        """Return the runtime safety reason, when an abort was requested."""
+        return self._runtime_abort_reason
+
+    def ensure_run_may_continue(self) -> None:
+        """Let the CLI check an asynchronous abort before starting recording."""
+        self._raise_if_runtime_abort_requested()
     
     # === Running the experiment ===
 
@@ -615,6 +664,10 @@ class ExperimentRunnerNode(Node):
 
         # Final telemetry-shape check before changing state or enabling motors.
         self._current_leg_position_from_encoder()
+        camera_failure = self._camera_stream_failure_reason()
+        if camera_failure is not None:
+            self._abort_for_camera_failure(camera_failure)
+            self._raise_if_runtime_abort_requested()
         self._publish_zero_wheel_torque()
 
         self._state_machine.transition_to(ExperimentState.RUNNING)
@@ -633,15 +686,18 @@ class ExperimentRunnerNode(Node):
             "while the mechanism settles for 3 seconds."
         )
 
-        time.sleep(3.0)
+        self._sleep_with_runtime_guard(3.0)
 
         if spring_zero_position_callback is not None:
             # The CLI owns terminal I/O and recording; the node owns when it is safe
             # to ask and applies each callback-requested value through its ramp helper.
             run_config = spring_zero_position_callback(run_config)
+            self._raise_if_runtime_abort_requested()
             validate_run_config(run_config)
 
         self._wheel_control(run_config, experiment_config)
+
+        self._raise_if_runtime_abort_requested()
 
         self._state_machine.transition_to(ExperimentState.STOPPING)
         self._configure_legwheel_stiffness_and_zeropos(
@@ -707,6 +763,7 @@ class ExperimentRunnerNode(Node):
             start_wheel_encoder_reading = self._current_legwheel_location_from_central_encoder()
             start_legwheel_position = self._current_wheel_position_from_encoder()
             while time.monotonic() - start_time < wheel_torque_ramp_time:
+                self._raise_if_runtime_abort_requested()
                 # Checking if the wheel and encoder telemetry is still valid
                 self._current_wheel_position_from_encoder()
                 self._current_legwheel_location_from_central_encoder()
@@ -736,6 +793,7 @@ class ExperimentRunnerNode(Node):
             mid_run_start_time = time.monotonic()
 
             while mid_run_angle_to_travel > 0:
+                self._raise_if_runtime_abort_requested()
                 current_wheel_position = self._current_wheel_position_from_encoder()
                 #wheel_rotation_rad = abs(current_wheel_position - ramp_end_wheel_position)
                 #wheel_distance_traveled = wheel_rotation_rad * wheel_radius
@@ -760,6 +818,7 @@ class ExperimentRunnerNode(Node):
 
             ramp_down_start_time = time.monotonic()
             while time.monotonic() - ramp_down_start_time < wheel_torque_ramp_time:
+                self._raise_if_runtime_abort_requested()
                 # Checking if the wheel telemetry is still valid
                 self._current_wheel_position_from_encoder()
 
@@ -841,6 +900,7 @@ class ExperimentRunnerNode(Node):
         #now iterating over the duration and publishing the intermediate values
         start_time = time.monotonic()
         while time.monotonic() - start_time < duration_s:
+            self._raise_if_runtime_abort_requested()
             elapsed = time.monotonic() - start_time
             ratio = elapsed / duration_s
 
@@ -864,7 +924,7 @@ class ExperimentRunnerNode(Node):
             )
 
             #Sleeping for a short time before the next iteration
-            time.sleep(publish_period_s)
+            self._sleep_with_runtime_guard(publish_period_s)
 
         self._publish_leg_parameters(
             stiffness=stiffness_target,
@@ -905,6 +965,76 @@ class ExperimentRunnerNode(Node):
         self._last_commanded_stiffness = list(stiffness)
         self._last_commanded_damping = list(damping)
         self._last_commanded_zero_position = list(zero_position)
+
+    def _runtime_camera_guard_callback(self) -> None:
+        """Disable motion if any camera stream stops advancing during a run."""
+        if (
+            self._state_machine.state is not ExperimentState.RUNNING
+            or self._runtime_abort_event.is_set()
+        ):
+            return
+
+        failure_reason = self._camera_stream_failure_reason()
+        if failure_reason is None:
+            return
+
+        self._abort_for_camera_failure(failure_reason)
+
+    def _abort_for_camera_failure(self, failure_reason: str) -> None:
+        """Record the cause and immediately publish the safe command set."""
+        if self._runtime_abort_event.is_set():
+            return
+
+        self._runtime_abort_reason = failure_reason
+        self._runtime_abort_event.set()
+        self.get_logger().error(
+            f"Aborting experiment because camera health failed: {failure_reason}"
+        )
+
+        # Publish safe commands from the executor immediately. The control thread
+        # also observes the event and exits its current ramp/drive loop.
+        self.enter_safe_mode()
+        if self._state_machine.state not in {
+            ExperimentState.ABORTING,
+            ExperimentState.SAFE,
+        }:
+            self._state_machine.abort(failure_reason)
+
+    def _camera_stream_failure_reason(self) -> str | None:
+        """Describe the first unavailable, unproven, or stale camera stream."""
+        stream_settings = (
+            ("RGB", self.has_camera_rgb(), self._maximum_camera_image_age_s),
+            ("depth", self.has_camera_depth(), self._maximum_camera_image_age_s),
+            ("IMU", self.has_camera_imu(), self._maximum_camera_imu_age_s),
+        )
+        now_s = time.monotonic()
+        for stream_name, received, maximum_age_s in stream_settings:
+            monitor = self._camera_stamp_monitors[stream_name]
+            if not received:
+                return f"camera {stream_name} has not been received"
+            if not monitor.ready:
+                return (
+                    f"camera {stream_name} has not made "
+                    f"{self._minimum_camera_stamp_advances} forward timestamp steps"
+                )
+            age_s = monitor.age_s(now_s)
+            if age_s > maximum_age_s:
+                return (
+                    f"camera {stream_name} timestamp has not advanced for "
+                    f"{age_s:.2f} seconds"
+                )
+        return None
+
+    def _raise_if_runtime_abort_requested(self) -> None:
+        """Stop blocking control work after the executor has made the rig safe."""
+        if self._runtime_abort_event.is_set():
+            reason = self._runtime_abort_reason or "runtime safety guard requested abort"
+            raise ExperimentAbortedError(reason)
+
+    def _sleep_with_runtime_guard(self, duration_s: float) -> None:
+        """Sleep interruptibly so an asynchronous safety abort exits promptly."""
+        if self._runtime_abort_event.wait(timeout=duration_s):
+            self._raise_if_runtime_abort_requested()
 
     @staticmethod
     def _validate_two_numeric_values(

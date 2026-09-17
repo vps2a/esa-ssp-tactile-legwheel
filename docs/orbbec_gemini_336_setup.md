@@ -61,7 +61,8 @@ ros2 topic list | grep legwheel_rgbd
 ros2 topic hz /camera/rgbd/rgb/image_raw
 ros2 topic hz /camera/rgbd/depth/image_raw
 ros2 topic hz /camera/imu
-ros2 topic echo --once /camera/rgbd/depth/camera_info
+ros2 topic echo --once --qos-durability transient_local \
+  /camera/rgbd/depth/camera_info
 ```
 
 Optional point cloud:
@@ -81,7 +82,7 @@ With the default `camera_name:=legwheel_rgbd`, raw Orbbec topics are namespaced 
 - `/legwheel_rgbd/gyro_accel/sample`
 - `/legwheel_rgbd/depth/points` when point cloud output is enabled
 
-The LegWheel bridge node republishes those streams at the rates in `camera_config.yaml`:
+The LegWheel bridge exposes the following cleaned streams:
 
 - `/camera/rgbd/rgb/image_raw`
 - `/camera/rgbd/rgb/camera_info`
@@ -89,11 +90,20 @@ The LegWheel bridge node republishes those streams at the rates in `camera_confi
 - `/camera/rgbd/depth/camera_info`
 - `/camera/imu`
 
+RGB and depth are approximately synchronized using their header timestamps and
+are published only as pairs. IMU samples are forwarded once per advancing
+timestamp. Camera calibration is published initially and only when its content
+changes; a transient-local publisher makes the latest calibration available to
+late subscribers such as rosbag. Configure the synchronization queue and
+tolerance in `camera_config.yaml`. The bridge never manufactures a configured
+rate by replaying its newest cached message.
+
 ## Notes for implementation
 
 - Depend on ROS messages and topics from `orbbec_camera`; do not call the Orbbec SDK directly from LegWheel code unless a ROS topic/service cannot provide the data.
 - Keep Orbbec driver parameters in `src/legwheel_rgbd/config/gemini_336.yaml`.
-- Keep LegWheel publish rates and topic names in `src/legwheel_rgbd/config/camera_config.yaml`.
+- Keep LegWheel synchronization settings and topic names in
+  `src/legwheel_rgbd/config/camera_config.yaml`.
 - Use `serial_number` or `usb_port` launch arguments once multiple cameras are connected.
 - Start with point clouds disabled during bring-up to reduce USB and CPU load.
 - The Gemini 336 should be on a USB 3 port. If frames drop at high resolution, lower `color_width`, `color_height`, `depth_width`, `depth_height`, or FPS in the config file.

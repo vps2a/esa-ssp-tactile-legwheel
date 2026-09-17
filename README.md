@@ -17,7 +17,7 @@ experiment runner that records MCAP rosbags.
 | --- | --- | --- |
 | `legwheel_can` | Connects to MD80s through a CANdle USB-to-CAN adapter; provides passive zeroing, safety-gated leg control, wheel torque control, and terminal controllers. | `ros2 launch legwheel_can md80_legwheel_control.launch.py` |
 | `legwheel_encoder` | Reads the central rotation encoder from a serial port and publishes ticks, angle, and velocity. | `ros2 launch legwheel_encoder rotation_encoder.launch.py` |
-| `legwheel_rgbd` | Launches the Orbbec driver and republishes RGB, depth, camera calibration, and IMU data on project-stable topics. | `ros2 launch legwheel_rgbd gemini_336.launch.py` |
+| `legwheel_rgbd` | Launches the Orbbec driver; publishes synchronized RGB/depth pairs, changed calibration, and unique IMU samples on project-stable topics. | `ros2 launch legwheel_rgbd gemini_336.launch.py` |
 | `legwheel_experiments` | Validates an experiment, performs telemetry preflight, runs the leg/wheel sequence, and records an MCAP rosbag. | `ros2 run legwheel_experiments run_experiment --experiment-config <file>` |
 
 The workspace includes the MAB CANdle-SDK as a Git submodule. Orbbec's ROS 2
@@ -120,7 +120,7 @@ Review these files before the first real run:
 | `src/legwheel_can/config/motor_config.json` | Initial leg gains/zero values, wheel torque ramp time, and default wheel torque. |
 | `src/legwheel_encoder/config/rotation_encoder.yaml` | Encoder serial port, baud rate, tick calibration, and direction. |
 | `src/legwheel_rgbd/config/gemini_336.yaml` | Orbbec stream selection, resolution/FPS, alignment, IMU, and filters. |
-| `src/legwheel_rgbd/config/camera_config.yaml` | Project-facing RGB-D/IMU topics and bridge publication rates. |
+| `src/legwheel_rgbd/config/camera_config.yaml` | Project-facing topics and RGB/depth synchronization queue/tolerance. |
 
 The MD80 node requires `limits_provided: true` and valid software limits before
 it will enable control. Configure conservative **firmware-level** MD80 current,
@@ -220,8 +220,16 @@ Verify all required experiment-camera streams:
 ros2 topic hz /camera/rgbd/rgb/image_raw
 ros2 topic hz /camera/rgbd/depth/image_raw
 ros2 topic hz /camera/imu
-ros2 topic echo --once /camera/rgbd/depth/camera_info
+ros2 topic echo --once --qos-durability transient_local \
+  /camera/rgbd/depth/camera_info
 ```
+
+The RGB and depth project topics are published as timestamp-matched pairs, so
+their counts and measured rates should agree. Their rate follows the frames the
+camera actually delivers; the bridge does not replay cached frames to imitate
+the configured 30 FPS. IMU messages likewise appear only once per advancing
+source timestamp. `CameraInfo` appears once at startup and again only if the
+calibration changes.
 
 Use `serial_number:=<camera-serial>` or `usb_port:=<port>` with the launch
 command when more than one camera is connected. Start with point clouds disabled;
@@ -321,24 +329,61 @@ The runner will:
 
 1. create `run_<n>` beside the experiment YAML and snapshot the experiment and
    camera configuration;
-2. hold a telemetry preflight until all motor, encoder, RGB, depth, and IMU
-   streams are fresh;
+2. hold a telemetry preflight until all motor and encoder streams are fresh,
+   and RGB, depth, and IMU have each made three forward header-timestamp steps
+   after an initial baseline sample;
 3. require explicit `ARM` and `START` confirmations;
 4. apply the leg settings, allow optional spring-zero adjustment, then start
    MCAP recording;
 5. ramp wheel torque, use the central encoder to determine loop progress, ramp
    torque down, and enter safe mode.
 
+While the experiment is in `RUNNING`, a 10 Hz watchdog checks progress of the
+camera sensor timestamps rather than callback arrival time. It immediately
+commands zero wheel torque and disables the motors if either image timestamp
+does not advance for 2 seconds, or the IMU timestamp does not advance for
+0.5 seconds. Repeated cached messages therefore cannot keep a run alive. The
+aborted run's `metadata.json` retains the watchdog reason for diagnosis.
+
 Use `Ctrl-C` to abort. The runner sends zero wheel torque, disables motors, and
 attempts to finalise the rosbag in its cleanup path.
+
+### Record raw camera topics for debugging
+
+Normal runs record only the cleaned project camera interface. When diagnosing
+driver, timestamp, QoS, or synchronization problems, also record the Orbbec
+source topics:
+
+```bash
+ros2 run legwheel_experiments run_experiment \
+  --experiment-config "$PWD/experiments/demo.yaml" \
+  --record-raw-camera-topics
+```
+
+This adds the raw RGB image and calibration, raw depth image and calibration,
+and raw combined IMU topics under `/legwheel_rgbd`. It can nearly double camera
+I/O and bag size, so use it for diagnostic runs rather than by default. Comparing
+raw stamps with paired project stamps reveals whether loss occurred in the
+device/driver or because frames did not meet the 10 ms pairing tolerance.
 
 ## Recorded data and Foxglove
 
 Each run stores `run_config.yaml`, configuration snapshots, `metadata.json`, a
 state marker, `rosbag_recorder.log`, and `rosbag/` containing an MCAP bag.
-Recorded topics include motor state, wheel state, central encoder data, RGB,
-depth, camera info, IMU, motor-enable state, impedance commands, and requested
-wheel torque.
+Recorded topics include motor state, wheel state, central encoder data, paired
+RGB/depth, camera info, IMU, motor-enable state, impedance commands, and
+requested wheel torque. Camera-info topics can contain only one message because
+unchanged calibration is intentionally not repeated; the bridge uses
+transient-local durability so a recorder started later still receives it.
+
+With `--record-raw-camera-topics`, these additional diagnostic inputs are
+recorded:
+
+- `/legwheel_rgbd/color/image_raw`
+- `/legwheel_rgbd/color/camera_info`
+- `/legwheel_rgbd/depth/image_raw`
+- `/legwheel_rgbd/depth/camera_info`
+- `/legwheel_rgbd/gyro_accel/sample`
 
 In Foxglove Desktop choose **Open local file** and select the `.mcap` file under
 `run_<n>/rosbag/`. Useful panels are:
@@ -383,8 +428,15 @@ index to its joint name before interpreting a plot.
   `true` status message, fresh feedback, and that the shutdown-position
   interlock has not detected movement.
 - **Experiment preflight waits forever:** use `ros2 topic hz` on every required
-  stream above. Camera images must be newer than one second, and motor/encoder
-  state must be newer than 0.5 seconds.
+  stream above, then inspect `header.stamp` on RGB, depth, and IMU. The camera
+  checks require three forward timestamp steps, not merely repeated callbacks.
+  Images must have advanced within 2 seconds; IMU and motor/encoder state have
+  tighter 0.5 second freshness limits.
+- **A run aborts for a stopped camera stream:** treat this as a data-integrity
+  failure. Keep the generated aborted run, repeat with
+  `--record-raw-camera-topics`, and compare raw and project timestamps. If raw
+  RGB/depth advance but no project pairs do, verify frame synchronization and
+  the 10 ms slop in `camera_config.yaml`.
 
 Package-specific implementation and hardware details are available in
 [`src/legwheel_can/README.md`](src/legwheel_can/README.md),

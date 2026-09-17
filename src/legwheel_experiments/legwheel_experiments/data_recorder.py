@@ -57,8 +57,25 @@ class RunRecorder:
         self._change_marker(ExperimentState.COMPLETE.name)
     
     def mark_aborted(self, reason: str) -> None:
-        self._change_marker(ExperimentState.ABORTING.name)
+        """Mark the run aborted and retain its cause for later diagnosis."""
+        if self.run_directory is None:
+            raise RuntimeError("No active run to mark as aborted.")
 
+        metadata_path = self.run_directory / "metadata.json"
+        temporary_path = self.run_directory / "metadata.json.tmp"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["abort_reason"] = reason
+        metadata["end_time_utc"] = datetime.now(timezone.utc).isoformat()
+
+        try:
+            with temporary_path.open("w", encoding="utf-8") as file:
+                json.dump(metadata, file, indent=2)
+            temporary_path.replace(metadata_path)
+        finally:
+            if temporary_path.exists():
+                temporary_path.unlink()
+
+        self._change_marker(ExperimentState.ABORTING.name)
 
     def _change_marker(self, new_state: str) -> None:
         if self.run_directory is None:
