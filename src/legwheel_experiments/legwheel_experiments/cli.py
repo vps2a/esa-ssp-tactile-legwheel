@@ -195,7 +195,7 @@ def adjust_spring_zero_position(
     recorder: RunRecorder,
     run_config: RunConfig,
 ) -> RunConfig:
-    """Interactively adjust, save, and confirm zero position after the node ramp."""
+    """Interactively adjust, save zero position after the node ramp."""
     while True:
         choice = input(
             "Would you like to adjust the spring zero position? (y/n): "
@@ -203,7 +203,7 @@ def adjust_spring_zero_position(
         if choice == "n":
             # The unchanged value is still confirmed and recorded before START.
             recorder.update_run_config(run_config)
-            confirm_experiment_start()
+            #confirm_experiment_start()
             return run_config
         if choice == "y":
             break
@@ -246,7 +246,7 @@ def adjust_spring_zero_position(
 
     # Persist the final value only once the operator has confirmed it with ready/no.
     recorder.update_run_config(run_config)
-    confirm_experiment_start()
+    #confirm_experiment_start()
     return run_config
 
 
@@ -398,23 +398,44 @@ def main():
 
         # The node invokes this only after enabling motors, applying the initial
         # ramp, and waiting for the three-second settle period.
-        def spring_zero_position_callback(current_run_config: RunConfig) -> RunConfig:
+        def spring_zero_position_callback(
+            current_run_config: RunConfig,
+        ) -> RunConfig:
             nonlocal bag_recorder
 
+            # Complete all interactive leg adjustments before starting the dataset
+            # recording. The wheel torque remains zero throughout this process.
             updated_run_config = adjust_spring_zero_position(
                 node,
                 recorder,
                 current_run_config,
             )
-            # adjust_spring_zero_position returns only after the user types START.
-            # A recorder startup failure aborts before wheel control can begin.
-            # Re-check the asynchronous camera guard after the operator input and
-            # before allocating a high-bandwidth recorder.
+
+            # Do not start a high-bandwidth recording if a camera stream has already
+            # failed while the operator was adjusting the leg.
             node.ensure_run_may_continue()
-            bag_recorder = RosbagRecorder(run_directory)
+
+            # Start rosbag before asking for the final START confirmation. This gives
+            # the recorder process and its DDS subscriptions time to initialize while
+            # the wheel is stationary.
+            bag_recorder = RosbagRecorder(
+                run_directory,
+                include_raw_camera_topics=arguments.record_raw_camera_topics,
+            )
             bag_directory = bag_recorder.start()
             node.set_recording_started()
+
             print(f"[ROSBAG] Started rosbag recording in: {bag_directory}")
+            print("[ROSBAG] Recorder is ready. Wheel torque remains zero.")
+
+            # Only wheel motion is gated by this final confirmation. Rosbag is already
+            # running, ensuring that the complete torque ramp is captured.
+            confirm_experiment_start()
+
+            # A monitored stream may have become stale while waiting at the terminal.
+            # Recheck it before allowing wheel control to begin.
+            node.ensure_run_may_continue()
+
             return updated_run_config
 
         node.run_experiment_after_arm(

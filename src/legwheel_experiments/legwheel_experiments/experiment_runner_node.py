@@ -67,7 +67,7 @@ class ExperimentRunnerNode(Node):
         # image timeout tolerates brief USB/processing stalls without allowing a
         # frozen stream to survive a meaningful portion of an experiment.
         self._maximum_camera_image_age_s = 2.0
-        self._maximum_camera_imu_age_s = 0.5
+        self._maximum_camera_imu_age_s = 1
         self._minimum_camera_stamp_advances = 3
         self._camera_stamp_monitors = {
             "RGB": AdvancingStampMonitor(self._minimum_camera_stamp_advances),
