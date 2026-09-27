@@ -1,11 +1,7 @@
 gemini_336_camera_node:
   ros__parameters:
-    # RGB and aligned depth are forwarded only as timestamp-matched pairs.
-    # Ten milliseconds accepts the sub-millisecond matches observed from the
-    # frame-synchronised driver while rejecting adjacent frames (~33 ms apart).
-    rgbd_sync_queue_size: 30
-    rgbd_sync_slop_s: 0.01
-
+    # Every vendor RGB, depth, and IMU callback is forwarded independently.
+    # Keep synchronization and terrain-window construction in post-processing.
     source_rgb_topic: /legwheel_rgbd/color/image_raw
     source_rgb_camera_info_topic: /legwheel_rgbd/color/camera_info
     source_depth_topic: /legwheel_rgbd/depth/image_raw

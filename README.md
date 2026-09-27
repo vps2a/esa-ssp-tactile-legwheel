@@ -17,7 +17,7 @@ experiment runner that records MCAP rosbags.
 | --- | --- | --- |
 | `legwheel_can` | Connects to MD80s through a CANdle USB-to-CAN adapter; provides passive zeroing, safety-gated leg control, wheel torque control, and terminal controllers. | `ros2 launch legwheel_can md80_legwheel_control.launch.py` |
 | `legwheel_encoder` | Reads the central rotation encoder from a serial port and publishes ticks, angle, and velocity. | `ros2 launch legwheel_encoder rotation_encoder.launch.py` |
-| `legwheel_rgbd` | Launches the Orbbec driver; publishes synchronized RGB/depth pairs, changed calibration, and unique IMU samples on project-stable topics. | `ros2 launch legwheel_rgbd gemini_336.launch.py` |
+| `legwheel_rgbd` | Launches the Orbbec driver; directly forwards independent RGB, depth, and IMU streams onto project-stable topics and republishes calibration when it changes. | `ros2 launch legwheel_rgbd gemini_336.launch.py` |
 | `legwheel_experiments` | Validates an experiment, performs telemetry preflight, runs the leg/wheel sequence, and records an MCAP rosbag. | `ros2 run legwheel_experiments run_experiment --experiment-config <file>` |
 
 The workspace includes the MAB CANdle-SDK as a Git submodule. Orbbec's ROS 2
@@ -120,7 +120,7 @@ Review these files before the first real run:
 | `src/legwheel_can/config/motor_config.json` | Initial leg gains/zero values, wheel torque ramp time, and default wheel torque. |
 | `src/legwheel_encoder/config/rotation_encoder.yaml` | Encoder serial port, baud rate, tick calibration, and direction. |
 | `src/legwheel_rgbd/config/gemini_336.yaml` | Orbbec stream selection, resolution/FPS, alignment, IMU, and filters. |
-| `src/legwheel_rgbd/config/camera_config.yaml` | Project-facing topics and RGB/depth synchronization queue/tolerance. |
+| `src/legwheel_rgbd/config/camera_config.yaml` | Vendor source topics and their project-facing output topic names. |
 
 The MD80 node requires `limits_provided: true` and valid software limits before
 it will enable control. Configure conservative **firmware-level** MD80 current,
@@ -224,12 +224,12 @@ ros2 topic echo --once --qos-durability transient_local \
   /camera/rgbd/depth/camera_info
 ```
 
-The RGB and depth project topics are published as timestamp-matched pairs, so
-their counts and measured rates should agree. Their rate follows the frames the
-camera actually delivers; the bridge does not replay cached frames to imitate
-the configured 30 FPS. IMU messages likewise appear only once per advancing
-source timestamp. `CameraInfo` appears once at startup and again only if the
-calibration changes.
+RGB, depth, and IMU are forwarded independently as soon as each vendor callback
+arrives. Their rates and message counts may therefore differ, which preserves
+the actual source streams for later post-processing. The bridge does not wait
+for a corresponding RGB/depth frame, replay cached data, filter timestamps, or
+rewrite `header.stamp`. `CameraInfo` appears once at startup and again only if
+the calibration changes.
 
 Use `serial_number:=<camera-serial>` or `usb_port:=<port>` with the launch
 command when more than one camera is connected. Start with point clouds disabled;
@@ -350,8 +350,8 @@ attempts to finalise the rosbag in its cleanup path.
 
 ### Record raw camera topics for debugging
 
-Normal runs record only the cleaned project camera interface. When diagnosing
-driver, timestamp, QoS, or synchronization problems, also record the Orbbec
+Normal runs record only the stable project camera interface. When diagnosing
+driver, timestamp, QoS, or forwarding-rate problems, also record the Orbbec
 source topics:
 
 ```bash
@@ -362,19 +362,22 @@ ros2 run legwheel_experiments run_experiment \
 
 This adds the raw RGB image and calibration, raw depth image and calibration,
 and raw combined IMU topics under `/legwheel_rgbd`. It can nearly double camera
-I/O and bag size, so use it for diagnostic runs rather than by default. Comparing
-raw stamps with paired project stamps reveals whether loss occurred in the
-device/driver or because frames did not meet the 10 ms pairing tolerance.
+I/O and bag size, so use it for diagnostic runs rather than by default. Compare
+raw and stable topic counts, rates, and header stamps to determine whether any
+loss or delay occurred in the device, driver, or forwarding bridge.
 
 ## Recorded data and Foxglove
 
 Each run stores `run_config.yaml`, configuration snapshots, `metadata.json`, a
 state marker, `rosbag_recorder.log`, and `rosbag/` containing an MCAP bag.
-Recorded topics include motor state, wheel state, central encoder data, paired
-RGB/depth, camera info, IMU, motor-enable state, impedance commands, and
-requested wheel torque. Camera-info topics can contain only one message because
-unchanged calibration is intentionally not repeated; the bridge uses
-transient-local durability so a recorder started later still receives it.
+Recorded topics include motor state, wheel state, central encoder data,
+independent RGB and depth streams, camera info, IMU, motor-enable state,
+impedance commands, and requested wheel torque. Camera-info topics can contain
+only one message because unchanged calibration is intentionally not repeated;
+the bridge uses transient-local durability so a recorder started later still
+receives it. RGB/depth association is deliberately deferred to post-processing
+and should use the preserved message header timestamps. Do not infer a pair
+from adjacent MCAP records, rosbag receive times, or matching message indices.
 
 With `--record-raw-camera-topics`, these additional diagnostic inputs are
 recorded:
@@ -434,9 +437,10 @@ index to its joint name before interpreting a plot.
   tighter 0.5 second freshness limits.
 - **A run aborts for a stopped camera stream:** treat this as a data-integrity
   failure. Keep the generated aborted run, repeat with
-  `--record-raw-camera-topics`, and compare raw and project timestamps. If raw
-  RGB/depth advance but no project pairs do, verify frame synchronization and
-  the 10 ms slop in `camera_config.yaml`.
+  `--record-raw-camera-topics`, and compare raw and project counts, rates, and
+  timestamps. Because each stream is forwarded independently, a healthy raw
+  stream with a slower project stream points to host load, ROS transport, or
+  recording throughput rather than an online pairing decision.
 
 Package-specific implementation and hardware details are available in
 [`src/legwheel_can/README.md`](src/legwheel_can/README.md),

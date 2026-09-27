@@ -82,7 +82,7 @@ With the default `camera_name:=legwheel_rgbd`, raw Orbbec topics are namespaced 
 - `/legwheel_rgbd/gyro_accel/sample`
 - `/legwheel_rgbd/depth/points` when point cloud output is enabled
 
-The LegWheel bridge exposes the following cleaned streams:
+The LegWheel bridge exposes the following project-stable streams:
 
 - `/camera/rgbd/rgb/image_raw`
 - `/camera/rgbd/rgb/camera_info`
@@ -90,19 +90,23 @@ The LegWheel bridge exposes the following cleaned streams:
 - `/camera/rgbd/depth/camera_info`
 - `/camera/imu`
 
-RGB and depth are approximately synchronized using their header timestamps and
-are published only as pairs. IMU samples are forwarded once per advancing
-timestamp. Camera calibration is published initially and only when its content
-changes; a transient-local publisher makes the latest calibration available to
-late subscribers such as rosbag. Configure the synchronization queue and
-tolerance in `camera_config.yaml`. The bridge never manufactures a configured
-rate by replaying its newest cached message.
+RGB, depth, and IMU are forwarded independently from their vendor callbacks.
+The bridge does not wait for another stream, filter timestamp values, or change
+the source `header.stamp`; RGB/depth association is performed later during
+dataset generation. Camera calibration is published initially and only when
+its content changes, and a transient-local publisher makes the latest
+calibration available to late subscribers such as rosbag. The bridge never
+manufactures a configured rate by replaying its newest cached message.
+
+`enable_frame_sync` in the vendor configuration is a driver acquisition
+setting. It does not make the LegWheel bridge wait for, match, or discard RGB
+or depth messages.
 
 ## Notes for implementation
 
 - Depend on ROS messages and topics from `orbbec_camera`; do not call the Orbbec SDK directly from LegWheel code unless a ROS topic/service cannot provide the data.
 - Keep Orbbec driver parameters in `src/legwheel_rgbd/config/gemini_336.yaml`.
-- Keep LegWheel synchronization settings and topic names in
+- Keep LegWheel source and output topic names in
   `src/legwheel_rgbd/config/camera_config.yaml`.
 - Use `serial_number` or `usb_port` launch arguments once multiple cameras are connected.
 - Start with point clouds disabled during bring-up to reduce USB and CPU load.

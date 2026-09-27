@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 
-"""Publish a synchronized, project-stable view of the Gemini 336 streams."""
+"""Forward Gemini 336 data immediately onto project-stable ROS topics."""
 
-from message_filters import ApproximateTimeSynchronizer, Subscriber
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import (
@@ -14,21 +13,14 @@ from rclpy.qos import (
 )
 from sensor_msgs.msg import CameraInfo, Image, Imu
 
-from legwheel_rgbd.stream_utils import (
-    camera_info_signature,
-    stamp_nanoseconds,
-    stamps_strictly_advance,
-)
+from legwheel_rgbd.stream_utils import camera_info_signature
 
 
 class Gemini336CameraNode(Node):
-    """Bridge Orbbec topics without manufacturing duplicate sensor samples."""
+    """Provide stable topic names while preserving message content and stamps."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__("gemini_336_camera_node")
-
-        self.declare_parameter("rgbd_sync_queue_size", 30)
-        self.declare_parameter("rgbd_sync_slop_s", 0.01)
 
         self.declare_parameter("source_rgb_topic", "/legwheel_rgbd/color/image_raw")
         self.declare_parameter(
@@ -53,13 +45,6 @@ class Gemini336CameraNode(Node):
             "/camera/rgbd/depth/camera_info",
         )
         self.declare_parameter("imu_topic", "/camera/imu")
-
-        sync_queue_size = int(self.get_parameter("rgbd_sync_queue_size").value)
-        sync_slop_s = float(self.get_parameter("rgbd_sync_slop_s").value)
-        if sync_queue_size < 2:
-            raise ValueError("rgbd_sync_queue_size must be at least 2")
-        if sync_slop_s <= 0.0:
-            raise ValueError("rgbd_sync_slop_s must be greater than 0 seconds")
 
         self._source_topics = {
             "rgb": self.get_parameter("source_rgb_topic").value,
@@ -106,31 +91,23 @@ class Gemini336CameraNode(Node):
             qos_profile_sensor_data,
         )
 
-        # message_filters consumes each source image at most once. Images are
-        # forwarded only from the paired callback, so the project topics always
-        # contain RGB and aligned depth observations from the same time window.
-        self._rgb_subscriber = Subscriber(
-            self,
+        # Each high-rate source has its own callback. There is deliberately no
+        # RGB/depth synchronizer, queue, timer, or timestamp filter here: waiting
+        # for a second stream would add latency and could discard otherwise valid
+        # camera data. Publishing the received message object unchanged preserves
+        # its original header stamp for synchronization during post-processing.
+        self._rgb_subscription = self.create_subscription(
             Image,
             self._source_topics["rgb"],
-            qos_profile=qos_profile_sensor_data,
+            self._publish_rgb,
+            qos_profile_sensor_data,
         )
-        self._depth_subscriber = Subscriber(
-            self,
+        self._depth_subscription = self.create_subscription(
             Image,
             self._source_topics["depth"],
-            qos_profile=qos_profile_sensor_data,
+            self._publish_depth,
+            qos_profile_sensor_data,
         )
-        self._rgb_subscriber.registerCallback(self._mark_rgb_received)
-        self._depth_subscriber.registerCallback(self._mark_depth_received)
-
-        self._rgbd_synchronizer = ApproximateTimeSynchronizer(
-            [self._rgb_subscriber, self._depth_subscriber],
-            queue_size=sync_queue_size,
-            slop=sync_slop_s,
-        )
-        self._rgbd_synchronizer.registerCallback(self._publish_rgbd_pair)
-
         self._rgb_camera_info_subscription = self.create_subscription(
             CameraInfo,
             self._source_topics["rgb_info"],
@@ -150,48 +127,27 @@ class Gemini336CameraNode(Node):
             qos_profile_sensor_data,
         )
 
-        self._last_rgb_stamp_ns = None
-        self._last_depth_stamp_ns = None
-        self._last_imu_stamp_ns = None
         self._rgb_camera_info_signature = None
         self._depth_camera_info_signature = None
-        self._synchronized_pair_count = 0
-        self._warned_nonadvancing_streams = set()
 
         self._waiting_log_timer = self.create_timer(5.0, self._log_waiting_sources)
 
         self.get_logger().info(
-            "Gemini 336 bridge forwarding synchronized RGB-D pairs with "
-            f"a {sync_slop_s * 1000.0:.1f} ms tolerance; IMU forwarding is event-driven"
+            "Gemini 336 bridge forwarding RGB, depth, and IMU independently "
+            "as each source message arrives"
         )
 
-    def _mark_rgb_received(self, _message):
-        """Track source discovery separately from successful synchronization."""
+    def _publish_rgb(self, message: Image) -> None:
+        """Forward one RGB callback immediately, without pairing or filtering."""
         self._source_received["rgb"] = True
+        self.rgb_pub.publish(message)
 
-    def _mark_depth_received(self, _message):
-        """Track source discovery separately from successful synchronization."""
+    def _publish_depth(self, message: Image) -> None:
+        """Forward one depth callback immediately, without pairing or filtering."""
         self._source_received["depth"] = True
+        self.depth_pub.publish(message)
 
-    def _publish_rgbd_pair(self, rgb_message, depth_message):
-        """Forward one strictly advancing RGB/depth pair exactly once."""
-        rgb_stamp_ns = stamp_nanoseconds(rgb_message.header.stamp)
-        depth_stamp_ns = stamp_nanoseconds(depth_message.header.stamp)
-
-        if not self._stamps_advance(
-            "RGB-D",
-            (rgb_stamp_ns, depth_stamp_ns),
-            (self._last_rgb_stamp_ns, self._last_depth_stamp_ns),
-        ):
-            return
-
-        self._last_rgb_stamp_ns = rgb_stamp_ns
-        self._last_depth_stamp_ns = depth_stamp_ns
-        self._synchronized_pair_count += 1
-        self.rgb_pub.publish(rgb_message)
-        self.depth_pub.publish(depth_message)
-
-    def _publish_rgb_camera_info_if_changed(self, message):
+    def _publish_rgb_camera_info_if_changed(self, message: CameraInfo) -> None:
         """Publish RGB calibration initially and whenever its values change."""
         self._source_received["rgb_info"] = True
         signature = camera_info_signature(message)
@@ -200,7 +156,7 @@ class Gemini336CameraNode(Node):
         self._rgb_camera_info_signature = signature
         self.rgb_camera_info_pub.publish(message)
 
-    def _publish_depth_camera_info_if_changed(self, message):
+    def _publish_depth_camera_info_if_changed(self, message: CameraInfo) -> None:
         """Publish depth calibration initially and whenever its values change."""
         self._source_received["depth_info"] = True
         signature = camera_info_signature(message)
@@ -209,35 +165,13 @@ class Gemini336CameraNode(Node):
         self._depth_camera_info_signature = signature
         self.depth_camera_info_pub.publish(message)
 
-    def _publish_imu(self, message):
-        """Forward each new IMU sample directly instead of replaying cached data."""
+    def _publish_imu(self, message: Imu) -> None:
+        """Forward every IMU callback without replaying or filtering messages."""
         self._source_received["imu"] = True
-        stamp_ns = stamp_nanoseconds(message.header.stamp)
-        if not self._stamps_advance(
-            "IMU",
-            (stamp_ns,),
-            (self._last_imu_stamp_ns,),
-        ):
-            return
-        self._last_imu_stamp_ns = stamp_ns
         self.imu_pub.publish(message)
 
-    def _stamps_advance(self, stream_name, new_stamps, previous_stamps):
-        """Reject zero, repeated, or regressing stamps without flooding logs."""
-        valid = stamps_strictly_advance(new_stamps, previous_stamps)
-        if valid:
-            return True
-
-        if stream_name not in self._warned_nonadvancing_streams:
-            self._warned_nonadvancing_streams.add(stream_name)
-            self.get_logger().warning(
-                f"Dropping {stream_name} sample with a zero, repeated, or "
-                "regressing sensor timestamp. This warning is emitted once per stream."
-            )
-        return False
-
-    def _log_waiting_sources(self):
-        """Report missing publishers or a synchronization configuration problem."""
+    def _log_waiting_sources(self) -> None:
+        """Report vendor topics that have not delivered a message yet."""
         missing_sources = [
             self._source_topics[name]
             for name, received in self._source_received.items()
@@ -250,15 +184,8 @@ class Gemini336CameraNode(Node):
             self.get_logger().warning(
                 "Waiting for Gemini 336 source topics: " + source_status
             )
-            return
 
-        if self._synchronized_pair_count == 0:
-            self.get_logger().warning(
-                "RGB and depth are arriving, but no synchronized pair has met "
-                "rgbd_sync_slop_s. Check camera frame synchronization and timestamps."
-            )
-
-    def _describe_source_topic(self, topic):
+    def _describe_source_topic(self, topic: str) -> str:
         publishers = self.get_publishers_info_by_topic(topic)
         if not publishers:
             return f"{topic} (no publishers discovered)"

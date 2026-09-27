@@ -1,18 +1,4 @@
-"""Pure helpers for comparing ROS camera metadata and timestamps."""
-
-
-def stamp_nanoseconds(stamp) -> int:
-    """Convert a ROS builtin_interfaces/Time-like object to nanoseconds."""
-    return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
-
-
-def stamps_strictly_advance(new_stamps, previous_stamps) -> bool:
-    """Return whether every positive timestamp advances its matching stream."""
-    return all(
-        new_stamp > 0
-        and (previous_stamp is None or new_stamp > previous_stamp)
-        for new_stamp, previous_stamp in zip(new_stamps, previous_stamps)
-    )
+"""Pure helper for comparing ROS camera calibration metadata."""
 
 
 def camera_info_signature(message) -> tuple:

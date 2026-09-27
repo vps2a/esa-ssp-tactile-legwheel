@@ -7,9 +7,9 @@ It has two layers:
 
 1. `orbbec_camera` from Orbbec's `OrbbecSDK_ROS2` repository opens the USB
    camera and publishes the vendor ROS 2 topics.
-2. `legwheel_rgbd` publishes a cleaned project interface: it pairs RGB and
-   depth by sensor timestamp, forwards each paired frame and IMU sample once,
-   and publishes camera calibration only when it changes.
+2. `legwheel_rgbd` directly forwards RGB, depth, and IMU onto project-stable
+   topic names as each independent vendor callback arrives. It also publishes
+   camera calibration initially and whenever that calibration changes.
 
 The Orbbec ROS 2 wrapper is an external workspace dependency. It is declared
 in the repository-root `dependencies.repos` file, so it is downloaded and
@@ -106,7 +106,7 @@ There are two configuration files with separate responsibilities:
 | File | Purpose |
 | --- | --- |
 | `config/gemini_336.yaml` | Orbbec driver settings: enabled streams, alignment, resolution, frame rate, IMU, filters, and TF. |
-| `config/camera_config.yaml` | LegWheel topic names and RGB/depth synchronization settings. |
+| `config/camera_config.yaml` | Vendor source topics and project-facing output topic names. |
 
 Before the first run, review `config/gemini_336.yaml`. The shipped settings:
 
@@ -124,31 +124,30 @@ The observed camera rate can be lower and irregular even when the driver is
 configured for 30 FPS. The bridge is therefore event-driven: it never fills a
 gap by publishing a cached image or IMU sample again.
 
-Configure RGB/depth pairing in `config/camera_config.yaml`:
-
-```yaml
-rgbd_sync_queue_size: 30
-rgbd_sync_slop_s: 0.01
-```
-
-`rgbd_sync_slop_s` is the maximum allowed difference between RGB and depth
-header stamps. The 10 ms default accepts the close pairs produced by the
-frame-synchronized driver and rejects an image from the adjacent nominal
-30 FPS frame, which is about 33 ms away. The queue accommodates short bursts
-and scheduling jitter. Increase the tolerance only after measuring the raw
-topic stamps; an overly large value can pair neighbouring, unrelated frames.
-
 The forwarding rules are:
 
-- RGB and depth are published only together after approximate timestamp
-  synchronization. A source image is consumed by at most one output pair.
-- A zero, repeated, or regressing RGB, depth, or IMU header stamp is dropped.
-- IMU samples are forwarded from their source callback, once per advancing
-  header stamp.
+- RGB, depth, and IMU each have an independent callback that immediately
+  publishes the received message on its stable output topic.
+- There is no online RGB/depth pairing, cross-stream queue, fixed-rate timer,
+  or timestamp filter. Every source callback is forwarded once.
+- Messages are published unchanged, including zero, repeated, or regressing
+  header stamps. This preserves driver behaviour for later diagnosis, while
+  the experiment watchdog independently detects stamps that stop advancing.
+- RGB and depth may have different rates and counts. Associate them later in
+  post-processing using their preserved `header.stamp` values.
 - Each `CameraInfo` is compared without its header timestamp. The first
   calibration and any changed calibration are published; repeated copies are
   suppressed. The output uses transient-local durability so a recorder or
   subscriber that starts later still receives the latest calibration.
+
+The Orbbec driver's `enable_frame_sync` setting remains enabled to encourage
+coherent capture at the device/driver level. It does not create a pairing gate
+in the LegWheel bridge: either image stream is still forwarded when the other
+stream is absent or late.
+
+Rosbag records the stable RGB and depth topics as independent message streams.
+Record adjacency and rosbag receive time are not pair identifiers; dataset code
+should perform explicit one-to-one matching from the preserved header stamps.
 
 ## Run and verify
 
@@ -174,9 +173,9 @@ ros2 topic echo --once --qos-durability transient_local \
   /camera/rgbd/depth/camera_info
 ```
 
-RGB and depth should report the same output count and rate because they are
-published as pairs. The rate is the rate actually delivered by the camera, not
-an artificial 30 Hz. To inspect timestamps directly:
+Each output rate should follow its corresponding raw vendor rate rather than an
+artificial 30 Hz. RGB and depth are independent, so their measured rates and
+counts are not required to match. To inspect timestamps directly:
 
 ```bash
 ros2 topic echo /camera/rgbd/rgb/image_raw --field header.stamp
@@ -195,11 +194,12 @@ The raw Orbbec topics remain available under `/legwheel_rgbd`, including
 `/legwheel_rgbd/color/image_raw`, `/legwheel_rgbd/depth/image_raw`, and
 `/legwheel_rgbd/gyro_accel/sample`.
 
-The experiment recorder uses the cleaned topics by default. Add
+The experiment recorder uses the stable forwarded topics by default. Add
 `--record-raw-camera-topics` to `run_experiment` for a diagnostic run that also
 captures all five raw image, calibration, and combined-IMU source topics. This
 can nearly double camera I/O and bag size, but it lets you compare input and
-output header stamps when diagnosing dropped or unpaired frames.
+output counts, rates, and header stamps when diagnosing forwarding loss or
+latency.
 
 ## Launch options
 
@@ -235,12 +235,12 @@ ros2 launch legwheel_rgbd gemini_336.launch.py \
 - RGB-D or IMU frequency is lower than expected: compare the raw and project
   topics. The bridge cannot publish new data faster than the device produces
   it and deliberately does not repeat cached messages.
-- Raw RGB and depth arrive but project RGB-D does not: compare raw header
-  stamps. No pair is published when the difference exceeds
-  `rgbd_sync_slop_s`; check `enable_frame_sync` before increasing the slop.
-- A warning reports a non-advancing timestamp: the source is repeating a
-  cached sample, has reset its clock, or is publishing a zero stamp. The bridge
-  drops it so it cannot masquerade as new data.
+- A raw topic is faster than its corresponding project topic: record raw topics
+  during a diagnostic run and check CPU, USB, ROS transport, and disk load. The
+  bridge contains no cross-stream wait or pairing condition.
+- Header timestamps repeat or regress: the bridge deliberately preserves those
+  messages. The experiment preflight/watchdog treats the affected stream as not
+  advancing, and the recorded raw/project data remains available for diagnosis.
 - RGB and depth do not line up: keep `depth_registration: true`,
   `align_mode: SW`, and `align_target_stream: COLOR` unless the application
   explicitly needs unaligned depth.

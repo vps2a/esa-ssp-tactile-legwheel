@@ -22,9 +22,9 @@ ROSBAG_TOPICS = (
 )
 
 # These are the vendor-facing inputs to legwheel_rgbd. They are intentionally
-# opt-in because recording them alongside the synchronized project topics nearly
+# opt-in because recording them alongside the stable forwarded topics nearly
 # doubles camera bandwidth. They are invaluable when diagnosing driver, QoS, or
-# synchronization problems.
+# forwarding-rate problems.
 RAW_CAMERA_TOPICS = (
     "/legwheel_rgbd/color/image_raw",
     "/legwheel_rgbd/color/camera_info",

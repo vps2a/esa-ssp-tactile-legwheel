@@ -61,7 +61,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "camera_config",
             default_value=default_camera_config,
-            description="LegWheel camera bridge config containing publish rates and topics.",
+            description="LegWheel camera bridge config containing source and output topics.",
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(orbbec_launch),

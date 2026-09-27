@@ -8,7 +8,6 @@
   <license>TODO: License declaration</license>
 
   <depend>rclpy</depend>
-  <depend>message_filters</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>orbbec_camera</depend>

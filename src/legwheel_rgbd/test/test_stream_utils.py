@@ -1,10 +1,6 @@
 from types import SimpleNamespace
 
-from legwheel_rgbd.stream_utils import (
-    camera_info_signature,
-    stamp_nanoseconds,
-    stamps_strictly_advance,
-)
+from legwheel_rgbd.stream_utils import camera_info_signature
 
 
 def make_camera_info(stamp_sec=1, fx=460.0):
@@ -53,19 +49,3 @@ def test_camera_info_signature_detects_frame_change():
     moved.header.frame_id = "replacement_color_optical_frame"
 
     assert camera_info_signature(original) != camera_info_signature(moved)
-
-
-def test_stamp_nanoseconds_combines_seconds_and_nanoseconds():
-    stamp = SimpleNamespace(sec=12, nanosec=345)
-
-    assert stamp_nanoseconds(stamp) == 12_000_000_345
-
-
-def test_stamps_strictly_advance_accepts_a_first_positive_pair():
-    assert stamps_strictly_advance((10, 11), (None, None))
-
-
-def test_stamps_strictly_advance_rejects_zero_repeat_or_regression():
-    assert not stamps_strictly_advance((0, 11), (None, None))
-    assert not stamps_strictly_advance((10, 12), (10, 11))
-    assert not stamps_strictly_advance((9, 12), (10, 11))
