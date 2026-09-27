@@ -102,6 +102,12 @@ manufactures a configured rate by replaying its newest cached message.
 setting. It does not make the LegWheel bridge wait for, match, or discard RGB
 or depth messages.
 
+The Gemini 330-series driver uses the global timestamp domain by default. Keep
+`enable_sync_host_time: false` in this mode. The separate host synchronizer can
+apply clock corrections while streaming, which can appear as repeated or
+regressing sensor stamps and will correctly fail the experiment's timestamp
+watchdog.
+
 ## Notes for implementation
 
 - Depend on ROS messages and topics from `orbbec_camera`; do not call the Orbbec SDK directly from LegWheel code unless a ROS topic/service cannot provide the data.
@@ -111,3 +117,6 @@ or depth messages.
 - Use `serial_number` or `usb_port` launch arguments once multiple cameras are connected.
 - Start with point clouds disabled during bring-up to reduce USB and CPU load.
 - The Gemini 336 should be on a USB 3 port. If frames drop at high resolution, lower `color_width`, `color_height`, `depth_width`, `depth_height`, or FPS in the config file.
+- When running Linux in a virtual machine, verify `lsusb -t` reports `5000M` or
+  faster for the camera and record to a native Linux filesystem rather than a
+  host-shared folder.

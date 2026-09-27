@@ -20,7 +20,12 @@ enable_colored_point_cloud: false
 publish_tf: true
 tf_publish_rate: 0.0
 enable_frame_sync: true
-enable_sync_host_time: true
+# The Gemini 330-series driver uses the global time domain by default. Orbbec
+# explicitly recommends disabling its separate periodic host-time synchronizer
+# in that mode. Combining both mechanisms can correct the camera clock while a
+# run is active, producing repeated or regressing header stamps (especially
+# through a virtualized USB connection). Preserve one monotonic global timeline.
+enable_sync_host_time: false
 enable_depth_scale: true
 enable_noise_removal_filter: true
 enable_disparity_to_depth: true

@@ -425,6 +425,10 @@ index to its joint name before interpreting a plot.
 - **Camera cannot open:** install its udev rules, reconnect it, and use a USB 3
   cable/port. Low RGB-D rate should be investigated first on raw
   `/legwheel_rgbd/...` topics with Foxglove and rosbag recording stopped.
+- **Camera stamps pause or move backward:** keep `enable_sync_host_time: false`
+  with the Gemini driver's default global time domain. On a VM, verify the
+  camera is attached to the guest at USB 3 speed with `lsusb -t`, and write
+  bags to the guest's native filesystem rather than a shared folder.
 - **Encoder cannot open its port:** check `dmesg -w` while reconnecting it,
   correct `port` in the YAML, and check `dialout` access.
 - **Motors never enable:** verify `enable_control:=true`, valid limits, a

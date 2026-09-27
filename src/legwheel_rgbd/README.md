@@ -113,7 +113,8 @@ Before the first run, review `config/gemini_336.yaml`. The shipped settings:
 - enable RGB, depth, accelerometer, and gyroscope streams;
 - align depth to the colour camera;
 - request 640 x 480 RGB and depth streams at 30 FPS;
-- enable frame synchronization and host timestamps; and
+- enable device frame synchronization, use the driver's global timestamp
+  domain, and leave its separate periodic host-time synchronizer disabled; and
 - keep point cloud output disabled to reduce USB and CPU load during bring-up.
 
 Set concrete `color_width`, `color_height`, `color_fps`, `depth_width`,
@@ -144,6 +145,12 @@ The Orbbec driver's `enable_frame_sync` setting remains enabled to encourage
 coherent capture at the device/driver level. It does not create a pairing gate
 in the LegWheel bridge: either image stream is still forwarded when the other
 stream is absent or late.
+
+The Gemini 330-series launch file uses the `global` timestamp domain by default.
+Keep `enable_sync_host_time: false` with that domain, as recommended by Orbbec.
+Enabling the additional periodic host-time synchronizer can adjust timestamps
+during a run. A repeated or backward correction is deliberately rejected by the
+experiment watchdog because it would make later sensor correlation ambiguous.
 
 Rosbag records the stable RGB and depth topics as independent message streams.
 Record adjacency and rosbag receive time are not pair identifiers; dataset code
@@ -232,6 +239,10 @@ ros2 launch legwheel_rgbd gemini_336.launch.py \
   rebuild the workspace, and source `install/setup.bash`.
 - Camera cannot be opened or no device is listed: confirm the USB 3 cable and
   port, install the udev rule, then reconnect the camera.
+- In a virtual machine, confirm the device is attached to the Linux guest as USB
+  3 and run `lsusb -t`; the camera branch must report `5000M` or faster, not
+  `480M`. Also run `df -T` on the recording directory and avoid writing RGB-D
+  bags through a VM shared-folder filesystem.
 - RGB-D or IMU frequency is lower than expected: compare the raw and project
   topics. The bridge cannot publish new data faster than the device produces
   it and deliberately does not repeat cached messages.
@@ -241,6 +252,10 @@ ros2 launch legwheel_rgbd gemini_336.launch.py \
 - Header timestamps repeat or regress: the bridge deliberately preserves those
   messages. The experiment preflight/watchdog treats the affected stream as not
   advancing, and the recorded raw/project data remains available for diagnosis.
+  Confirm that `enable_sync_host_time` is `false` when using the default global
+  time domain. Temporarily set `enable_frame_drop_log: true` and
+  `show_fps_enable: true` in `gemini_336.yaml` to distinguish SDK drops from
+  downstream ROS or recorder overload.
 - RGB and depth do not line up: keep `depth_registration: true`,
   `align_mode: SW`, and `align_target_stream: COLOR` unless the application
   explicitly needs unaligned depth.
