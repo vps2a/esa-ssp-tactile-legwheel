@@ -202,6 +202,10 @@ sensor timestamps and an explicit tolerance.
   USB cable and port.
 - If the raw image rate is low, stop Foxglove, RViz, and rosbag; then measure the
   driver topics directly. Check USB speed, CPU load, firmware, and driver logs.
+- If the camera keeps disconnecting and resetting check the USB connections individually
+  to isolate the component in question. Make sure only one camera is detected by 
+  the system. Sometimes connecting the laptop directly to the camera once and then
+  reconnecting it back to the hub helped.
 - If rates fall only while recording, write the bag to a native Linux filesystem
   rather than a virtual-machine shared folder.
 - Temporarily set `enable_frame_drop_log: true` and `show_fps_enable: true` in

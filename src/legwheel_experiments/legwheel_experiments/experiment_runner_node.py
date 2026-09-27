@@ -33,10 +33,7 @@ from legwheel_experiments.stream_health import (
     message_stamp_nanoseconds,
 )
 
-# Watchdog disabled due to unresolved bugs.
-# TODO: Fix the watchdog and diagnose the source for appearance of IMU latency
-# which does not show up in rosbag recorded data
-_RUNTIME_CAMERA_WATCHDOG_ENABLED = False
+_RUNTIME_CAMERA_WATCHDOG_ENABLED = True #This watchdog is used to abort the experiment if the camera stream fails during the experiment. It is disabled by default because it is not yet fully tested and may cause false positives.
 
 
 class ExperimentAbortedError(RuntimeError):
