@@ -1,6 +1,6 @@
-from setuptools import find_packages, setup
 import os
-from glob import glob
+
+from setuptools import find_packages, setup
 
 package_name = 'legwheel_rgbd'
 
@@ -12,8 +12,15 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
-        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
+        # Keep installed resources explicit. A wildcard can match broken,
+        # package-local symlinks left in colcon's build directory after a source
+        # file is deleted, causing setuptools to try copying that deleted file.
+        (os.path.join('share', package_name, 'config'), [
+            'config/gemini_336.yaml',
+        ]),
+        (os.path.join('share', package_name, 'launch'), [
+            'launch/gemini_336.launch.py',
+        ]),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
