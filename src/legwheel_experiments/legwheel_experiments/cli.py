@@ -12,7 +12,10 @@ from legwheel_experiments.schemas import RunConfig, load_experiment_config, make
 from legwheel_experiments.state_machine import ExperimentStateMachine, ExperimentState
 from legwheel_experiments.data_recorder import RunRecorder
 from legwheel_experiments.rosbag_recorder import RosbagRecorder
-from legwheel_experiments.experiment_runner_node import ExperimentRunnerNode
+from legwheel_experiments.experiment_runner_node import (
+    ExperimentAbortedError,
+    ExperimentRunnerNode,
+)
 
 #Helper functions
 
@@ -192,7 +195,7 @@ def adjust_spring_zero_position(
     recorder: RunRecorder,
     run_config: RunConfig,
 ) -> RunConfig:
-    """Interactively adjust, save, and confirm zero position after the node ramp."""
+    """Interactively adjust, save zero position after the node ramp."""
     while True:
         choice = input(
             "Would you like to adjust the spring zero position? (y/n): "
@@ -200,7 +203,7 @@ def adjust_spring_zero_position(
         if choice == "n":
             # The unchanged value is still confirmed and recorded before START.
             recorder.update_run_config(run_config)
-            confirm_experiment_start()
+            #confirm_experiment_start()
             return run_config
         if choice == "y":
             break
@@ -243,7 +246,7 @@ def adjust_spring_zero_position(
 
     # Persist the final value only once the operator has confirmed it with ready/no.
     recorder.update_run_config(run_config)
-    confirm_experiment_start()
+    #confirm_experiment_start()
     return run_config
 
 
@@ -395,20 +398,44 @@ def main():
 
         # The node invokes this only after enabling motors, applying the initial
         # ramp, and waiting for the three-second settle period.
-        def spring_zero_position_callback(current_run_config: RunConfig) -> RunConfig:
+        def spring_zero_position_callback(
+            current_run_config: RunConfig,
+        ) -> RunConfig:
             nonlocal bag_recorder
 
+            # Complete all interactive leg adjustments before starting the dataset
+            # recording. The wheel torque remains zero throughout this process.
             updated_run_config = adjust_spring_zero_position(
                 node,
                 recorder,
                 current_run_config,
             )
-            # adjust_spring_zero_position returns only after the user types START.
-            # A recorder startup failure aborts before wheel control can begin.
+
+            # Do not start a high-bandwidth recording if a camera stream has already
+            # failed while the operator was adjusting the leg.
+            node.ensure_run_may_continue()
+
+            # Start rosbag before asking for the final START confirmation. This gives
+            # the recorder process and its DDS subscriptions time to initialize while
+            # the wheel is stationary.
+            # RosbagRecorder always records the camera driver's raw topics.
+            # There is no runtime switch because recording relayed /camera/
+            # copies was removed to preserve the source timestamps and rate.
             bag_recorder = RosbagRecorder(run_directory)
             bag_directory = bag_recorder.start()
             node.set_recording_started()
+
             print(f"[ROSBAG] Started rosbag recording in: {bag_directory}")
+            print("[ROSBAG] Recorder is ready. Wheel torque remains zero.")
+
+            # Only wheel motion is gated by this final confirmation. Rosbag is already
+            # running, ensuring that the complete torque ramp is captured.
+            confirm_experiment_start()
+
+            # A monitored stream may have become stale while waiting at the terminal.
+            # Recheck it before allowing wheel control to begin.
+            node.ensure_run_may_continue()
+
             return updated_run_config
 
         node.run_experiment_after_arm(
@@ -418,11 +445,17 @@ def main():
         )
         experiment_completed = True
 
-
+    except ExperimentAbortedError as error:
+        print(f"\nExperiment aborted by runtime safety guard: {error}")
     except KeyboardInterrupt:
         print("\nExperiment runner interrupted by user.")
     
     finally:
+        # Make the mechanism safe before any file or process cleanup. Publishing
+        # while rosbag is still active also records the final zero/disable commands.
+        if node is not None:
+            node.enter_safe_mode()
+
         if bag_recorder is not None:
             try:
                 bag_recorder.stop()
@@ -433,10 +466,8 @@ def main():
         if experiment_completed:
             recorder.mark_complete()
         elif recorder.has_active_run():
-            recorder.mark_aborted("Experiment did not complete")
-
-        if node is not None:
-            node.enter_safe_mode()
+            abort_reason = None if node is None else node.abort_reason()
+            recorder.mark_aborted(abort_reason or "Experiment did not complete")
 
         if executor is not None:
             executor.shutdown()

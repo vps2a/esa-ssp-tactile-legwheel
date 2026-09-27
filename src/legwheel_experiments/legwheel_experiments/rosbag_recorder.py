@@ -4,16 +4,16 @@ import subprocess
 import time
 from pathlib import Path
 
+from legwheel_experiments.camera_topics import CAMERA_RECORDING_TOPICS
+
+# Camera topics are the driver's raw outputs. Do not add relayed copies here:
+# duplicate high-bandwidth images increase DDS and disk load without adding data.
 ROSBAG_TOPICS = (
     "/legwheel/joint_states",
     "/wheel/wheel_state",
     "/rotation_encoder/joint_state",
     "/rotation_encoder/ticks",
-    "/camera/rgbd/rgb/image_raw",
-    "/camera/rgbd/rgb/camera_info",
-    "/camera/rgbd/depth/image_raw",
-    "/camera/rgbd/depth/camera_info",
-    "/camera/imu",
+    *CAMERA_RECORDING_TOPICS,
     "/legwheel/motor_status",
     "/legwheel/spring_zero_position",
     "/legwheel/spring_constant",
@@ -26,6 +26,7 @@ class RosbagRecorder:
     def __init__(self, run_directory: Path) -> None:
         self._run_directory = run_directory
         self._bag_directory = run_directory / "rosbag"
+        self._topics = ROSBAG_TOPICS
         self._process: subprocess.Popen | None = None
         self._log_file = None
 
@@ -43,7 +44,7 @@ class RosbagRecorder:
             "--storage", "mcap",
             "--output", str(self._bag_directory),
             "--topics",
-            *ROSBAG_TOPICS,
+            *self._topics,
         ]
         
         self._process = subprocess.Popen(

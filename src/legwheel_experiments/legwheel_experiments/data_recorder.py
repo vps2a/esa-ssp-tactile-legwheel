@@ -1,9 +1,12 @@
 from dataclasses import asdict
-import json
-import shutil
 from datetime import datetime, timezone
+import json
 from pathlib import Path
+import shutil
 
+import yaml
+
+from legwheel_experiments.camera_topics import CAMERA_DRIVER_CONFIG_PATH
 from legwheel_experiments.schemas import (
     ExperimentConfig,
     RunConfig,
@@ -12,7 +15,6 @@ from legwheel_experiments.schemas import (
 )
 from legwheel_experiments.state_machine import ExperimentState
 
-import yaml
 
 class RunRecorder:
     """Create a run directory and preserve the validated configuration inputs."""
@@ -57,8 +59,25 @@ class RunRecorder:
         self._change_marker(ExperimentState.COMPLETE.name)
     
     def mark_aborted(self, reason: str) -> None:
-        self._change_marker(ExperimentState.ABORTING.name)
+        """Mark the run aborted and retain its cause for later diagnosis."""
+        if self.run_directory is None:
+            raise RuntimeError("No active run to mark as aborted.")
 
+        metadata_path = self.run_directory / "metadata.json"
+        temporary_path = self.run_directory / "metadata.json.tmp"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["abort_reason"] = reason
+        metadata["end_time_utc"] = datetime.now(timezone.utc).isoformat()
+
+        try:
+            with temporary_path.open("w", encoding="utf-8") as file:
+                json.dump(metadata, file, indent=2)
+            temporary_path.replace(metadata_path)
+        finally:
+            if temporary_path.exists():
+                temporary_path.unlink()
+
+        self._change_marker(ExperimentState.ABORTING.name)
 
     def _change_marker(self, new_state: str) -> None:
         if self.run_directory is None:
@@ -133,12 +152,26 @@ class RunRecorder:
             )
 
         # Validate every required source before deleting a confirmed older run.
-        camera_config_path = Path("src/legwheel_rgbd/config/camera_config.yaml")
-        gemini_config_path = Path("src/legwheel_rgbd/config/gemini_336.yaml")
-        if not camera_config_path.is_file():
-            raise FileNotFoundError(f"Camera config file does not exist: {camera_config_path}")
-        if not gemini_config_path.is_file():
-            raise FileNotFoundError(f"Gemini config file does not exist: {gemini_config_path}")
+        camera_topics_path = Path(
+            "src/legwheel_experiments/legwheel_experiments/camera_topics.py"
+        )
+        camera_driver_config_path = (
+            Path(CAMERA_DRIVER_CONFIG_PATH)
+            if CAMERA_DRIVER_CONFIG_PATH is not None
+            else None
+        )
+        if not camera_topics_path.is_file():
+            raise FileNotFoundError(
+                f"Camera topic mapping does not exist: {camera_topics_path}"
+            )
+        if (
+            camera_driver_config_path is not None
+            and not camera_driver_config_path.is_file()
+        ):
+            raise FileNotFoundError(
+                "Camera driver config file does not exist: "
+                f"{camera_driver_config_path}"
+            )
 
         if target_directory.exists():
             if not overwrite_existing:
@@ -166,12 +199,21 @@ class RunRecorder:
         )
         shutil.copy2(experiment_config_path, destination)
 
-        camera_config_destination = self.run_directory / f"camera_config_run_{run_number}_snapshot.yaml"
-        gemini_config_destination = self.run_directory / f"gemini_336_run_{run_number}_snapshot.yaml"
-
-        # Copy the files to the destination paths
-        shutil.copy2(camera_config_path, camera_config_destination)
-        shutil.copy2(gemini_config_path, gemini_config_destination)
+        camera_topics_destination = (
+            self.run_directory / f"camera_topics_run_{run_number}_snapshot.py"
+        )
+        # Copy the topic interface and optional driver configuration used by
+        # this run so the dataset remains reproducible after later code changes.
+        shutil.copy2(camera_topics_path, camera_topics_destination)
+        if camera_driver_config_path is not None:
+            camera_driver_config_destination = self.run_directory / (
+                f"camera_driver_config_run_{run_number}_snapshot"
+                f"{camera_driver_config_path.suffix}"
+            )
+            shutil.copy2(
+                camera_driver_config_path,
+                camera_driver_config_destination,
+            )
 
         #TODO: Full metadata needs to be created
         #Writing experiment metadata
