@@ -418,10 +418,10 @@ def main():
             # Start rosbag before asking for the final START confirmation. This gives
             # the recorder process and its DDS subscriptions time to initialize while
             # the wheel is stationary.
-            bag_recorder = RosbagRecorder(
-                run_directory,
-                include_raw_camera_topics=arguments.record_raw_camera_topics,
-            )
+            # RosbagRecorder always records the camera driver's raw topics.
+            # There is no runtime switch because recording relayed /camera/
+            # copies was removed to preserve the source timestamps and rate.
+            bag_recorder = RosbagRecorder(run_directory)
             bag_directory = bag_recorder.start()
             node.set_recording_started()
 
