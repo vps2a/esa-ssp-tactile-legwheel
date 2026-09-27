@@ -19,18 +19,11 @@ setup(
     zip_safe=True,
     maintainer='parallels',
     maintainer_email='parallels@todo.todo',
-    description='TODO: Package description',
+    description='LegWheel launch and configuration for the Orbbec Gemini 336.',
     license='TODO: License declaration',
     extras_require={
         'test': [
             'pytest',
-        ],
-    },
-    entry_points={
-        'console_scripts': [
-            'gemini_336_camera_node = legwheel_rgbd.gemini_336_camera_node:main',
-            'depth_visualizer_node = legwheel_rgbd.depth_visualizer_node:main',
-            'sensorstream_bridge_node = legwheel_rgbd.sensorstream_bridge_node:main',
         ],
     },
 )

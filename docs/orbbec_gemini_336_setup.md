@@ -1,122 +1,102 @@
 # Orbbec Gemini 336 RGB-D setup
 
-The Gemini 336 is driven through Orbbec's ROS 2 wrapper and exposed to this project through the `legwheel_rgbd` package. Keep the vendor driver as a workspace dependency; put LegWheel-specific launch files, topic choices, remaps, and processing nodes in `legwheel_rgbd`.
+The Gemini 336 is driven by `orbbec/OrbbecSDK_ROS2` and launched through the
+`legwheel_rgbd` package.
 
-## Supported driver path
+- Driver source: `src/third_party/OrbbecSDK_ROS2`
+- Vendor launch: `gemini_330_series.launch.py`
+- LegWheel launch: `ros2 launch legwheel_rgbd gemini_336.launch.py`
+- Driver parameters: `src/legwheel_rgbd/config/gemini_336.yaml`
+- Experiment topic mapping:
+  `src/legwheel_experiments/legwheel_experiments/camera_topics.py`
 
-- Driver: `orbbec/OrbbecSDK_ROS2`
-- Branch: `v2-main`
-- Camera launch file: `gemini_330_series.launch.py`
-- LegWheel wrapper launch file: `ros2 launch legwheel_rgbd gemini_336.launch.py`
-- LegWheel camera config: `src/legwheel_rgbd/config/camera_config.yaml`
+The experiment runner and rosbag recorder consume the raw Orbbec topics
+directly. No relay creates `/camera/...` copies.
 
-The Orbbec wrapper currently lists the Gemini 336 in the Gemini 330 series and recommends the `gemini_330_series.launch.py` launch file.
-
-## Install workspace dependencies
+## Install
 
 From the repository root:
 
 ```bash
-source /opt/ros/$ROS_DISTRO/setup.bash
+source /opt/ros/jazzy/setup.bash
 vcs import . < dependencies.repos
-rosdep update
 rosdep install --from-paths src --ignore-src -r -y
 colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
 source install/setup.bash
 ```
 
-If `vcs` is missing:
-
-```bash
-sudo apt update
-sudo apt install python3-vcstool python3-rosdep
-```
-
-## Install USB access rules
-
-Linux needs Orbbec udev rules so the camera can be opened without running ROS as root:
+Install the Orbbec udev rule once and reconnect the camera:
 
 ```bash
 cd src/third_party/OrbbecSDK_ROS2/orbbec_camera/scripts
 sudo bash install_udev_rules.sh
-sudo udevadm control --reload-rules
-sudo udevadm trigger
 ```
 
-Unplug and reconnect the camera after installing the rules.
-
-## Verify the camera
+## Launch and verify
 
 ```bash
-source install/setup.bash
 ros2 run orbbec_camera list_devices_node
 ros2 launch legwheel_rgbd gemini_336.launch.py
 ```
 
-In another terminal:
+In another sourced terminal:
 
 ```bash
-source install/setup.bash
-ros2 topic list | grep legwheel_rgbd
-ros2 topic hz /camera/rgbd/rgb/image_raw
-ros2 topic hz /camera/rgbd/depth/image_raw
-ros2 topic hz /camera/imu
-ros2 topic echo --once --qos-durability transient_local \
-  /camera/rgbd/depth/camera_info
+ros2 topic list -t | grep legwheel_rgbd
+ros2 topic hz /legwheel_rgbd/color/image_raw
+ros2 topic hz /legwheel_rgbd/depth/image_raw
+ros2 topic hz /legwheel_rgbd/gyro_accel/sample
+ros2 topic echo --once /legwheel_rgbd/depth/camera_info
 ```
 
-Optional point cloud:
+Required topics:
+
+| Topic | Type |
+| --- | --- |
+| `/legwheel_rgbd/color/image_raw` | `sensor_msgs/msg/Image` |
+| `/legwheel_rgbd/color/camera_info` | `sensor_msgs/msg/CameraInfo` |
+| `/legwheel_rgbd/depth/image_raw` | `sensor_msgs/msg/Image` |
+| `/legwheel_rgbd/depth/camera_info` | `sensor_msgs/msg/CameraInfo` |
+| `/legwheel_rgbd/gyro_accel/sample` | `sensor_msgs/msg/Imu` |
+
+Point clouds remain disabled by default. Enable them only when needed:
 
 ```bash
 ros2 launch legwheel_rgbd gemini_336.launch.py enable_point_cloud:=true
 ```
 
-## Expected topics
+Use `serial_number:=...` or `usb_port:=...` to select one camera when multiple
+devices are attached.
 
-With the default `camera_name:=legwheel_rgbd`, raw Orbbec topics are namespaced under `/legwheel_rgbd`, including:
+## Timestamp and throughput rules
 
-- `/legwheel_rgbd/color/image_raw`
-- `/legwheel_rgbd/color/camera_info`
-- `/legwheel_rgbd/depth/image_raw`
-- `/legwheel_rgbd/depth/camera_info`
-- `/legwheel_rgbd/gyro_accel/sample`
-- `/legwheel_rgbd/depth/points` when point cloud output is enabled
+`enable_frame_sync` is a driver acquisition setting; it does not pair messages
+inside the experiment. RGB and depth are recorded independently and paired in
+post-processing using their preserved `header.stamp` values.
 
-The LegWheel bridge exposes the following project-stable streams:
+Keep `enable_sync_host_time: false` with the Gemini driver's default global
+time domain. Repeated or regressing raw stamps fail the experiment watchdog.
 
-- `/camera/rgbd/rgb/image_raw`
-- `/camera/rgbd/rgb/camera_info`
-- `/camera/rgbd/depth/image_raw`
-- `/camera/rgbd/depth/camera_info`
-- `/camera/imu`
+Use a USB 3 connection. In a virtual machine, `lsusb -t` should report `5000M`
+or faster for the camera. Write high-bandwidth bags to a native Linux filesystem
+rather than a host-shared directory.
 
-RGB, depth, and IMU are forwarded independently from their vendor callbacks.
-The bridge does not wait for another stream, filter timestamp values, or change
-the source `header.stamp`; RGB/depth association is performed later during
-dataset generation. Camera calibration is published initially and only when
-its content changes, and a transient-local publisher makes the latest
-calibration available to late subscribers such as rosbag. The bridge never
-manufactures a configured rate by replaying its newest cached message.
+## Using another camera
 
-`enable_frame_sync` in the vendor configuration is a driver acquisition
-setting. It does not make the LegWheel bridge wait for, match, or discard RGB
-or depth messages.
+For another RGB-D driver, identify its five equivalent raw topics with
+`ros2 topic list -t`, then edit the constants in
+`src/legwheel_experiments/legwheel_experiments/camera_topics.py`. That one
+mapping controls both watchdog subscriptions and rosbag recording.
 
-The Gemini 330-series driver uses the global timestamp domain by default. Keep
-`enable_sync_host_time: false` in this mode. The separate host synchronizer can
-apply clock corrections while streaming, which can appear as repeated or
-regressing sensor stamps and will correctly fail the experiment's timestamp
-watchdog.
+Also update `CAMERA_DRIVER_CONFIG_PATH` in that module so each run snapshots the
+new driver's configuration, or set it to `None` if no configuration file exists.
 
-## Notes for implementation
+The replacement topics must use `sensor_msgs/msg/Image`,
+`sensor_msgs/msg/CameraInfo`, and `sensor_msgs/msg/Imu`. If the driver publishes
+separate accelerometer and gyroscope messages, add a lightweight IMU adapter;
+do not relay the full RGB and depth images merely to rename them.
 
-- Depend on ROS messages and topics from `orbbec_camera`; do not call the Orbbec SDK directly from LegWheel code unless a ROS topic/service cannot provide the data.
-- Keep Orbbec driver parameters in `src/legwheel_rgbd/config/gemini_336.yaml`.
-- Keep LegWheel source and output topic names in
-  `src/legwheel_rgbd/config/camera_config.yaml`.
-- Use `serial_number` or `usb_port` launch arguments once multiple cameras are connected.
-- Start with point clouds disabled during bring-up to reduce USB and CPU load.
-- The Gemini 336 should be on a USB 3 port. If frames drop at high resolution, lower `color_width`, `color_height`, `depth_width`, `depth_height`, or FPS in the config file.
-- When running Linux in a virtual machine, verify `lsusb -t` reports `5000M` or
-  faster for the camera and record to a native Linux filesystem rather than a
-  host-shared folder.
+Replace the Orbbec launch/configuration or start the alternative driver
+separately. Rebuild, source the workspace, and verify topic rates and advancing
+header stamps before arming the robot. The detailed integration checklist is in
+`src/legwheel_rgbd/README.md`.

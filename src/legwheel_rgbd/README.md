@@ -1,50 +1,29 @@
 # legwheel_rgbd: Orbbec Gemini 336 setup
 
-This package launches an Orbbec Gemini 336 RGB-D camera and republishes its
-data on the LegWheel camera interface.
+This package launches the Orbbec Gemini 336 driver with the settings used by
+the LegWheel experiments. The experiment runner and rosbag recorder subscribe
+to the driver's raw topics directly.
 
-It has two layers:
+There is deliberately no Python image relay and no `/camera/...` topic layer.
+Relaying full-resolution `sensor_msgs/Image` messages reduced an observed raw
+rate of about 15 Hz to 0.5-1 Hz. Direct subscription avoids the extra Python
+deserialization, publication, DDS traffic, and memory copies.
 
-1. `orbbec_camera` from Orbbec's `OrbbecSDK_ROS2` repository opens the USB
-   camera and publishes the vendor ROS 2 topics.
-2. `legwheel_rgbd` directly forwards RGB, depth, and IMU onto project-stable
-   topic names as each independent vendor callback arrives. It also publishes
-   camera calibration initially and whenever that calibration changes.
+The data path is therefore:
 
-The Orbbec ROS 2 wrapper is an external workspace dependency. It is declared
-in the repository-root `dependencies.repos` file, so it is downloaded and
-built with the workspace rather than copied into this package.
-
-## Prerequisites
-
-Use a Linux machine with:
-
-- Ubuntu and ROS 2 installed. This workspace is configured for ROS 2 Jazzy.
-- A USB 3 port and a USB 3 cable for the Gemini 336.
-- Internet access while preparing the workspace.
-
-Install the workspace dependency tools once:
-
-```bash
-sudo apt update
-sudo apt install python3-vcstool python3-rosdep
+```text
+Gemini 336 -> orbbec_camera -> /legwheel_rgbd/... raw topics
+                                  |-> experiment timestamp watchdog
+                                  `-> rosbag2 MCAP recorder
 ```
 
-If `rosdep` has not been initialized on the machine, initialize it once and
-then update its package index:
-
-```bash
-sudo rosdep init
-rosdep update
-```
-
-`sudo rosdep init` may report that it has already been initialized. In that
-case, continue with `rosdep update`.
+RGB and depth are not paired online. The original driver messages and their
+`header.stamp` values are recorded independently for pairing during dataset
+generation.
 
 ## Install the camera software
 
-Run these commands from the root of this repository, not from this package
-directory:
+From the repository root:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
@@ -54,211 +33,178 @@ colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
 source install/setup.bash
 ```
 
-`vcs import` checks out Orbbec's ROS 2 wrapper at
-`src/third_party/OrbbecSDK_ROS2`. The build installs its `orbbec_camera` ROS 2
-package alongside `legwheel_rgbd`. No separate application-level Orbbec SDK
-installation is required for this integration.
-
-### Confirm the workspace driver is selected
-
-Always source the workspace after the base ROS installation:
+Confirm that ROS resolves the workspace-built driver:
 
 ```bash
-source /opt/ros/jazzy/setup.bash
-source install/setup.bash
 ros2 pkg prefix orbbec_camera
 ```
 
-The final command must print a path inside this workspace, ending in
-`install/orbbec_camera`. A result under `/opt/ros/jazzy` means ROS is using a
-system-installed Orbbec driver instead. That binary can be incompatible with
-the installed ROS libraries and must not be mixed with this workspace's source
-build. Re-run `vcs import`, build the workspace, and source `install/setup.bash`
-again before launching the camera.
+The result should end in this workspace's `install/orbbec_camera`, not
+`/opt/ros/jazzy`.
 
-To refresh the imported source later, run:
+## Install USB access rules
 
-```bash
-vcs pull src/third_party/OrbbecSDK_ROS2
-```
-
-Do this deliberately and rebuild afterward: driver updates can change camera
-parameters or supported firmware.
-
-## Allow non-root USB access
-
-Install Orbbec's udev rule once on every Linux machine that will use the
-camera:
+Install Orbbec's udev rule once, then reconnect the camera:
 
 ```bash
 cd src/third_party/OrbbecSDK_ROS2/orbbec_camera/scripts
 sudo bash install_udev_rules.sh
 ```
 
-The installer copies the `99-obsensor-libusb.rules` rule and reloads udev.
-Unplug and reconnect the Gemini 336 after it completes. Do not run the camera
-node as root.
+Do not run the camera node as root. The Gemini 336 should use a USB 3 cable and
+port. In a virtual machine, `lsusb -t` should report `5000M` or faster for the
+camera rather than `480M`.
 
-## Configure the camera
+## Configure and launch the Gemini 336
 
-There are two configuration files with separate responsibilities:
+Driver parameters are kept in `config/gemini_336.yaml`. They select the image
+profiles, IMU rates, alignment, filtering, frame synchronization, timestamp
+mode, TF, and optional point-cloud output.
 
-| File | Purpose |
-| --- | --- |
-| `config/gemini_336.yaml` | Orbbec driver settings: enabled streams, alignment, resolution, frame rate, IMU, filters, and TF. |
-| `config/camera_config.yaml` | Vendor source topics and project-facing output topic names. |
-
-Before the first run, review `config/gemini_336.yaml`. The shipped settings:
-
-- enable RGB, depth, accelerometer, and gyroscope streams;
-- align depth to the colour camera;
-- request 640 x 480 RGB and depth streams at 30 FPS;
-- enable device frame synchronization, use the driver's global timestamp
-  domain, and leave its separate periodic host-time synchronizer disabled; and
-- keep point cloud output disabled to reduce USB and CPU load during bring-up.
-
-Set concrete `color_width`, `color_height`, `color_fps`, `depth_width`,
-`depth_height`, and `depth_fps` values if the deployment requires a fixed
-camera mode. Lower the resolution or FPS first if USB bandwidth is insufficient.
-
-The observed camera rate can be lower and irregular even when the driver is
-configured for 30 FPS. The bridge is therefore event-driven: it never fills a
-gap by publishing a cached image or IMU sample again.
-
-The forwarding rules are:
-
-- RGB, depth, and IMU each have an independent callback that immediately
-  publishes the received message on its stable output topic.
-- There is no online RGB/depth pairing, cross-stream queue, fixed-rate timer,
-  or timestamp filter. Every source callback is forwarded once.
-- Messages are published unchanged, including zero, repeated, or regressing
-  header stamps. This preserves driver behaviour for later diagnosis, while
-  the experiment watchdog independently detects stamps that stop advancing.
-- RGB and depth may have different rates and counts. Associate them later in
-  post-processing using their preserved `header.stamp` values.
-- Each `CameraInfo` is compared without its header timestamp. The first
-  calibration and any changed calibration are published; repeated copies are
-  suppressed. The output uses transient-local durability so a recorder or
-  subscriber that starts later still receives the latest calibration.
-
-The Orbbec driver's `enable_frame_sync` setting remains enabled to encourage
-coherent capture at the device/driver level. It does not create a pairing gate
-in the LegWheel bridge: either image stream is still forwarded when the other
-stream is absent or late.
-
-The Gemini 330-series launch file uses the `global` timestamp domain by default.
-Keep `enable_sync_host_time: false` with that domain, as recommended by Orbbec.
-Enabling the additional periodic host-time synchronizer can adjust timestamps
-during a run. A repeated or backward correction is deliberately rejected by the
-experiment watchdog because it would make later sensor correlation ambiguous.
-
-Rosbag records the stable RGB and depth topics as independent message streams.
-Record adjacency and rosbag receive time are not pair identifiers; dataset code
-should perform explicit one-to-one matching from the preserved header stamps.
-
-## Run and verify
-
-Connect one Gemini 336, then from the repository root run:
+The default launch command is:
 
 ```bash
-source /opt/ros/jazzy/setup.bash
-source install/setup.bash
 ros2 run orbbec_camera list_devices_node
 ros2 launch legwheel_rgbd gemini_336.launch.py
 ```
 
-`list_devices_node` should show the attached camera before launch. In a second
-terminal, source the same environments and verify the interface:
+When upgrading an existing workspace that previously installed the Python
+relay, clean only this package's old build/install products before rebuilding
+so obsolete console scripts do not remain visible:
 
 ```bash
-source /opt/ros/jazzy/setup.bash
+rm -rf build/legwheel_rgbd install/legwheel_rgbd
+colcon build --symlink-install \
+  --packages-select legwheel_rgbd legwheel_experiments
 source install/setup.bash
-ros2 topic hz /camera/rgbd/rgb/image_raw
-ros2 topic hz /camera/rgbd/depth/image_raw
-ros2 topic hz /camera/imu
-ros2 topic echo --once --qos-durability transient_local \
-  /camera/rgbd/depth/camera_info
 ```
 
-Each output rate should follow its corresponding raw vendor rate rather than an
-artificial 30 Hz. RGB and depth are independent, so their measured rates and
-counts are not required to match. To inspect timestamps directly:
+The launch file only includes Orbbec's `gemini_330_series.launch.py`. It does
+not start a LegWheel image-processing or forwarding node.
 
-```bash
-ros2 topic echo /camera/rgbd/rgb/image_raw --field header.stamp
-ros2 topic echo /camera/rgbd/depth/image_raw --field header.stamp
-```
-
-Expected LegWheel topics:
-
-- `/camera/rgbd/rgb/image_raw` (`sensor_msgs/Image`)
-- `/camera/rgbd/rgb/camera_info` (`sensor_msgs/CameraInfo`)
-- `/camera/rgbd/depth/image_raw` (`sensor_msgs/Image`)
-- `/camera/rgbd/depth/camera_info` (`sensor_msgs/CameraInfo`)
-- `/camera/imu` (`sensor_msgs/Imu`)
-
-The raw Orbbec topics remain available under `/legwheel_rgbd`, including
-`/legwheel_rgbd/color/image_raw`, `/legwheel_rgbd/depth/image_raw`, and
-`/legwheel_rgbd/gyro_accel/sample`.
-
-The experiment recorder uses the stable forwarded topics by default. Add
-`--record-raw-camera-topics` to `run_experiment` for a diagnostic run that also
-captures all five raw image, calibration, and combined-IMU source topics. This
-can nearly double camera I/O and bag size, but it lets you compare input and
-output counts, rates, and header stamps when diagnosing forwarding loss or
-latency.
-
-## Launch options
-
-Enable the driver point cloud only when it is needed:
-
-```bash
-ros2 launch legwheel_rgbd gemini_336.launch.py enable_point_cloud:=true
-```
-
-For a multi-camera machine, select the camera explicitly:
-
-```bash
-ros2 launch legwheel_rgbd gemini_336.launch.py serial_number:=CAMERA_SERIAL
-```
-
-Alternatively, pass `usb_port:=PORT_IDENTIFIER`. Use one selector at a time.
-
-To use a deployment-specific configuration without modifying the repository
-defaults:
+Useful launch options are:
 
 ```bash
 ros2 launch legwheel_rgbd gemini_336.launch.py \
-  config_file_path:=/absolute/path/to/gemini_336.yaml \
-  camera_config:=/absolute/path/to/camera_config.yaml
+  serial_number:=CAMERA_SERIAL
+
+ros2 launch legwheel_rgbd gemini_336.launch.py \
+  usb_port:=PORT_IDENTIFIER
+
+ros2 launch legwheel_rgbd gemini_336.launch.py \
+  enable_point_cloud:=true
+
+ros2 launch legwheel_rgbd gemini_336.launch.py \
+  config_file_path:=/absolute/path/to/gemini_336.yaml
 ```
+
+Use only one of `serial_number` and `usb_port` to select a camera.
+
+## Raw topics used by experiments
+
+With the default `camera_name:=legwheel_rgbd`, the experiment consumes and
+records these driver topics:
+
+| Purpose | Topic | Required type |
+| --- | --- | --- |
+| RGB image | `/legwheel_rgbd/color/image_raw` | `sensor_msgs/msg/Image` |
+| RGB calibration | `/legwheel_rgbd/color/camera_info` | `sensor_msgs/msg/CameraInfo` |
+| Depth image | `/legwheel_rgbd/depth/image_raw` | `sensor_msgs/msg/Image` |
+| Depth calibration | `/legwheel_rgbd/depth/camera_info` | `sensor_msgs/msg/CameraInfo` |
+| Combined IMU | `/legwheel_rgbd/gyro_accel/sample` | `sensor_msgs/msg/Imu` |
+
+The single source of truth for these names is
+`src/legwheel_experiments/legwheel_experiments/camera_topics.py`. Both the
+runtime timestamp watchdog and MCAP recorder import that mapping.
+
+Keep the default `camera_name:=legwheel_rgbd` namespace. If it is changed, the
+five constants in `camera_topics.py` must be changed to the resulting topic
+names as well.
+
+Verify the driver before running an experiment:
+
+```bash
+ros2 topic list -t | grep legwheel_rgbd
+ros2 topic hz /legwheel_rgbd/color/image_raw
+ros2 topic hz /legwheel_rgbd/depth/image_raw
+ros2 topic hz /legwheel_rgbd/gyro_accel/sample
+ros2 topic echo --once /legwheel_rgbd/depth/camera_info
+```
+
+Inspect sensor timestamps directly when diagnosing a stale-stream abort:
+
+```bash
+ros2 topic echo /legwheel_rgbd/color/image_raw --field header.stamp
+ros2 topic echo /legwheel_rgbd/depth/image_raw --field header.stamp
+ros2 topic echo /legwheel_rgbd/gyro_accel/sample --field header.stamp
+```
+
+The Gemini 330-series driver uses the global timestamp domain by default. Keep
+`enable_sync_host_time: false` with that mode. A repeated or backward timestamp
+is intentionally rejected by the experiment watchdog because it makes later
+sensor correlation ambiguous.
+
+## Connecting a different RGB-D camera API
+
+Do not add another full-image Python forwarding node merely to obtain the
+Orbbec topic names. Adapt the experiment at its topic boundary instead:
+
+1. Launch the new vendor driver by itself.
+2. Run `ros2 topic list -t` and identify its RGB image, RGB `CameraInfo`, depth
+   image, depth `CameraInfo`, and combined IMU topics.
+3. Confirm that the image topics use `sensor_msgs/msg/Image`, calibration uses
+   `sensor_msgs/msg/CameraInfo`, and IMU uses `sensor_msgs/msg/Imu`.
+4. Edit the five topic constants and `CAMERA_DRIVER_CONFIG_PATH` in
+   `src/legwheel_experiments/legwheel_experiments/camera_topics.py`. Point the
+   latter at the replacement driver's repository configuration, or set it to
+   `None` when there is no file-backed configuration to snapshot.
+5. Replace this package's Orbbec launch/configuration with the new driver's
+   launch, or start that driver separately before starting the experiment.
+6. Add the new driver dependency to `dependencies.repos` and/or `package.xml`
+   as appropriate, then rebuild and source the workspace.
+7. Verify rates, message types, and advancing `header.stamp` values before
+   arming the robot.
+
+Changing `camera_topics.py` updates both subscriptions used by preflight and
+the list passed to `ros2 bag record`. Each run snapshots this mapping beside the
+experiment and, when configured, the camera-driver configuration.
+
+If a camera publishes accelerometer and gyroscope messages separately rather
+than a combined `sensor_msgs/msg/Imu`, changing a topic string is insufficient.
+Add a small IMU-only adapter that combines the two measurements while
+preserving their source timestamps, or change the experiment interface and its
+tests explicitly. This is much lighter than relaying RGB and depth images.
+
+If a driver cannot publish standard `sensor_msgs` types, use a narrow adapter
+for only the incompatible stream. Keep high-bandwidth images direct whenever
+possible.
+
+## Recording behavior
+
+Normal experiment bags contain the five raw camera topics above. There is no
+`--record-raw-camera-topics` option because raw topics are now the only camera
+source recorded.
+
+The driver may publish `CameraInfo` repeatedly. Rosbag preserves those messages
+unchanged; dataset preparation can retain the first calibration and any later
+message whose intrinsic or distortion values changed. Images and IMU messages
+also remain unchanged, including their original header timestamps.
+
+Do not infer RGB/depth pairs from adjacent MCAP records, matching array indices,
+or rosbag receive time. Perform one-to-one association later using the preserved
+sensor timestamps and an explicit tolerance.
 
 ## Troubleshooting
 
-- `Package 'orbbec_camera' not found`: run `vcs import . < dependencies.repos`,
-  rebuild the workspace, and source `install/setup.bash`.
-- Camera cannot be opened or no device is listed: confirm the USB 3 cable and
-  port, install the udev rule, then reconnect the camera.
-- In a virtual machine, confirm the device is attached to the Linux guest as USB
-  3 and run `lsusb -t`; the camera branch must report `5000M` or faster, not
-  `480M`. Also run `df -T` on the recording directory and avoid writing RGB-D
-  bags through a VM shared-folder filesystem.
-- RGB-D or IMU frequency is lower than expected: compare the raw and project
-  topics. The bridge cannot publish new data faster than the device produces
-  it and deliberately does not repeat cached messages.
-- A raw topic is faster than its corresponding project topic: record raw topics
-  during a diagnostic run and check CPU, USB, ROS transport, and disk load. The
-  bridge contains no cross-stream wait or pairing condition.
-- Header timestamps repeat or regress: the bridge deliberately preserves those
-  messages. The experiment preflight/watchdog treats the affected stream as not
-  advancing, and the recorded raw/project data remains available for diagnosis.
-  Confirm that `enable_sync_host_time` is `false` when using the default global
-  time domain. Temporarily set `enable_frame_drop_log: true` and
-  `show_fps_enable: true` in `gemini_336.yaml` to distinguish SDK drops from
-  downstream ROS or recorder overload.
-- RGB and depth do not line up: keep `depth_registration: true`,
-  `align_mode: SW`, and `align_target_stream: COLOR` unless the application
-  explicitly needs unaligned depth.
-
-For the current upstream driver documentation and supported camera parameters,
-refer to [OrbbecSDK_ROS2](https://github.com/orbbec/OrbbecSDK_ROS2).
+- If the camera cannot open, install its udev rules, reconnect it, and check the
+  USB cable and port.
+- If the raw image rate is low, stop Foxglove, RViz, and rosbag; then measure the
+  driver topics directly. Check USB speed, CPU load, firmware, and driver logs.
+- If rates fall only while recording, write the bag to a native Linux filesystem
+  rather than a virtual-machine shared folder.
+- Temporarily set `enable_frame_drop_log: true` and `show_fps_enable: true` in
+  `gemini_336.yaml` to inspect SDK and ROS publication drops.
+- If software alignment is too expensive, test `align_mode: HW` and validate the
+  resulting depth geometry before collecting research data.
+- If stamps repeat or regress, confirm `enable_sync_host_time: false` and inspect
+  the raw driver stream. Do not compensate by replaying cached messages.

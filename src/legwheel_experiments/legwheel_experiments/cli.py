@@ -32,15 +32,6 @@ def parse_arguments() -> argparse.Namespace:
         help="Path to the experiment configuration YAML file"
     )
 
-    parser.add_argument(
-        "--record-raw-camera-topics",
-        action="store_true",
-        help=(
-            "Also record the vendor /legwheel_rgbd camera inputs for debugging. "
-            "This substantially increases rosbag bandwidth and size."
-        ),
-    )
-
     return parser.parse_args()
 
 #A better way of handling numering inputs than 'input' - won't crash
@@ -420,10 +411,7 @@ def main():
             # Re-check the asynchronous camera guard after the operator input and
             # before allocating a high-bandwidth recorder.
             node.ensure_run_may_continue()
-            bag_recorder = RosbagRecorder(
-                run_directory,
-                include_raw_camera_topics=arguments.record_raw_camera_topics,
-            )
+            bag_recorder = RosbagRecorder(run_directory)
             bag_directory = bag_recorder.start()
             node.set_recording_started()
             print(f"[ROSBAG] Started rosbag recording in: {bag_directory}")

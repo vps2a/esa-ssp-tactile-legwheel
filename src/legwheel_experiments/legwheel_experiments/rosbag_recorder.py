@@ -4,16 +4,16 @@ import subprocess
 import time
 from pathlib import Path
 
+from legwheel_experiments.camera_topics import CAMERA_RECORDING_TOPICS
+
+# Camera topics are the driver's raw outputs. Do not add relayed copies here:
+# duplicate high-bandwidth images increase DDS and disk load without adding data.
 ROSBAG_TOPICS = (
     "/legwheel/joint_states",
     "/wheel/wheel_state",
     "/rotation_encoder/joint_state",
     "/rotation_encoder/ticks",
-    "/camera/rgbd/rgb/image_raw",
-    "/camera/rgbd/rgb/camera_info",
-    "/camera/rgbd/depth/image_raw",
-    "/camera/rgbd/depth/camera_info",
-    "/camera/imu",
+    *CAMERA_RECORDING_TOPICS,
     "/legwheel/motor_status",
     "/legwheel/spring_zero_position",
     "/legwheel/spring_constant",
@@ -21,35 +21,12 @@ ROSBAG_TOPICS = (
     "/wheel/requested_torque",
 )
 
-# These are the vendor-facing inputs to legwheel_rgbd. They are intentionally
-# opt-in because recording them alongside the stable forwarded topics nearly
-# doubles camera bandwidth. They are invaluable when diagnosing driver, QoS, or
-# forwarding-rate problems.
-RAW_CAMERA_TOPICS = (
-    "/legwheel_rgbd/color/image_raw",
-    "/legwheel_rgbd/color/camera_info",
-    "/legwheel_rgbd/depth/image_raw",
-    "/legwheel_rgbd/depth/camera_info",
-    "/legwheel_rgbd/gyro_accel/sample",
-)
-
-
-def topics_for_recording(include_raw_camera_topics: bool = False) -> tuple[str, ...]:
-    """Return the normal dataset topics plus optional raw camera diagnostics."""
-    if include_raw_camera_topics:
-        return ROSBAG_TOPICS + RAW_CAMERA_TOPICS
-    return ROSBAG_TOPICS
-
 
 class RosbagRecorder:
-    def __init__(
-        self,
-        run_directory: Path,
-        include_raw_camera_topics: bool = False,
-    ) -> None:
+    def __init__(self, run_directory: Path) -> None:
         self._run_directory = run_directory
         self._bag_directory = run_directory / "rosbag"
-        self._topics = topics_for_recording(include_raw_camera_topics)
+        self._topics = ROSBAG_TOPICS
         self._process: subprocess.Popen | None = None
         self._log_file = None
 

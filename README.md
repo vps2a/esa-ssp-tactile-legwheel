@@ -17,7 +17,7 @@ experiment runner that records MCAP rosbags.
 | --- | --- | --- |
 | `legwheel_can` | Connects to MD80s through a CANdle USB-to-CAN adapter; provides passive zeroing, safety-gated leg control, wheel torque control, and terminal controllers. | `ros2 launch legwheel_can md80_legwheel_control.launch.py` |
 | `legwheel_encoder` | Reads the central rotation encoder from a serial port and publishes ticks, angle, and velocity. | `ros2 launch legwheel_encoder rotation_encoder.launch.py` |
-| `legwheel_rgbd` | Launches the Orbbec driver; directly forwards independent RGB, depth, and IMU streams onto project-stable topics and republishes calibration when it changes. | `ros2 launch legwheel_rgbd gemini_336.launch.py` |
+| `legwheel_rgbd` | Launches and configures the Orbbec driver. Experiments consume its raw RGB, depth, calibration, and IMU topics directly without an image relay. | `ros2 launch legwheel_rgbd gemini_336.launch.py` |
 | `legwheel_experiments` | Validates an experiment, performs telemetry preflight, runs the leg/wheel sequence, and records an MCAP rosbag. | `ros2 run legwheel_experiments run_experiment --experiment-config <file>` |
 
 The workspace includes the MAB CANdle-SDK as a Git submodule. Orbbec's ROS 2
@@ -120,7 +120,7 @@ Review these files before the first real run:
 | `src/legwheel_can/config/motor_config.json` | Initial leg gains/zero values, wheel torque ramp time, and default wheel torque. |
 | `src/legwheel_encoder/config/rotation_encoder.yaml` | Encoder serial port, baud rate, tick calibration, and direction. |
 | `src/legwheel_rgbd/config/gemini_336.yaml` | Orbbec stream selection, resolution/FPS, alignment, IMU, and filters. |
-| `src/legwheel_rgbd/config/camera_config.yaml` | Vendor source topics and their project-facing output topic names. |
+| `src/legwheel_experiments/legwheel_experiments/camera_topics.py` | Raw camera topics consumed by preflight, the runtime watchdog, and rosbag. |
 
 The MD80 node requires `limits_provided: true` and valid software limits before
 it will enable control. Configure conservative **firmware-level** MD80 current,
@@ -217,23 +217,34 @@ ros2 launch legwheel_rgbd gemini_336.launch.py
 Verify all required experiment-camera streams:
 
 ```bash
-ros2 topic hz /camera/rgbd/rgb/image_raw
-ros2 topic hz /camera/rgbd/depth/image_raw
-ros2 topic hz /camera/imu
-ros2 topic echo --once --qos-durability transient_local \
-  /camera/rgbd/depth/camera_info
+ros2 topic hz /legwheel_rgbd/color/image_raw
+ros2 topic hz /legwheel_rgbd/depth/image_raw
+ros2 topic hz /legwheel_rgbd/gyro_accel/sample
+ros2 topic echo --once /legwheel_rgbd/depth/camera_info
 ```
 
-RGB, depth, and IMU are forwarded independently as soon as each vendor callback
-arrives. Their rates and message counts may therefore differ, which preserves
-the actual source streams for later post-processing. The bridge does not wait
-for a corresponding RGB/depth frame, replay cached data, filter timestamps, or
-rewrite `header.stamp`. `CameraInfo` appears once at startup and again only if
-the calibration changes.
+These are the raw Orbbec driver topics. No LegWheel node republishes the images,
+so their original content, rate, and `header.stamp` values go directly to the
+experiment watchdog and recorder. RGB and depth remain independent and are
+paired later during dataset generation. Raw `CameraInfo` messages are recorded
+at whatever rate the vendor driver publishes them.
 
 Use `serial_number:=<camera-serial>` or `usb_port:=<port>` with the launch
 command when more than one camera is connected. Start with point clouds disabled;
 they can be enabled with `enable_point_cloud:=true` when needed.
+
+To use a different RGB-D camera, map its five raw ROS topics in
+`src/legwheel_experiments/legwheel_experiments/camera_topics.py`. The expected
+interfaces are RGB and depth `sensor_msgs/msg/Image`, matching
+`sensor_msgs/msg/CameraInfo`, and one combined `sensor_msgs/msg/Imu`. That single
+mapping is imported by both the experiment watchdog and rosbag recorder. Replace
+the Orbbec launch/configuration or start the alternative driver separately,
+and update `CAMERA_DRIVER_CONFIG_PATH` in the same module so runs snapshot the
+replacement configuration (or set it to `None`). Then rebuild and verify rates
+and advancing header timestamps. If the API
+publishes accelerometer and gyroscope separately, add a lightweight IMU adapter;
+do not relay the high-bandwidth image topics merely to rename them. See
+`src/legwheel_rgbd/README.md` for the complete integration checklist.
 
 ## Manual operation
 
@@ -327,8 +338,8 @@ ros2 run legwheel_experiments run_experiment \
 
 The runner will:
 
-1. create `run_<n>` beside the experiment YAML and snapshot the experiment and
-   camera configuration;
+1. create `run_<n>` beside the experiment YAML and snapshot the experiment,
+   camera-driver configuration, and raw camera-topic mapping;
 2. hold a telemetry preflight until all motor and encoder streams are fresh,
    and RGB, depth, and IMU have each made three forward header-timestamp steps
    after an initial baseline sample;
@@ -348,23 +359,12 @@ aborted run's `metadata.json` retains the watchdog reason for diagnosis.
 Use `Ctrl-C` to abort. The runner sends zero wheel torque, disables motors, and
 attempts to finalise the rosbag in its cleanup path.
 
-### Record raw camera topics for debugging
+### Camera recording path
 
-Normal runs record only the stable project camera interface. When diagnosing
-driver, timestamp, QoS, or forwarding-rate problems, also record the Orbbec
-source topics:
-
-```bash
-ros2 run legwheel_experiments run_experiment \
-  --experiment-config "$PWD/experiments/demo.yaml" \
-  --record-raw-camera-topics
-```
-
-This adds the raw RGB image and calibration, raw depth image and calibration,
-and raw combined IMU topics under `/legwheel_rgbd`. It can nearly double camera
-I/O and bag size, so use it for diagnostic runs rather than by default. Compare
-raw and stable topic counts, rates, and header stamps to determine whether any
-loss or delay occurred in the device, driver, or forwarding bridge.
+Normal runs record the Orbbec source topics directly. The former
+`--record-raw-camera-topics` option and `/camera/...` relay topics have been
+removed: recording both source and relayed images duplicated bandwidth while
+the Python relay reduced the observed image rate substantially.
 
 ## Recorded data and Foxglove
 
@@ -372,15 +372,14 @@ Each run stores `run_config.yaml`, configuration snapshots, `metadata.json`, a
 state marker, `rosbag_recorder.log`, and `rosbag/` containing an MCAP bag.
 Recorded topics include motor state, wheel state, central encoder data,
 independent RGB and depth streams, camera info, IMU, motor-enable state,
-impedance commands, and requested wheel torque. Camera-info topics can contain
-only one message because unchanged calibration is intentionally not repeated;
-the bridge uses transient-local durability so a recorder started later still
-receives it. RGB/depth association is deliberately deferred to post-processing
-and should use the preserved message header timestamps. Do not infer a pair
-from adjacent MCAP records, rosbag receive times, or matching message indices.
+impedance commands, and requested wheel torque. Raw camera-info topics may
+contain repeated calibration messages because rosbag preserves the driver
+output without filtering. RGB/depth association is deliberately deferred to
+post-processing and should use the preserved message header timestamps. Do not
+infer a pair from adjacent MCAP records, rosbag receive times, or matching
+message indices.
 
-With `--record-raw-camera-topics`, these additional diagnostic inputs are
-recorded:
+The camera topics recorded in every run are:
 
 - `/legwheel_rgbd/color/image_raw`
 - `/legwheel_rgbd/color/camera_info`
@@ -393,9 +392,9 @@ In Foxglove Desktop choose **Open local file** and select the `.mcap` file under
 
 | Panel | Topics or fields |
 | --- | --- |
-| Image | `/camera/rgbd/rgb/image_raw`, `/camera/rgbd/depth/image_raw` |
+| Image | `/legwheel_rgbd/color/image_raw`, `/legwheel_rgbd/depth/image_raw` |
 | Plot | `/legwheel/joint_states.position[0]`, `.position[1]`, `/wheel/wheel_state.velocity[0]`, `/rotation_encoder/joint_state.position[0]` |
-| Plot | `/camera/imu/angular_velocity/*`, `/camera/imu/linear_acceleration/*` |
+| Plot | `/legwheel_rgbd/gyro_accel/sample/angular_velocity/*`, `/legwheel_rgbd/gyro_accel/sample/linear_acceleration/*` |
 | Raw Messages | camera-info, joint-state, torque, and status topics |
 
 Inspect the `name` array in a `JointState` Raw Messages panel to map each array
@@ -409,9 +408,11 @@ index to its joint name before interpreting a plot.
 | `/wheel/wheel_state` | `sensor_msgs/msg/JointState` | CAN node | Wheel position, velocity, and torque estimate. |
 | `/rotation_encoder/joint_state` | `sensor_msgs/msg/JointState` | Encoder node | Central rig rotation angle and velocity. |
 | `/rotation_encoder/ticks` | `std_msgs/msg/Int64` | Encoder node | Relative raw encoder ticks. |
-| `/camera/rgbd/rgb/image_raw` | `sensor_msgs/msg/Image` | RGB-D bridge | Project RGB image stream. |
-| `/camera/rgbd/depth/image_raw` | `sensor_msgs/msg/Image` | RGB-D bridge | Project depth image stream. |
-| `/camera/imu` | `sensor_msgs/msg/Imu` | RGB-D bridge | Camera IMU data. |
+| `/legwheel_rgbd/color/image_raw` | `sensor_msgs/msg/Image` | Orbbec driver | Raw RGB image stream. |
+| `/legwheel_rgbd/color/camera_info` | `sensor_msgs/msg/CameraInfo` | Orbbec driver | Raw RGB calibration. |
+| `/legwheel_rgbd/depth/image_raw` | `sensor_msgs/msg/Image` | Orbbec driver | Raw depth image stream. |
+| `/legwheel_rgbd/depth/camera_info` | `sensor_msgs/msg/CameraInfo` | Orbbec driver | Raw depth calibration. |
+| `/legwheel_rgbd/gyro_accel/sample` | `sensor_msgs/msg/Imu` | Orbbec driver | Raw combined camera IMU stream. |
 | `/legwheel/motor_status` | `std_msgs/msg/Bool` | Controller/experiment | `true` permits the motor node to enable; `false` disables it. |
 | `/wheel/requested_torque` | `std_msgs/msg/Float64` | Wheel controller/experiment | Requested wheel torque in Nm; it is clamped by the CAN node. |
 
@@ -440,11 +441,10 @@ index to its joint name before interpreting a plot.
   Images must have advanced within 2 seconds; IMU and motor/encoder state have
   tighter 0.5 second freshness limits.
 - **A run aborts for a stopped camera stream:** treat this as a data-integrity
-  failure. Keep the generated aborted run, repeat with
-  `--record-raw-camera-topics`, and compare raw and project counts, rates, and
-  timestamps. Because each stream is forwarded independently, a healthy raw
-  stream with a slower project stream points to host load, ROS transport, or
-  recording throughput rather than an online pairing decision.
+  failure. Keep the generated aborted run and inspect the raw Orbbec rates and
+  timestamps with rosbag and Foxglove stopped. If they degrade only while
+  recording, inspect CPU and disk throughput and ensure the bag is written to a
+  native Linux filesystem rather than a virtual-machine shared folder.
 
 Package-specific implementation and hardware details are available in
 [`src/legwheel_can/README.md`](src/legwheel_can/README.md),

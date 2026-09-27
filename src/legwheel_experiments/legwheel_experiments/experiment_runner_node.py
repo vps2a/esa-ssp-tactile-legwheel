@@ -13,6 +13,11 @@ from std_msgs.msg import Bool
 from std_msgs.msg import Float64
 from std_msgs.msg import Float64MultiArray
 
+from legwheel_experiments.camera_topics import (
+    CAMERA_DEPTH_IMAGE_TOPIC,
+    CAMERA_IMU_TOPIC,
+    CAMERA_RGB_IMAGE_TOPIC,
+)
 from legwheel_experiments.state_machine import (
     ExperimentState,
     ExperimentStateMachine,
@@ -147,23 +152,26 @@ class ExperimentRunnerNode(Node):
             qos_profile_sensor_data,
         )
 
+        # Subscribe to the camera driver's raw streams. Relaying full images
+        # through a Python node caused severe rate loss, while this node only
+        # needs each message header to verify that sensor time is advancing.
         self._camera_rgb_subscription = self.create_subscription(
             Image,
-            "/camera/rgbd/rgb/image_raw",
+            CAMERA_RGB_IMAGE_TOPIC,
             self._camera_rgb_callback,
             qos_profile_sensor_data,
         )
 
         self._camera_depth_subscription = self.create_subscription(
             Image,
-            "/camera/rgbd/depth/image_raw",
+            CAMERA_DEPTH_IMAGE_TOPIC,
             self._camera_depth_callback,
             qos_profile_sensor_data,
         )
 
         self._camera_imu_subscription = self.create_subscription(
             Imu,
-            "/camera/imu",
+            CAMERA_IMU_TOPIC,
             self._camera_imu_callback,
             qos_profile_sensor_data,
         )

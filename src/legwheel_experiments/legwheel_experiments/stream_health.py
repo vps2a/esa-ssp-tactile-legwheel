@@ -15,7 +15,7 @@ class AdvancingStampMonitor:
 
     A cached message can arrive repeatedly and appear fresh to a receipt-time
     watchdog. This monitor updates its freshness time only when the sensor stamp
-    strictly increases, making a frozen bridge or camera visible to preflight and
+    strictly increases, making a frozen driver or camera visible to preflight and
     the runtime safety guard.
     """
 
