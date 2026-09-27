@@ -33,6 +33,11 @@ from legwheel_experiments.stream_health import (
     message_stamp_nanoseconds,
 )
 
+# Watchdog disabled due to unresolved bugs.
+# TODO: Fix the watchdog and diagnose the source for appearance of IMU latency
+# which does not show up in rosbag recorded data
+_RUNTIME_CAMERA_WATCHDOG_ENABLED = False
+
 
 class ExperimentAbortedError(RuntimeError):
     """Raised in the control thread after an asynchronous safety abort."""
@@ -202,10 +207,19 @@ class ExperimentRunnerNode(Node):
             self._process_arm_request,
         )
 
-        self._runtime_camera_guard_timer = self.create_timer(
-            0.1,
-            self._runtime_camera_guard_callback,
-        )
+        # Keep the timer construction beside the retained watchdog code so it can
+        # be restored deliberately after the timestamp issue is understood.
+        self._runtime_camera_guard_timer = None
+        if _RUNTIME_CAMERA_WATCHDOG_ENABLED:
+            self._runtime_camera_guard_timer = self.create_timer(
+                0.1,
+                self._runtime_camera_guard_callback,
+            )
+        else:
+            self.get_logger().warning(
+                "Runtime camera watchdog is disabled; camera stream failures "
+                "will not abort an active experiment."
+            )
 
 
         self.get_logger().info("Experiment Runner Node initialized.")
@@ -672,10 +686,11 @@ class ExperimentRunnerNode(Node):
 
         # Final telemetry-shape check before changing state or enabling motors.
         self._current_leg_position_from_encoder()
-        camera_failure = self._camera_stream_failure_reason()
-        if camera_failure is not None:
-            self._abort_for_camera_failure(camera_failure)
-            self._raise_if_runtime_abort_requested()
+        if _RUNTIME_CAMERA_WATCHDOG_ENABLED:
+            camera_failure = self._camera_stream_failure_reason()
+            if camera_failure is not None:
+                self._abort_for_camera_failure(camera_failure)
+                self._raise_if_runtime_abort_requested()
         self._publish_zero_wheel_torque()
 
         self._state_machine.transition_to(ExperimentState.RUNNING)

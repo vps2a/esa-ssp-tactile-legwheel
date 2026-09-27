@@ -120,7 +120,7 @@ Review these files before the first real run:
 | `src/legwheel_can/config/motor_config.json` | Initial leg gains/zero values, wheel torque ramp time, and default wheel torque. |
 | `src/legwheel_encoder/config/rotation_encoder.yaml` | Encoder serial port, baud rate, tick calibration, and direction. |
 | `src/legwheel_rgbd/config/gemini_336.yaml` | Orbbec stream selection, resolution/FPS, alignment, IMU, and filters. |
-| `src/legwheel_experiments/legwheel_experiments/camera_topics.py` | Raw camera topics consumed by preflight, the runtime watchdog, and rosbag. |
+| `src/legwheel_experiments/legwheel_experiments/camera_topics.py` | Raw camera topics consumed by preflight, the retained runtime-watchdog implementation, and rosbag. |
 
 The MD80 node requires `limits_provided: true` and valid software limits before
 it will enable control. Configure conservative **firmware-level** MD80 current,
@@ -225,7 +225,7 @@ ros2 topic echo --once /legwheel_rgbd/depth/camera_info
 
 These are the raw Orbbec driver topics. No LegWheel node republishes the images,
 so their original content, rate, and `header.stamp` values go directly to the
-experiment watchdog and recorder. RGB and depth remain independent and are
+experiment preflight checks and recorder. RGB and depth remain independent and are
 paired later during dataset generation. Raw `CameraInfo` messages are recorded
 at whatever rate the vendor driver publishes them.
 
@@ -237,7 +237,7 @@ To use a different RGB-D camera, map its five raw ROS topics in
 `src/legwheel_experiments/legwheel_experiments/camera_topics.py`. The expected
 interfaces are RGB and depth `sensor_msgs/msg/Image`, matching
 `sensor_msgs/msg/CameraInfo`, and one combined `sensor_msgs/msg/Imu`. That single
-mapping is imported by both the experiment watchdog and rosbag recorder. Replace
+mapping is imported by both the experiment runner and rosbag recorder. Replace
 the Orbbec launch/configuration or start the alternative driver separately,
 and update `CAMERA_DRIVER_CONFIG_PATH` in the same module so runs snapshot the
 replacement configuration (or set it to `None`). Then rebuild and verify rates
@@ -349,12 +349,13 @@ The runner will:
 5. ramp wheel torque, use the central encoder to determine loop progress, ramp
    torque down, and enter safe mode.
 
-While the experiment is in `RUNNING`, a 10 Hz watchdog checks progress of the
-camera sensor timestamps rather than callback arrival time. It immediately
-commands zero wheel torque and disables the motors if either image timestamp
-does not advance for 2 seconds, or the IMU timestamp does not advance for
-0.5 seconds. Repeated cached messages therefore cannot keep a run alive. The
-aborted run's `metadata.json` retains the watchdog reason for diagnosis.
+The runtime camera watchdog is temporarily disabled while the reported IMU
+latency is investigated. Its implementation remains in
+`experiment_runner_node.py`, guarded by `_RUNTIME_CAMERA_WATCHDOG_ENABLED`, but
+it does not create its 10 Hz timer or perform the final pre-run camera-health
+check while that flag is false. Consequently, a camera stream that stalls after
+preflight will not automatically abort an active experiment. Preflight still
+requires RGB, depth, and IMU timestamps to advance before arming.
 
 Use `Ctrl-C` to abort. The runner sends zero wheel torque, disables motors, and
 attempts to finalise the rosbag in its cleanup path.

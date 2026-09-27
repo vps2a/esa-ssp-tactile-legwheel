@@ -13,7 +13,7 @@ The data path is therefore:
 
 ```text
 Gemini 336 -> orbbec_camera -> /legwheel_rgbd/... raw topics
-                                  |-> experiment timestamp watchdog
+                                  |-> experiment timestamp preflight
                                   `-> rosbag2 MCAP recorder
 ```
 
@@ -115,7 +115,9 @@ records these driver topics:
 
 The single source of truth for these names is
 `src/legwheel_experiments/legwheel_experiments/camera_topics.py`. Both the
-runtime timestamp watchdog and MCAP recorder import that mapping.
+experiment runner and MCAP recorder import that mapping. The retained runtime
+watchdog implementation is currently disabled while an apparent IMU-latency
+issue is investigated; timestamp-based preflight checks remain active.
 
 Keep the default `camera_name:=legwheel_rgbd` namespace. If it is changed, the
 five constants in `camera_topics.py` must be changed to the resulting topic
@@ -131,7 +133,7 @@ ros2 topic hz /legwheel_rgbd/gyro_accel/sample
 ros2 topic echo --once /legwheel_rgbd/depth/camera_info
 ```
 
-Inspect sensor timestamps directly when diagnosing a stale-stream abort:
+Inspect sensor timestamps directly when diagnosing stream timing:
 
 ```bash
 ros2 topic echo /legwheel_rgbd/color/image_raw --field header.stamp
@@ -140,8 +142,8 @@ ros2 topic echo /legwheel_rgbd/gyro_accel/sample --field header.stamp
 ```
 
 The Gemini 330-series driver uses the global timestamp domain by default. Keep
-`enable_sync_host_time: false` with that mode. A repeated or backward timestamp
-is intentionally rejected by the experiment watchdog because it makes later
+`enable_sync_host_time: false` with that mode. Repeated or backward timestamps
+prevent the experiment timestamp preflight from passing because they make later
 sensor correlation ambiguous.
 
 ## Connecting a different RGB-D camera API
