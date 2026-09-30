@@ -5,8 +5,13 @@ import numpy as np
 
 from legwheel_kinematics.config import KinematicsConfig
 from legwheel_kinematics.projection import CameraCalibration
-from legwheel_kinematics.track import project_track
-from legwheel_kinematics.transforms import calculate_theta_p, forward_kinematics
+from legwheel_kinematics.track import generate_track_points, project_track
+from legwheel_kinematics.transforms import (
+    calculate_theta_p,
+    forward_kinematics,
+    frame_coordinates,
+    rotation_matrix_to_quaternion,
+)
 
 
 def notebook_config() -> KinematicsConfig:
@@ -62,6 +67,54 @@ class KinematicsTest(unittest.TestCase):
             atol=1e-8,
         )
 
+    def test_frame_coordinates_match_notebook_chain(self):
+        Frame_coords = frame_coordinates(notebook_config(), theta_p=0.0)
+        self.assertEqual(len(Frame_coords), 6)
+        np.testing.assert_array_equal(Frame_coords[0], np.eye(4))
+        np.testing.assert_allclose(
+            Frame_coords[-1],
+            forward_kinematics(notebook_config(), theta_p=0.0),
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.vstack([frame[:3, 3] for frame in Frame_coords]),
+            np.array([
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.353],
+                [0.0, 0.0, 0.353],
+                [0.83, 0.0, 0.4291],
+                [0.787, -0.04, 0.4581],
+                [0.787, -0.04, 0.4581],
+            ]),
+            atol=1e-12,
+        )
+
+    def test_rotation_matrix_to_quaternion_preserves_rotation(self):
+        rotation = forward_kinematics(
+            notebook_config(),
+            theta_p=0.2,
+        )[:3, :3]
+        x, y, z, w = rotation_matrix_to_quaternion(rotation)
+        recovered = np.array([
+            [
+                1.0 - 2.0 * (y * y + z * z),
+                2.0 * (x * y - z * w),
+                2.0 * (x * z + y * w),
+            ],
+            [
+                2.0 * (x * y + z * w),
+                1.0 - 2.0 * (x * x + z * z),
+                2.0 * (y * z - x * w),
+            ],
+            [
+                2.0 * (x * z - y * w),
+                2.0 * (y * z + x * w),
+                1.0 - 2.0 * (x * x + y * y),
+            ],
+        ])
+        np.testing.assert_allclose(recovered, rotation, atol=1e-12)
+        self.assertAlmostEqual(x * x + y * y + z * z + w * w, 1.0)
+
     def test_theta_p_uses_supplied_rig_equation(self):
         knee_joint = 1.0
         expected_argument = (
@@ -101,6 +154,17 @@ class KinematicsTest(unittest.TestCase):
         self.assertGreater(projection.visible_indices.size, 0)
         self.assertEqual(projection.polygon_pixels.shape[1], 2)
         self.assertTrue(np.all(np.isfinite(projection.polygon_pixels)))
+
+    def test_track_points_use_configured_inner_and_outer_radii(self):
+        points = generate_track_points(notebook_config(), point_count=360)
+        inner_radii = np.linalg.norm(points.inner_track_points[:, :2], axis=1)
+        outer_radii = np.linalg.norm(points.outer_track_points[:, :2], axis=1)
+        np.testing.assert_allclose(inner_radii, 0.78, atol=1e-12)
+        np.testing.assert_allclose(outer_radii, 0.88, atol=1e-12)
+        np.testing.assert_array_equal(
+            points.inner_track_points[:, 2],
+            np.zeros(360),
+        )
 
 
 if __name__ == "__main__":

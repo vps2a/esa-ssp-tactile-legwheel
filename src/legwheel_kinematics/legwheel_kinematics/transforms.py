@@ -11,6 +11,18 @@ from legwheel_kinematics.config import H_B_M, KinematicsConfig
 FloatArray = NDArray[np.float64]
 
 
+# These names correspond to Base, F1, F2, F3, F4 and Camera in
+# supporting_files/kinematics_calculator.ipynb.
+KINEMATIC_FRAME_IDS = (
+    "legwheel_base",
+    "theta_y_link",
+    "theta_p_link",
+    "beam_end_link",
+    "camera_mount_link",
+    "legwheel_camera_optical_frame",
+)
+
+
 def calculate_theta_p(
     knee_joint: float,
     wheel_radius_mm: float,
@@ -134,18 +146,17 @@ def individual_transformation_matrices(
     return T01, T12, T23, T34, T45
 
 
-def forward_kinematics(
+def transformation_matrices_from_config(
     config: KinematicsConfig,
     theta_p: float,
-) -> FloatArray:
-    """Return T_cam, the camera-frame pose in the rig base frame."""
-    # TODO: theta_y is intentionally fixed at zero for now. The track is
-    # radially circular, so rotating the complete local geometry does not alter
-    # its camera projection. Restore the measured theta_y when the model starts
-    # representing non-circular or world-fixed geometry.
+) -> tuple[FloatArray, FloatArray, FloatArray, FloatArray, FloatArray]:
+    """Return T01 through T45 using one experiment configuration."""
+    # TODO: theta_y is consciously fixed at zero while the processed track is
+    # radially circular. When theta_y is measured, T01 must also be published
+    # as a dynamic transform by the post-processing visualization node.
     theta_y = 0.0
 
-    matrices = individual_transformation_matrices(
+    return individual_transformation_matrices(
         d1=config.d1,
         theta_y=theta_y,
         theta_p=theta_p,
@@ -158,7 +169,78 @@ def forward_kinematics(
         ),
         camera_angle_deg=config.camera_angle_deg,
     )
-    T_cam = np.eye(4, dtype=float)
-    for matrix in matrices:
-        T_cam = T_cam @ matrix
-    return T_cam
+
+
+def frame_coordinates(
+    config: KinematicsConfig,
+    theta_p: float,
+) -> tuple[FloatArray, ...]:
+    """Return Base, F1, F2, F3, F4 and Camera poses in base coordinates."""
+    T01, T12, T23, T34, T45 = transformation_matrices_from_config(
+        config,
+        theta_p,
+    )
+
+    # Keep the notebook name here so the implementation can be checked against
+    # its Frame_coords calculation line by line.
+    Frame_coords = [np.eye(4, dtype=float)]
+    cumulative_transform = np.eye(4, dtype=float)
+    for matrix in (T01, T12, T23, T34, T45):
+        cumulative_transform = cumulative_transform @ matrix
+        Frame_coords.append(cumulative_transform.copy())
+    return tuple(Frame_coords)
+
+
+def rotation_matrix_to_quaternion(
+    rotation: FloatArray,
+) -> tuple[float, float, float, float]:
+    """Convert a 3x3 rotation matrix to a normalized (x, y, z, w) tuple."""
+    rotation = np.asarray(rotation, dtype=float)
+    if rotation.shape != (3, 3) or not np.all(np.isfinite(rotation)):
+        raise ValueError("rotation must be a finite 3x3 matrix.")
+    if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-8):
+        raise ValueError("rotation must be orthonormal.")
+    if not math.isclose(float(np.linalg.det(rotation)), 1.0, abs_tol=1e-8):
+        raise ValueError("rotation must have determinant +1.")
+
+    trace = float(np.trace(rotation))
+    if trace > 0.0:
+        scale = math.sqrt(trace + 1.0) * 2.0
+        w = 0.25 * scale
+        x = (rotation[2, 1] - rotation[1, 2]) / scale
+        y = (rotation[0, 2] - rotation[2, 0]) / scale
+        z = (rotation[1, 0] - rotation[0, 1]) / scale
+    elif rotation[0, 0] > rotation[1, 1] and rotation[0, 0] > rotation[2, 2]:
+        scale = math.sqrt(1.0 + rotation[0, 0] - rotation[1, 1] - rotation[2, 2]) * 2.0
+        w = (rotation[2, 1] - rotation[1, 2]) / scale
+        x = 0.25 * scale
+        y = (rotation[0, 1] + rotation[1, 0]) / scale
+        z = (rotation[0, 2] + rotation[2, 0]) / scale
+    elif rotation[1, 1] > rotation[2, 2]:
+        scale = math.sqrt(1.0 + rotation[1, 1] - rotation[0, 0] - rotation[2, 2]) * 2.0
+        w = (rotation[0, 2] - rotation[2, 0]) / scale
+        x = (rotation[0, 1] + rotation[1, 0]) / scale
+        y = 0.25 * scale
+        z = (rotation[1, 2] + rotation[2, 1]) / scale
+    else:
+        scale = math.sqrt(1.0 + rotation[2, 2] - rotation[0, 0] - rotation[1, 1]) * 2.0
+        w = (rotation[1, 0] - rotation[0, 1]) / scale
+        x = (rotation[0, 2] + rotation[2, 0]) / scale
+        y = (rotation[1, 2] + rotation[2, 1]) / scale
+        z = 0.25 * scale
+
+    quaternion = np.asarray((x, y, z, w), dtype=float)
+    quaternion /= np.linalg.norm(quaternion)
+    # q and -q describe the same orientation. A non-negative w makes the
+    # result deterministic for tests and recorded visualization streams.
+    if quaternion[3] < 0.0:
+        quaternion = -quaternion
+    return tuple(float(value) for value in quaternion)
+
+
+def forward_kinematics(
+    config: KinematicsConfig,
+    theta_p: float,
+) -> FloatArray:
+    """Return T_cam, the camera-frame pose in the rig base frame."""
+    return frame_coordinates(config, theta_p)[-1]

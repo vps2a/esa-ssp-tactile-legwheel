@@ -35,6 +35,8 @@ setup(
             "legwheel_kinematics.kinematic_joint_state_node:main",
             "track_overlay_node = "
             "legwheel_kinematics.track_overlay_node:main",
+            "kinematics_visualization_node = "
+            "legwheel_kinematics.kinematics_visualization_node:main",
         ],
     },
 )

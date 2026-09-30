@@ -30,6 +30,52 @@ class TrackProjection:
     midpoint_angle_rad: float
 
 
+@dataclass(frozen=True)
+class TrackPoints:
+    """Inner and outer circular track samples in legwheel_base coordinates."""
+
+    angles: FloatArray
+    inner_track_points: FloatArray
+    outer_track_points: FloatArray
+
+
+def generate_track_points(
+    config: KinematicsConfig,
+    point_count: int = 360,
+) -> TrackPoints:
+    """Generate the same 3D circular track points as the notebook."""
+    if point_count < 16:
+        raise ValueError("point_count must be at least 16.")
+
+    Beam_radius = config.Beam_radius
+    Wheel_width = config.Wheel_width
+    inner_track_radius = Beam_radius - Wheel_width / 2.0
+    outer_track_radius = Beam_radius + Wheel_width / 2.0
+    if inner_track_radius <= 0.0:
+        raise ValueError("Wheel width leaves no positive inner track radius.")
+
+    angles = np.linspace(-np.pi, np.pi, point_count, endpoint=False)
+    inner_track_points = np.column_stack(
+        (
+            inner_track_radius * np.cos(angles),
+            inner_track_radius * np.sin(angles),
+            np.zeros(point_count),
+        )
+    )
+    outer_track_points = np.column_stack(
+        (
+            outer_track_radius * np.cos(angles),
+            outer_track_radius * np.sin(angles),
+            np.zeros(point_count),
+        )
+    )
+    return TrackPoints(
+        angles=angles,
+        inner_track_points=inner_track_points,
+        outer_track_points=outer_track_points,
+    )
+
+
 def _longest_circular_run(mask: BoolArray) -> NDArray[np.int64]:
     """Return indexes of the longest true run in a circular Boolean array."""
     size = int(mask.size)
@@ -66,31 +112,10 @@ def project_track(
     point_count: int = 360,
 ) -> TrackProjection:
     """Project both circular track boundaries and form the visible ROI."""
-    if point_count < 16:
-        raise ValueError("point_count must be at least 16.")
-
-    Beam_radius = config.Beam_radius
-    Wheel_width = config.Wheel_width
-    inner_track_radius = Beam_radius - Wheel_width / 2.0
-    outer_track_radius = Beam_radius + Wheel_width / 2.0
-    if inner_track_radius <= 0.0:
-        raise ValueError("Wheel width leaves no positive inner track radius.")
-
-    angles = np.linspace(-np.pi, np.pi, point_count, endpoint=False)
-    inner_track_points = np.column_stack(
-        (
-            inner_track_radius * np.cos(angles),
-            inner_track_radius * np.sin(angles),
-            np.zeros(point_count),
-        )
-    )
-    outer_track_points = np.column_stack(
-        (
-            outer_track_radius * np.cos(angles),
-            outer_track_radius * np.sin(angles),
-            np.zeros(point_count),
-        )
-    )
+    track_points = generate_track_points(config, point_count)
+    angles = track_points.angles
+    inner_track_points = track_points.inner_track_points
+    outer_track_points = track_points.outer_track_points
 
     T_cam = forward_kinematics(config, theta_p)
     T_cam_to_base = np.linalg.inv(T_cam)

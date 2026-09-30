@@ -411,8 +411,8 @@ Two packages keep analysis code out of the motor-control and recording process:
 
 | Package | Purpose |
 | --- | --- |
-| `legwheel_description` | Publishes the exact notebook frame chain as `/tf` and `/tf_static`. |
-| `legwheel_kinematics` | Loads experiment geometry, derives `theta_p` from `knee_joint`, projects the circular track, and publishes Foxglove annotations. |
+| `legwheel_description` | Optional URDF representation of the notebook frame chain. |
+| `legwheel_kinematics` | Loads experiment geometry, derives `theta_p` from `knee_joint`, publishes replay-time TF and 3D track points, and projects the circular track into camera images. |
 | `legwheel_dataset` | Reads MCAP directly, isolates synchronized packets, extracts RGB/depth patches, fits terrain planes, and calculates telemetry spectra. |
 
 The experiment YAML must include the geometry shown in the example experiment
@@ -422,19 +422,24 @@ duplicated in the experiment file.
 
 ### Verify the projection in Foxglove
 
-For a recorded run, replay the bag and calculate annotations using simulated
-ROS time:
+For a recorded run, calculate annotations using simulated ROS time. Start the
+two processing launches first in separate terminals, then start bag playback so
+the beginning of the recording is not missed:
 
 ```bash
-ros2 bag play /path/to/run_1/rosbag --clock
-
 ros2 launch legwheel_kinematics track_overlay.launch.py \
   use_sim_time:=true \
   experiment_config:=/path/to/run_1/experiment_config_run_1_snapshot.yaml
+```
 
-ros2 launch legwheel_description description.launch.py \
+```bash
+ros2 launch legwheel_kinematics kinematics_visualization.launch.py \
   use_sim_time:=true \
   experiment_config:=/path/to/run_1/experiment_config_run_1_snapshot.yaml
+```
+
+```bash
+ros2 bag play /path/to/run_1/rosbag --clock
 ```
 
 Connect Foxglove through the normal ROS bridge. In an Image panel select the raw
@@ -446,6 +451,22 @@ RGB or depth image and add the corresponding annotation topic:
 The marker has the exact image timestamp. The overlay uses the latest available
 named `knee_joint` state and the same numerical projection library as offline
 processing.
+
+For the 3D view, add a **3D** panel, set its display frame to
+`legwheel_base`, enable `/legwheel/visualization/kinematics_3d`, and enable the
+transform frames and labels. The marker topic contains the inner and outer
+circular track points, the six notebook frame origins, and a line joining the
+kinematic chain. The same replay-only node publishes the fixed transforms on
+`/tf_static` and recalculates the `theta_p` transform on `/tf` for every
+recorded `knee_joint` sample. The markers and moving transform use that sample's
+original header timestamp, so seeking and playback speed changes remain
+aligned.
+
+Do not launch `legwheel_description description.launch.py` at the same time as
+`kinematics_visualization.launch.py`: both publish the same frame names and
+would create competing TF authorities. The direct kinematics visualization
+launch is preferred for rosbag post-processing and does not require TF to have
+been recorded in the raw bag.
 
 ### Build learning packets
 
@@ -499,7 +520,8 @@ or world-fixed track geometry is introduced.
 | `/legwheel_rgbd/depth/image_raw` | `sensor_msgs/msg/Image` | Orbbec driver | Raw depth image stream. |
 | `/legwheel_rgbd/depth/camera_info` | `sensor_msgs/msg/CameraInfo` | Orbbec driver | Raw depth calibration. |
 | `/legwheel_rgbd/gyro_accel/sample` | `sensor_msgs/msg/Imu` | Orbbec driver | Raw combined camera IMU stream. |
-| `/tf`, `/tf_static` | `tf2_msgs/msg/TFMessage` | Camera/description nodes | Dynamic and fixed frame transforms recorded for later inspection. |
+| `/tf`, `/tf_static` | `tf2_msgs/msg/TFMessage` | Post-processing visualization | Dynamic and fixed frame transforms regenerated while replaying a bag. |
+| `/legwheel/visualization/kinematics_3d` | `visualization_msgs/msg/MarkerArray` | Post-processing visualization | Inner/outer track points and moving kinematic-chain origins for Foxglove. |
 | `/legwheel/motor_status` | `std_msgs/msg/Bool` | Controller/experiment | `true` permits the motor node to enable; `false` disables it. |
 | `/wheel/requested_torque` | `std_msgs/msg/Float64` | Wheel controller/experiment | Requested wheel torque in Nm; it is clamped by the CAN node. |
 
