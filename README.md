@@ -19,6 +19,9 @@ experiment runner that records MCAP rosbags.
 | `legwheel_encoder` | Reads the central rotation encoder from a serial port and publishes ticks, angle, and velocity. | `ros2 launch legwheel_encoder rotation_encoder.launch.py` |
 | `legwheel_rgbd` | Launches and configures the Orbbec driver. Experiments consume its raw RGB, depth, calibration, and IMU topics directly without an image relay. | `ros2 launch legwheel_rgbd gemini_336.launch.py` |
 | `legwheel_experiments` | Validates an experiment, performs telemetry preflight, runs the leg/wheel sequence, and records an MCAP rosbag. | `ros2 run legwheel_experiments run_experiment --experiment-config <file>` |
+| `legwheel_description` | Publishes the kinematic frame tree from the experiment geometry and derived `theta_p`. | `ros2 launch legwheel_description description.launch.py experiment_config:=<file>` |
+| `legwheel_kinematics` | Implements the verified rig kinematics and publishes track annotations for Foxglove. | `ros2 launch legwheel_kinematics track_overlay.launch.py experiment_config:=<file>` |
+| `legwheel_dataset` | Converts recorded MCAP runs into synchronized packets, terrain-slope labels, and telemetry spectra. | `ros2 run legwheel_dataset build_dataset --run-directory <run>` |
 
 The workspace includes the MAB CANdle-SDK as a Git submodule. Orbbec's ROS 2
 driver is downloaded through `dependencies.repos`.
@@ -132,11 +135,9 @@ workspace, or pass the modified YAML file explicitly as a launch argument.
 
 ### Rotation-encoder calibration note
 
-The node parameter is named `ticks_per_revolution`, while the shipped YAML uses
-`ticks_per_rig_revolution`. Consequently, the shipped `83.3` value is currently
-ignored and the node uses its code default of `62.5` ticks/revolution. Rename the
-YAML key to `ticks_per_revolution` and set it to the measured calibration before
-relying on angle or distance results.
+The node and shipped YAML both use `ticks_per_revolution`. Set the shipped
+`83.3` value to the measured calibration before relying on angle, distance, or
+camera-to-contact timing results.
 
 ## Bring-up and verification
 
@@ -307,17 +308,20 @@ experiment_id: "demo"
 datetime_of_creation: "2026-01-01T12:00:00+00:00"
 
 rig_config:
-  beam_radius_m: 0.50
+  beam_radius_m: 0.83
   beam_total_length_m: 1.00
+  pivot_height_m: 0.353
 leg_config:
   hip_link_length_m: 0.20
   calf_link_length_m: 0.20
 electronics_hardware:
   encoder_setup:
-    ticks_per_legwheel_revolution: 62.5
+    ticks_per_legwheel_revolution: 83.3
   camera:
     camera_config:
-      camera_front_angle_deg: 0.0
+      camera_beam_offset_m: -0.043
+      camera_height_m: 0.029
+      camera_front_angle_deg: 40.0
 wheel_config:
   wheel_radius_mm: 50.0
   wheel_width_mm: 20.0
@@ -401,6 +405,87 @@ In Foxglove Desktop choose **Open local file** and select the `.mcap` file under
 Inspect the `name` array in a `JointState` Raw Messages panel to map each array
 index to its joint name before interpreting a plot.
 
+## Track projection and offline dataset generation
+
+Two packages keep analysis code out of the motor-control and recording process:
+
+| Package | Purpose |
+| --- | --- |
+| `legwheel_description` | Publishes the exact notebook frame chain as `/tf` and `/tf_static`. |
+| `legwheel_kinematics` | Loads experiment geometry, derives `theta_p` from `knee_joint`, projects the circular track, and publishes Foxglove annotations. |
+| `legwheel_dataset` | Reads MCAP directly, isolates synchronized packets, extracts RGB/depth patches, fits terrain planes, and calculates telemetry spectra. |
+
+The experiment YAML must include the geometry shown in the example experiment
+configuration above. `h_b` is the measured constant `0.0761 m`, and the camera
+offset from the beam centre is the measured constant `0.04 m`; neither is
+duplicated in the experiment file.
+
+### Verify the projection in Foxglove
+
+For a recorded run, replay the bag and calculate annotations using simulated
+ROS time:
+
+```bash
+ros2 bag play /path/to/run_1/rosbag --clock
+
+ros2 launch legwheel_kinematics track_overlay.launch.py \
+  use_sim_time:=true \
+  experiment_config:=/path/to/run_1/experiment_config_run_1_snapshot.yaml
+
+ros2 launch legwheel_description description.launch.py \
+  use_sim_time:=true \
+  experiment_config:=/path/to/run_1/experiment_config_run_1_snapshot.yaml
+```
+
+Connect Foxglove through the normal ROS bridge. In an Image panel select the raw
+RGB or depth image and add the corresponding annotation topic:
+
+- `/legwheel/visualization/rgb_track`
+- `/legwheel/visualization/depth_track`
+
+The marker has the exact image timestamp. The overlay uses the latest available
+named `knee_joint` state and the same numerical projection library as offline
+processing.
+
+### Build learning packets
+
+Stage 1 uses image header timestamps for one-to-one RGB/depth pairing, derives
+the visible patch midpoint, finds its future central-encoder crossing, and
+centres telemetry on that contact time. The defaults are a 10 ms image-pair
+tolerance, a 100 ms local telemetry window, and a separate 1 second spectral
+window.
+
+```bash
+ros2 run legwheel_dataset isolate_packets \
+  --run-directory /path/to/run_1
+```
+
+Run Stage 2 on the directory printed by Stage 1:
+
+```bash
+ros2 run legwheel_dataset extract_features \
+  --dataset /path/to/run_1/derived/CONFIGURATION_HASH
+```
+
+Or run both stages together:
+
+```bash
+ros2 run legwheel_dataset build_dataset \
+  --run-directory /path/to/run_1
+```
+
+Algorithm settings can be overridden with `--processing-config`; the complete
+defaults are installed from
+`src/legwheel_dataset/config/postprocess_defaults.yaml`. Raw runs are never
+modified or overwritten. The dependency-light output uses `.npy` image/patch
+arrays, compressed `.npz` telemetry/features, JSON packet metadata, and JSONL
+manifests. `quality_report.json` records every rejected packet reason.
+
+The processor currently fixes `theta_y` to zero because rotating a radially
+circular local track does not change its camera projection. The source contains
+an explicit TODO at this approximation so it can be removed when non-circular
+or world-fixed track geometry is introduced.
+
 ## Key topics
 
 | Topic | Message type | Producer | Meaning |
@@ -414,6 +499,7 @@ index to its joint name before interpreting a plot.
 | `/legwheel_rgbd/depth/image_raw` | `sensor_msgs/msg/Image` | Orbbec driver | Raw depth image stream. |
 | `/legwheel_rgbd/depth/camera_info` | `sensor_msgs/msg/CameraInfo` | Orbbec driver | Raw depth calibration. |
 | `/legwheel_rgbd/gyro_accel/sample` | `sensor_msgs/msg/Imu` | Orbbec driver | Raw combined camera IMU stream. |
+| `/tf`, `/tf_static` | `tf2_msgs/msg/TFMessage` | Camera/description nodes | Dynamic and fixed frame transforms recorded for later inspection. |
 | `/legwheel/motor_status` | `std_msgs/msg/Bool` | Controller/experiment | `true` permits the motor node to enable; `false` disables it. |
 | `/wheel/requested_torque` | `std_msgs/msg/Float64` | Wheel controller/experiment | Requested wheel torque in Nm; it is clamped by the CAN node. |
 

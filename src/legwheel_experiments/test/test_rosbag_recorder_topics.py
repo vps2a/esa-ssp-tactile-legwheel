@@ -9,3 +9,8 @@ def test_normal_recording_contains_raw_camera_topics_once():
 
 def test_removed_relay_namespace_is_not_recorded():
     assert not any(topic.startswith("/camera/") for topic in ROSBAG_TOPICS)
+
+
+def test_recording_preserves_dynamic_and_static_transforms():
+    assert "/tf" in ROSBAG_TOPICS
+    assert "/tf_static" in ROSBAG_TOPICS

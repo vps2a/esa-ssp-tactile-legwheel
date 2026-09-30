@@ -181,6 +181,10 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         "rig_config.beam_radius_m",
     )
     require_positive_number(
+        config.rig_config.get("pivot_height_m"),
+        "rig_config.pivot_height_m",
+    )
+    require_positive_number(
         config.rig_config.get("beam_total_length_m"),
         "rig_config.beam_total_length_m",
     )
@@ -216,6 +220,31 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
     require_positive_number(
         encoder_setup.get("ticks_per_legwheel_revolution"),
         "electronics_hardware.encoder_setup.ticks_per_legwheel_revolution",
+    )
+
+    camera = require_mapping(
+        config.electronics_hardware,
+        "camera",
+        "electronics_hardware.camera",
+    )
+    camera_config = require_mapping(
+        camera,
+        "camera_config",
+        "electronics_hardware.camera.camera_config",
+    )
+    require_number(
+        camera_config.get("camera_beam_offset_m"),
+        "electronics_hardware.camera.camera_config.camera_beam_offset_m",
+    )
+    require_number(
+        camera_config.get("camera_height_m"),
+        "electronics_hardware.camera.camera_config.camera_height_m",
+    )
+    require_number(
+        camera_config.get("camera_front_angle_deg"),
+        "electronics_hardware.camera.camera_config.camera_front_angle_deg",
+        minimum=-180.0,
+        maximum=180.0,
     )
 
 

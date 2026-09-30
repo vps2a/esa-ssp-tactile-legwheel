@@ -1,0 +1,69 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="legwheel">
+  <!-- Variable names intentionally match kinematics_calculator.ipynb. -->
+  <!-- The description launch supplies every non-constant value from the
+       experiment YAML. Direct xacro use must provide these arguments. -->
+  <xacro:arg name="d1" default="REQUIRED"/>
+  <xacro:arg name="a_b" default="REQUIRED"/>
+  <xacro:arg name="camera_beam_offset" default="REQUIRED"/>
+  <xacro:arg name="camera_height" default="REQUIRED"/>
+  <xacro:arg name="camera_angle_rad" default="REQUIRED"/>
+  <xacro:arg name="h_b" default="REQUIRED"/>
+  <xacro:arg name="camera_offset_from_beam_centre" default="REQUIRED"/>
+
+  <link name="legwheel_base"/>
+  <link name="theta_y_link"/>
+  <link name="pitch_axis_link"/>
+  <link name="theta_p_link"/>
+  <link name="beam_end_link"/>
+  <link name="camera_mount_link"/>
+  <link name="camera_tilt_link"/>
+  <link name="legwheel_camera_optical_frame"/>
+
+  <!-- T01: translate by d1 and rotate by theta_y about base Z. -->
+  <joint name="theta_y_joint" type="continuous">
+    <parent link="legwheel_base"/>
+    <child link="theta_y_link"/>
+    <origin xyz="0 0 $(arg d1)" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <!-- T12 is Rx(pi/2) followed by the theta_p rotation about local Z. -->
+  <joint name="pitch_axis_twist" type="fixed">
+    <parent link="theta_y_link"/>
+    <child link="pitch_axis_link"/>
+    <origin xyz="0 0 0" rpy="${pi / 2.0} 0 0"/>
+  </joint>
+  <joint name="theta_p_joint" type="continuous">
+    <parent link="pitch_axis_link"/>
+    <child link="theta_p_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <!-- T23 and T34: beam and measured camera-mount translations. -->
+  <joint name="beam_translation" type="fixed">
+    <parent link="theta_p_link"/>
+    <child link="beam_end_link"/>
+    <origin xyz="$(arg a_b) $(arg h_b) 0" rpy="0 0 0"/>
+  </joint>
+  <joint name="camera_mount_translation" type="fixed">
+    <parent link="beam_end_link"/>
+    <child link="camera_mount_link"/>
+    <origin
+      xyz="$(arg camera_beam_offset) $(arg camera_height) $(arg camera_offset_from_beam_centre)"
+      rpy="0 0 0"/>
+  </joint>
+
+  <!-- T45: Rx(camera_angle) followed by Rz(pi), split for exact ordering. -->
+  <joint name="camera_tilt" type="fixed">
+    <parent link="camera_mount_link"/>
+    <child link="camera_tilt_link"/>
+    <origin xyz="0 0 0" rpy="$(arg camera_angle_rad) 0 0"/>
+  </joint>
+  <joint name="camera_optical_flip" type="fixed">
+    <parent link="camera_tilt_link"/>
+    <child link="legwheel_camera_optical_frame"/>
+    <origin xyz="0 0 0" rpy="0 0 ${pi}"/>
+  </joint>
+</robot>

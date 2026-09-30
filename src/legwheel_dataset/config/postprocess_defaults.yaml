@@ -1,0 +1,12 @@
+schema_version: "1.0"
+rgb_depth_max_delta_ms: 10.0
+local_window_ms: 100.0
+spectral_window_ms: 1000.0
+telemetry_resample_hz: 100.0
+maximum_interpolation_gap_ms: 50.0
+track_point_count: 360
+depth_scale_m: 0.001
+minimum_plane_points: 100
+plane_ransac_iterations: 200
+plane_inlier_threshold_m: 0.005
+minimum_spectral_valid_fraction: 0.8
