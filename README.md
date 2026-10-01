@@ -317,6 +317,10 @@ leg_config:
 electronics_hardware:
   encoder_setup:
     ticks_per_legwheel_revolution: 83.3
+    # Keep -1 for this LegWheel geometry. The central encoder increases during
+    # forward travel, while positive notebook/DH theta_y rotates the opposite
+    # way. Changing this mirrors every camera projection and 3D slope direction.
+    theta_y_kinematic_sign: -1
   camera:
     camera_config:
       camera_beam_offset_m: -0.043
@@ -329,7 +333,13 @@ environment:
   environment_description: "Describe the test surface and conditions."
 ```
 
-Replace every numeric value with your measured, physically safe rig values.
+Replace the dimensional and hardware values with the measured, physically safe
+values for the rig.
+`theta_y_kinematic_sign` is a coordinate-convention mapping, not a tuning
+parameter. Keep it at `-1` for the present LegWheel geometry: the central
+encoder increases during forward motion, while the notebook/DH base frame uses
+the opposite positive rotation. The experiment validator accepts only `-1` or
+`1`; changing it mirrors camera projections, 3D points and signed slopes.
 The runner validates the YAML structure and asks interactively for run length,
 knee stiffness/zero/damping, wheel torque, and wheel-ramp duration.
 
@@ -476,6 +486,9 @@ physical terrain patch, finds its future wheel-contact time, and attaches a
 calculated local telemetry window plus a fixed spectral window. Stage 2 saves
 RGB/depth crops, the complete 3D point map, a robust fitted plane, signed
 along/radial slopes, and spectra for 15 motor and IMU telemetry channels.
+Encoder motion is converted through the experiment's
+`theta_y_kinematic_sign` before any spatial projection. Recordings moving away
+from the forward-facing camera are rejected before packet generation.
 
 Validate the configuration against the actual recorded rates and camera view
 before creating a dataset:
@@ -582,7 +595,9 @@ speed, so measured slip is included. It can therefore have a different length
 in different runs.
 
 `alpha_off_rad` is a positive distance ahead; the measured travel direction is
-applied automatically. `alpha_sp_rad` is the full angular width of the patch.
+applied automatically in encoder-motion coordinates. The selected angle is
+then converted into the notebook/base convention using
+`theta_y_kinematic_sign`. `alpha_sp_rad` is the full angular width of the patch.
 Exact endpoints are inserted regardless of `track_point_count`.
 
 Central-encoder ticks remain the motion reference for correcting `theta_y` and

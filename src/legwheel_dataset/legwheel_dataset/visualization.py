@@ -193,7 +193,7 @@ class PacketVisualizationNode(Node):
         return marker
 
     def _publish_transforms(self, metadata: dict) -> None:
-        theta_y = float(metadata["theta_y_image_rad"])
+        theta_y = float(metadata["theta_y_image_kinematic_rad"])
         # RGB is the displayed reference image for the moving frame chain.
         theta_p = float(metadata["theta_p_rgb_rad"])
         matrices = individual_transformation_matrices(
@@ -295,8 +295,8 @@ class PacketVisualizationNode(Node):
                         stamp,
                     )
                 )
-                angle = float(metadata["patch_centre_angle_rad"])
-                direction = float(metadata["travel_direction"])
+                angle = float(metadata["patch_centre_kinematic_angle_rad"])
+                direction = float(metadata["travel_direction_kinematic"])
                 radial_outward = np.asarray(
                     [np.cos(angle), np.sin(angle), 0.0], dtype=float
                 )

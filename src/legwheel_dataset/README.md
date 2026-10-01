@@ -137,6 +137,24 @@ to contain `depth_registration: true` and `align_target_stream: COLOR`.
 Unregistered depth is rejected instead of silently using the wrong RGB/depth
 extrinsic transform.
 
+The experiment snapshot must also contain:
+
+```yaml
+electronics_hardware:
+  encoder_setup:
+    # Keep -1 for this LegWheel geometry. Encoder-positive forward motion is
+    # opposite to positive notebook/DH theta_y. Changing this mirrors all
+    # camera projections, 3D points, and signed slope directions.
+    theta_y_kinematic_sign: -1
+```
+
+This is a coordinate-convention mapping, not a post-processing tuning value.
+Only `-1` and `1` are accepted. The current rig requires `-1` and should not be
+changed unless the encoder mounting or kinematic-frame convention changes.
+For an older recorded run whose snapshot predates this field, make a corrected
+copy of the experiment YAML containing the value above and pass it with
+`--experiment-config`; the MCAP itself does not need to be changed.
+
 ## Output layout
 
 By default, output is placed in:
@@ -174,9 +192,10 @@ CONFIGURATION_HASH/
             └── features.json
 ```
 
-Packet names use the experiment ID, run number, unwrapped `theta_y` at image
-time rounded to three decimal places, and an eight-character deterministic
-hash. The exact, unrounded value always remains in `metadata.json`.
+Packet names use the experiment ID, run number, unwrapped motion-coordinate
+`theta_y` at image time rounded to three decimal places, and an eight-character
+deterministic hash. Exact motion and kinematic values always remain in
+`metadata.json`.
 
 Every packet retains the complete RGB and depth images. It can therefore be
 examined after the original MCAP has been moved or archived.
@@ -262,7 +281,30 @@ Wheel velocity is linearly interpolated and integrated with the trapezoidal
 rule. The resulting continuous function exactly matches the central encoder at
 every accepted tick endpoint.
 
-### 4. Calculate average speeds and the local window
+### 4. Convert motion coordinates and require forward travel
+
+The corrected encoder trajectory is retained as `theta_y_motion(t)` because
+future contact time must be solved in the same coordinate system as the
+encoder. Before projection, angles and directions are converted into the
+notebook/base convention:
+
+```text
+theta_y_kinematic = theta_y_kinematic_sign * theta_y_motion
+direction_kinematic = theta_y_kinematic_sign * direction_motion
+```
+
+For this geometry, `theta_y_kinematic_sign = -1`. The verified camera optical
+axis faces decreasing kinematic `theta_y`, so a recording is forward only when:
+
+```text
+direction_kinematic = -1
+```
+
+`validate_config` reports a reverse recording as invalid and skips its preview.
+`isolate_packets` stops with `failed_reverse_recording` before extracting any
+images or creating packets.
+
+### 5. Calculate average speeds and the local window
 
 The reported wheel speed is the time-weighted mean absolute velocity:
 
@@ -285,7 +327,7 @@ arrays consequently have variable lengths between runs. Their samples remain
 on a real-time grid at `telemetry_resample_hz`; downstream model preparation
 must pad or otherwise batch them deliberately.
 
-### 5. Measure acquisition rates
+### 6. Measure acquisition rates
 
 The processor calculates actual timestamp rates for the leg, wheel and IMU
 streams that form the ML telemetry arrays. `packets/analysis_report.json`
@@ -324,12 +366,25 @@ Rejected candidates do not consume this spacing.
 
 ### 2. Define the physical terrain patch
 
-`alpha_off_rad` is a positive distance ahead. The measured travel direction is
-applied automatically:
+`alpha_off_rad` is a positive distance ahead. Contact timing is first defined
+in corrected encoder-motion coordinates:
 
 ```text
-patch_centre = theta_y(image_time) + travel_direction * alpha_off_rad
+patch_motion = theta_y_motion(image_time)
+             + direction_motion * alpha_off_rad
 ```
+
+The camera and terrain geometry are then converted together:
+
+```text
+camera_theta_kinematic = theta_y_kinematic_sign * theta_y_motion(camera_time)
+patch_kinematic = theta_y_kinematic_sign * patch_motion
+```
+
+Keeping those two conventions separate is essential. For the current rig, a
+forward encoder direction of `+1` becomes a kinematic direction of `-1`, which
+places the future patch in front of the camera instead of across its camera
+plane.
 
 The radial limits are:
 
@@ -341,8 +396,8 @@ outer_radius = beam_radius_m + wheel_width_m / 2
 The angular limits are:
 
 ```text
-patch_start = patch_centre - alpha_sp_rad / 2
-patch_end   = patch_centre + alpha_sp_rad / 2
+patch_start = patch_kinematic - alpha_sp_rad / 2
+patch_end   = patch_kinematic + alpha_sp_rad / 2
 ```
 
 `track_point_count` sets the full-circle sampling density. Exact patch start and
@@ -360,7 +415,7 @@ listed by timestamp and reason in `packets/analysis_report.json`.
 The contact timestamp is the first future solution of:
 
 ```text
-theta_y(contact_time) = patch_centre
+theta_y_motion(contact_time) = patch_motion
 ```
 
 It is found by bracketing the target with corrected encoder intervals and then
@@ -382,9 +437,11 @@ All 15 columns use the same grid and order stored in packet metadata:
 - IMU angular velocity X/Y/Z;
 - IMU linear acceleration X/Y/Z.
 
-The encoder-derived `theta_y`, patch angle and contact time remain in packet
-metadata. Only the encoder's raw position/velocity/tick channels are excluded
-from the resampled arrays.
+The encoder-motion and kinematic/base versions of `theta_y`, patch angle and
+travel direction are saved explicitly in packet metadata. Unqualified legacy
+spatial fields contain kinematic values; contact time and angular residual stay
+in motion coordinates. Only the encoder's raw position/velocity/tick channels
+are excluded from the resampled arrays.
 
 The complete local window must remain inside the corrected run and have source
 timestamp coverage without an excessive gap. Spectral cells outside the valid
@@ -432,16 +489,17 @@ non-negative. `plane_rmse_m` is the root-mean-square inlier residual.
 
 ### Signed slopes
 
-At patch-centre angle `theta_patch`, the radially outward unit vector is:
+At kinematic patch-centre angle `theta_patch`, the radially outward unit vector
+is:
 
 ```text
 e_r = [cos(theta_patch), sin(theta_patch), 0]
 ```
 
-The direction-of-travel tangent is:
+The direction-of-travel tangent uses the converted kinematic direction:
 
 ```text
-e_t = travel_direction * [-sin(theta_patch), cos(theta_patch), 0]
+e_t = direction_kinematic * [-sin(theta_patch), cos(theta_patch), 0]
 ```
 
 For upward-oriented plane normal `n`:
@@ -548,7 +606,7 @@ recorded in the original bag. Set the Foxglove 3D display frame to
 
 ## Dataset splitting
 
-Every packet stores an unwrapped `theta_y` and `lap_index`. Repeated loops can
-observe the same physical terrain. Do not randomly split packets from one run
-between training and evaluation; split by complete run, experiment, or physical
-terrain setup to avoid leakage.
+Every packet stores unwrapped motion and kinematic `theta_y` values plus a
+`lap_index`. Repeated loops can observe the same physical terrain. Do not
+randomly split packets from one run between training and evaluation; split by
+complete run, experiment, or physical terrain setup to avoid leakage.

@@ -280,7 +280,8 @@ def create_validation_figure(
             _configure_axis(axis, view, expanded=expanded)
         detail = (
             f"timestamp={view.metadata.timestamp_ns} ns\n"
-            f"theta_y={view.theta_y_rad:.5f} rad, "
+            f"theta_y motion={view.theta_y_motion_rad:.5f} rad, "
+            f"kinematic={view.theta_y_kinematic_rad:.5f} rad\n"
             f"knee={view.knee_joint_rad:.5f} rad, "
             f"theta_p={view.theta_p_rad:.5f} rad\n"
             f"status: {_format_reasons(view)}"
@@ -306,8 +307,12 @@ def create_validation_figure(
         f"pair midpoint={preview.pair.image_time_ns} ns, "
         f"steady midpoint={preview.steady_midpoint_ns} ns, "
         f"offset={midpoint_offset_ms:+.3f} ms, "
-        f"RGB-depth delta={preview.pair.sync_error_ns / 1_000_000.0:+.3f} ms, "
-        f"patch angle={preview.patch_centre_angle_rad:.5f} rad",
+        f"RGB-depth delta={preview.pair.sync_error_ns / 1_000_000.0:+.3f} ms\n"
+        f"patch motion angle={preview.patch_centre_motion_angle_rad:.5f} rad, "
+        "patch kinematic angle="
+        f"{preview.patch_centre_kinematic_angle_rad:.5f} rad, "
+        f"directions={preview.travel_direction_motion:+.0f} motion / "
+        f"{preview.travel_direction_kinematic:+.0f} kinematic",
         fontsize=13,
     )
     if hasattr(figure.canvas.manager, "set_window_title"):

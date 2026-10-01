@@ -69,7 +69,8 @@ class ValidationCameraView:
     image_topic: str
     metadata: ImageMetadata
     calibration: CameraCalibration
-    theta_y_rad: float
+    theta_y_motion_rad: float
+    theta_y_kinematic_rad: float
     knee_joint_rad: float
     theta_p_rad: float
     patch: PatchProjection
@@ -89,8 +90,10 @@ class ValidationPreview:
     steady_midpoint_ns: int
     steady_start_ns: int
     steady_end_ns: int
-    patch_centre_angle_rad: float
-    travel_direction: float
+    patch_centre_motion_angle_rad: float
+    patch_centre_kinematic_angle_rad: float
+    travel_direction_motion: float
+    travel_direction_kinematic: float
     rgb: ValidationCameraView
     depth: ValidationCameraView
 
@@ -381,6 +384,16 @@ def _run_motion_analysis(
         track_radius_m,
         processing_config.maximum_interpolation_gap_ms,
     )
+    theta_y_end_motion_rad = float(trajectory.theta_y_at_ticks_rad[-1])
+    theta_y_end_kinematic_rad = kinematics_config.theta_y_to_kinematic(
+        theta_y_end_motion_rad
+    )
+    travel_direction_kinematic = kinematics_config.direction_to_kinematic(
+        trajectory.travel_direction
+    )
+    forward_recording = kinematics_config.is_forward_motion(
+        trajectory.travel_direction
+    )
 
     omega_avg_rad_s = time_weighted_mean_absolute_speed(
         trajectory.wheel_times_ns,
@@ -391,7 +404,7 @@ def _run_motion_analysis(
     )
     duration_s = (trajectory.end_time_ns - trajectory.start_time_ns) * 1e-9
     average_rig_angular_speed_rad_s = abs(
-        float(trajectory.theta_y_at_ticks_rad[-1]) / duration_s
+        theta_y_end_motion_rad / duration_s
     )
     if average_rig_angular_speed_rad_s <= 0.0:
         raise ValueError("average_corrected_rig_speed_is_zero")
@@ -440,8 +453,19 @@ def _run_motion_analysis(
             "encoder_angle_at_t0_rad": float(
                 trajectory.raw_encoder_angles_rad[0]
             ),
-            "theta_y_end_rad": float(trajectory.theta_y_at_ticks_rad[-1]),
+            # The unqualified legacy fields remain encoder-motion quantities.
+            # Explicit fields prevent motion timing from being confused with
+            # the opposite-handed notebook/base geometry.
+            "theta_y_end_rad": theta_y_end_motion_rad,
+            "theta_y_end_motion_rad": theta_y_end_motion_rad,
+            "theta_y_end_kinematic_rad": theta_y_end_kinematic_rad,
             "travel_direction": trajectory.travel_direction,
+            "travel_direction_motion": trajectory.travel_direction,
+            "travel_direction_kinematic": travel_direction_kinematic,
+            "theta_y_kinematic_sign": (
+                kinematics_config.theta_y_kinematic_sign
+            ),
+            "forward_recording": forward_recording,
             "complete_encoder_interval_count": int(
                 trajectory.correction_factors.size
             ),
@@ -555,18 +579,26 @@ def _camera_validation_view(
     metadata: ImageMetadata,
     calibration: CameraCalibration,
     kinematics_config: KinematicsConfig,
-    theta_y_rad: float,
+    theta_y_motion_rad: float,
     knee_joint_rad: float,
-    patch_centre_angle_rad: float,
+    patch_centre_motion_angle_rad: float,
     processing_config: ProcessingConfig,
 ) -> ValidationCameraView:
-    """Project the track and requested patch for one camera timestamp."""
+    """Project one image-time patch after converting motion into geometry."""
+    theta_y_kinematic_rad = kinematics_config.theta_y_to_kinematic(
+        theta_y_motion_rad
+    )
+    patch_centre_kinematic_angle_rad = (
+        kinematics_config.theta_y_to_kinematic(
+            patch_centre_motion_angle_rad
+        )
+    )
     theta_p_rad = theta_p_from_config(knee_joint_rad, kinematics_config)
     patch = project_track_patch(
         kinematics_config,
-        theta_y_rad,
+        theta_y_kinematic_rad,
         theta_p_rad,
-        patch_centre_angle_rad,
+        patch_centre_kinematic_angle_rad,
         processing_config.alpha_sp_rad,
         calibration,
         processing_config.track_point_count,
@@ -578,7 +610,7 @@ def _camera_validation_view(
         outer_track_valid,
     ) = project_full_track_boundaries(
         kinematics_config,
-        theta_y_rad,
+        theta_y_kinematic_rad,
         theta_p_rad,
         calibration,
         processing_config.track_point_count,
@@ -588,7 +620,8 @@ def _camera_validation_view(
         image_topic=image_topic,
         metadata=metadata,
         calibration=calibration,
-        theta_y_rad=theta_y_rad,
+        theta_y_motion_rad=theta_y_motion_rad,
+        theta_y_kinematic_rad=theta_y_kinematic_rad,
         knee_joint_rad=knee_joint_rad,
         theta_p_rad=theta_p_rad,
         patch=patch,
@@ -627,9 +660,9 @@ def _build_validation_preview(
         }
 
     try:
-        theta_y_image = trajectory.theta_y_at(pair.image_time_ns)
-        patch_centre_angle_rad = (
-            theta_y_image
+        theta_y_image_motion_rad = trajectory.theta_y_at(pair.image_time_ns)
+        patch_centre_motion_angle_rad = (
+            theta_y_image_motion_rad
             + trajectory.travel_direction * processing_config.alpha_off_rad
         )
         rgb_metadata = bag_index.rgb_images[pair.rgb_index]
@@ -652,7 +685,7 @@ def _build_validation_preview(
             kinematics_config,
             trajectory.theta_y_at(pair.rgb_time_ns),
             interpolate_scalar(knee_times, knee_values, pair.rgb_time_ns),
-            patch_centre_angle_rad,
+            patch_centre_motion_angle_rad,
             processing_config,
         )
         depth_view = _camera_validation_view(
@@ -663,7 +696,7 @@ def _build_validation_preview(
             kinematics_config,
             trajectory.theta_y_at(pair.depth_time_ns),
             interpolate_scalar(knee_times, knee_values, pair.depth_time_ns),
-            patch_centre_angle_rad,
+            patch_centre_motion_angle_rad,
             processing_config,
         )
     except (IndexError, ValueError) as error:
@@ -680,8 +713,18 @@ def _build_validation_preview(
         steady_midpoint_ns=steady_midpoint_ns,
         steady_start_ns=trajectory.start_time_ns,
         steady_end_ns=trajectory.end_time_ns,
-        patch_centre_angle_rad=patch_centre_angle_rad,
-        travel_direction=trajectory.travel_direction,
+        patch_centre_motion_angle_rad=patch_centre_motion_angle_rad,
+        patch_centre_kinematic_angle_rad=(
+            kinematics_config.theta_y_to_kinematic(
+                patch_centre_motion_angle_rad
+            )
+        ),
+        travel_direction_motion=trajectory.travel_direction,
+        travel_direction_kinematic=(
+            kinematics_config.direction_to_kinematic(
+                trajectory.travel_direction
+            )
+        ),
         rgb=rgb_view,
         depth=depth_view,
     )
@@ -696,12 +739,28 @@ def _build_validation_preview(
         "rgb_time_ns": pair.rgb_time_ns,
         "depth_time_ns": pair.depth_time_ns,
         "sync_error_ms": pair.sync_error_ns / 1_000_000.0,
-        "patch_centre_angle_rad": patch_centre_angle_rad,
+        "theta_y_kinematic_sign": kinematics_config.theta_y_kinematic_sign,
+        "travel_direction_motion": trajectory.travel_direction,
+        "travel_direction_kinematic": (
+            kinematics_config.direction_to_kinematic(
+                trajectory.travel_direction
+            )
+        ),
+        "patch_centre_motion_angle_rad": patch_centre_motion_angle_rad,
+        "patch_centre_kinematic_angle_rad": (
+            kinematics_config.theta_y_to_kinematic(
+                patch_centre_motion_angle_rad
+            )
+        ),
         "rgb": {
             "resolution_pixels": [
                 rgb_metadata.width,
                 rgb_metadata.height,
             ],
+            "theta_y_motion_rad": rgb_view.theta_y_motion_rad,
+            "theta_y_kinematic_rad": rgb_view.theta_y_kinematic_rad,
+            "knee_joint_rad": rgb_view.knee_joint_rad,
+            "theta_p_rad": rgb_view.theta_p_rad,
             "complete_patch_visible": rgb_view.patch.fully_visible,
             "visibility_reasons": list(rgb_view.visibility_reasons),
         },
@@ -710,6 +769,10 @@ def _build_validation_preview(
                 depth_metadata.width,
                 depth_metadata.height,
             ],
+            "theta_y_motion_rad": depth_view.theta_y_motion_rad,
+            "theta_y_kinematic_rad": depth_view.theta_y_kinematic_rad,
+            "knee_joint_rad": depth_view.knee_joint_rad,
+            "theta_p_rad": depth_view.theta_p_rad,
             "complete_patch_visible": depth_view.patch.fully_visible,
             "visibility_reasons": list(depth_view.visibility_reasons),
         },
@@ -800,26 +863,44 @@ def _analyse_processing_configuration(
     knee_times, knee_values = _finite_column(
         leg_times, leg_values, knee_column
     )
-    preview, preview_summary = _build_validation_preview(
-        run_directory,
-        pairs,
-        bag_index,
-        trajectory,
-        knee_times,
-        knee_values,
-        kinematics_config,
-        processing_config,
+    forward_recording = bool(
+        report["corrected_motion"]["forward_recording"]
     )
+    if forward_recording:
+        preview, preview_summary = _build_validation_preview(
+            run_directory,
+            pairs,
+            bag_index,
+            trajectory,
+            knee_times,
+            knee_values,
+            kinematics_config,
+            processing_config,
+        )
+    else:
+        preview = None
+        preview_summary = {
+            "available": False,
+            "reason": "reverse_recording_rejected",
+            "steady_midpoint_ns": (
+                trajectory.start_time_ns + trajectory.end_time_ns
+            ) // 2,
+        }
     report["visualization_preview"] = preview_summary
     depth_pixel_counts = []
-    for pair in pairs:
+    validation_pairs = pairs if forward_recording else []
+    for pair in validation_pairs:
         if not trajectory.start_time_ns <= pair.image_time_ns <= trajectory.end_time_ns:
             continue
         try:
-            theta_y_image = trajectory.theta_y_at(pair.image_time_ns)
-            theta_y_depth = trajectory.theta_y_at(pair.depth_time_ns)
-            patch_centre = (
-                theta_y_image
+            theta_y_image_motion_rad = trajectory.theta_y_at(
+                pair.image_time_ns
+            )
+            theta_y_depth_motion_rad = trajectory.theta_y_at(
+                pair.depth_time_ns
+            )
+            patch_centre_motion_angle_rad = (
+                theta_y_image_motion_rad
                 + trajectory.travel_direction * processing_config.alpha_off_rad
             )
             depth_metadata = bag_index.depth_images[pair.depth_index]
@@ -833,9 +914,13 @@ def _analyse_processing_configuration(
             )
             projection = project_track_patch(
                 kinematics_config,
-                theta_y_depth,
+                kinematics_config.theta_y_to_kinematic(
+                    theta_y_depth_motion_rad
+                ),
                 theta_p_from_config(knee_joint, kinematics_config),
-                patch_centre,
+                kinematics_config.theta_y_to_kinematic(
+                    patch_centre_motion_angle_rad
+                ),
                 processing_config.alpha_sp_rad,
                 calibration,
                 processing_config.track_point_count,
@@ -861,7 +946,8 @@ def _analyse_processing_configuration(
         "maximum": max(depth_pixel_counts) if depth_pixel_counts else None,
     }
     report["configuration_valid"] = bool(
-        not report["rate_limit_violations"]
+        forward_recording
+        and not report["rate_limit_violations"]
         and report["spectral_window_not_shorter_than_local_window"]
         and depth_pixel_counts
     )
@@ -950,6 +1036,14 @@ def isolate_packets(
     analysis_report_path = packets_directory / "analysis_report.json"
     _write_json(analysis_report_path, analysis_report)
 
+    if not analysis_report["corrected_motion"]["forward_recording"]:
+        analysis_report["status"] = "failed_reverse_recording"
+        _write_json(analysis_report_path, analysis_report)
+        raise ValueError(
+            "Reverse recording rejected: ML packets require motion in the "
+            "direction faced by the camera. See "
+            f"{analysis_report_path}"
+        )
     if analysis_report["rate_limit_violations"]:
         analysis_report["status"] = "failed_source_rate_validation"
         _write_json(analysis_report_path, analysis_report)
@@ -970,7 +1064,13 @@ def isolate_packets(
         packets_directory / "run_motion_analysis.npz",
         tick_times_ns=trajectory.tick_times_ns,
         raw_encoder_angles_rad=trajectory.raw_encoder_angles_rad,
+        # Retained as a legacy alias; this array is in motion coordinates.
         theta_y_at_ticks_rad=trajectory.theta_y_at_ticks_rad,
+        theta_y_motion_at_ticks_rad=trajectory.theta_y_at_ticks_rad,
+        theta_y_kinematic_at_ticks_rad=(
+            kinematics_config.theta_y_kinematic_sign
+            * trajectory.theta_y_at_ticks_rad
+        ),
         correction_factors=trajectory.correction_factors,
         predicted_interval_angles_rad=trajectory.predicted_interval_angles_rad,
         encoder_interval_angles_rad=trajectory.encoder_interval_angles_rad,
@@ -1040,12 +1140,43 @@ def isolate_packets(
             continue
 
         try:
-            theta_y_image = trajectory.theta_y_at(pair.image_time_ns)
-            theta_y_rgb = trajectory.theta_y_at(pair.rgb_time_ns)
-            theta_y_depth = trajectory.theta_y_at(pair.depth_time_ns)
-            patch_centre_angle_rad = (
-                theta_y_image
+            theta_y_image_motion_rad = trajectory.theta_y_at(
+                pair.image_time_ns
+            )
+            theta_y_rgb_motion_rad = trajectory.theta_y_at(pair.rgb_time_ns)
+            theta_y_depth_motion_rad = trajectory.theta_y_at(
+                pair.depth_time_ns
+            )
+            patch_centre_motion_angle_rad = (
+                theta_y_image_motion_rad
                 + trajectory.travel_direction * processing_config.alpha_off_rad
+            )
+            # Contact timing stays in the encoder-motion convention. Spatial
+            # projection uses the opposite-handed notebook/base convention.
+            theta_y_image_kinematic_rad = (
+                kinematics_config.theta_y_to_kinematic(
+                    theta_y_image_motion_rad
+                )
+            )
+            theta_y_rgb_kinematic_rad = (
+                kinematics_config.theta_y_to_kinematic(
+                    theta_y_rgb_motion_rad
+                )
+            )
+            theta_y_depth_kinematic_rad = (
+                kinematics_config.theta_y_to_kinematic(
+                    theta_y_depth_motion_rad
+                )
+            )
+            patch_centre_kinematic_angle_rad = (
+                kinematics_config.theta_y_to_kinematic(
+                    patch_centre_motion_angle_rad
+                )
+            )
+            travel_direction_kinematic = (
+                kinematics_config.direction_to_kinematic(
+                    trajectory.travel_direction
+                )
             )
             contact_time_ns, angular_residual_rad = (
                 trajectory.first_future_crossing_time(
@@ -1079,18 +1210,18 @@ def isolate_packets(
 
             rgb_projection = project_track_patch(
                 kinematics_config,
-                theta_y_rgb,
+                theta_y_rgb_kinematic_rad,
                 theta_p_rgb,
-                patch_centre_angle_rad,
+                patch_centre_kinematic_angle_rad,
                 processing_config.alpha_sp_rad,
                 rgb_calibration,
                 processing_config.track_point_count,
             )
             depth_projection = project_track_patch(
                 kinematics_config,
-                theta_y_depth,
+                theta_y_depth_kinematic_rad,
                 theta_p_depth,
-                patch_centre_angle_rad,
+                patch_centre_kinematic_angle_rad,
                 processing_config.alpha_sp_rad,
                 depth_calibration,
                 processing_config.track_point_count,
@@ -1153,14 +1284,14 @@ def isolate_packets(
             )
             rgb_full = project_full_track_boundaries(
                 kinematics_config,
-                theta_y_rgb,
+                theta_y_rgb_kinematic_rad,
                 theta_p_rgb,
                 rgb_calibration,
                 processing_config.track_point_count,
             )
             depth_full = project_full_track_boundaries(
                 kinematics_config,
-                theta_y_depth,
+                theta_y_depth_kinematic_rad,
                 theta_p_depth,
                 depth_calibration,
                 processing_config.track_point_count,
@@ -1172,7 +1303,7 @@ def isolate_packets(
         packet_id = _packet_identifier(
             experiment_id,
             run_number,
-            theta_y_image,
+            theta_y_image_motion_rad,
             pair.rgb_time_ns,
             pair.depth_time_ns,
             dataset_identifier,
@@ -1183,7 +1314,9 @@ def isolate_packets(
             "bgr8": "rgb8",
             "bgra8": "rgba8",
         }.get(rgb_metadata.encoding, rgb_metadata.encoding)
-        lap_index = int(math.floor(abs(theta_y_image) / (2.0 * math.pi)))
+        lap_index = int(math.floor(
+            abs(theta_y_image_motion_rad) / (2.0 * math.pi)
+        ))
         metadata = {
             "packet_id": packet_id,
             "experiment_id": experiment_id,
@@ -1196,11 +1329,33 @@ def isolate_packets(
             "contact_time_ns": contact_time_ns,
             "contact_delay_ns": contact_time_ns - pair.image_time_ns,
             "contact_angular_residual_rad": angular_residual_rad,
-            "travel_direction": trajectory.travel_direction,
-            "theta_y_image_rad": theta_y_image,
-            "theta_y_rgb_rad": theta_y_rgb,
-            "theta_y_depth_rad": theta_y_depth,
-            "patch_centre_angle_rad": patch_centre_angle_rad,
+            # Unqualified spatial fields use the kinematic/base convention so
+            # existing Stage 2 and Foxglove consumers remain geometrically
+            # correct. Explicit motion fields preserve the contact-time basis.
+            "travel_direction": travel_direction_kinematic,
+            "travel_direction_motion": trajectory.travel_direction,
+            "travel_direction_kinematic": travel_direction_kinematic,
+            "theta_y_kinematic_sign": (
+                kinematics_config.theta_y_kinematic_sign
+            ),
+            "theta_y_image_rad": theta_y_image_kinematic_rad,
+            "theta_y_rgb_rad": theta_y_rgb_kinematic_rad,
+            "theta_y_depth_rad": theta_y_depth_kinematic_rad,
+            "theta_y_image_kinematic_rad": theta_y_image_kinematic_rad,
+            "theta_y_rgb_kinematic_rad": theta_y_rgb_kinematic_rad,
+            "theta_y_depth_kinematic_rad": theta_y_depth_kinematic_rad,
+            "theta_y_image_motion_rad": theta_y_image_motion_rad,
+            "theta_y_rgb_motion_rad": theta_y_rgb_motion_rad,
+            "theta_y_depth_motion_rad": theta_y_depth_motion_rad,
+            "patch_centre_angle_rad": (
+                patch_centre_kinematic_angle_rad
+            ),
+            "patch_centre_motion_angle_rad": (
+                patch_centre_motion_angle_rad
+            ),
+            "patch_centre_kinematic_angle_rad": (
+                patch_centre_kinematic_angle_rad
+            ),
             "patch_spread_rad": processing_config.alpha_sp_rad,
             "alpha_off_rad": processing_config.alpha_off_rad,
             "local_window_ms": local_window_ms,
@@ -1259,8 +1414,14 @@ def isolate_packets(
                 "packet_id": packet_id,
                 "image_time_ns": pair.image_time_ns,
                 "contact_time_ns": contact_time_ns,
-                "theta_y_image_rad": theta_y_image,
-                "patch_centre_angle_rad": patch_centre_angle_rad,
+                "theta_y_image_rad": theta_y_image_kinematic_rad,
+                "theta_y_image_motion_rad": theta_y_image_motion_rad,
+                "patch_centre_angle_rad": (
+                    patch_centre_kinematic_angle_rad
+                ),
+                "patch_centre_motion_angle_rad": (
+                    patch_centre_motion_angle_rad
+                ),
                 "lap_index": lap_index,
                 "sync_error_ns": pair.sync_error_ns,
                 "packet_path": str(packet_directory.relative_to(output_directory)),
@@ -1396,8 +1557,8 @@ def extract_features(
             )
             along_slope, cross_slope = slope_from_plane(
                 plane.normal,
-                float(metadata["patch_centre_angle_rad"]),
-                float(metadata["travel_direction"]),
+                float(metadata["patch_centre_kinematic_angle_rad"]),
+                float(metadata["travel_direction_kinematic"]),
             )
             np.savez_compressed(
                 stage2_directory / "point_map.npz",

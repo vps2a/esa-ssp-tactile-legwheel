@@ -28,6 +28,7 @@ def notebook_config() -> KinematicsConfig:
         wheel_radius_mm=100.0,
         hip_link_length_m=0.2,
         calf_link_length_m=0.2,
+        theta_y_kinematic_sign=-1.0,
     )
 
 
@@ -40,6 +41,7 @@ class KinematicsTest(unittest.TestCase):
                 "calf_link_length_m": 0.21,
             },
             "electronics_hardware": {
+                "encoder_setup": {"theta_y_kinematic_sign": -1},
                 "camera": {
                     "camera_config": {
                         "camera_beam_offset_m": -0.043,
@@ -53,6 +55,39 @@ class KinematicsTest(unittest.TestCase):
         self.assertEqual(config.d1, 0.353)
         self.assertEqual(config.h_b, 0.0761)
         self.assertEqual(config.camera_offset_from_beam_centre, 0.04)
+        self.assertEqual(config.theta_y_kinematic_sign, -1.0)
+
+    def test_motion_angles_are_converted_to_notebook_convention(self):
+        config = notebook_config()
+        self.assertEqual(config.theta_y_to_kinematic(1.25), -1.25)
+        self.assertEqual(config.direction_to_kinematic(1.0), -1.0)
+        self.assertTrue(config.is_forward_motion(1.0))
+        self.assertFalse(config.is_forward_motion(-1.0))
+
+    def test_kinematic_sign_must_be_exactly_plus_or_minus_one(self):
+        experiment_config = {
+            "rig_config": {"pivot_height_m": 0.353, "beam_radius_m": 0.83},
+            "leg_config": {
+                "hip_link_length_m": 0.2,
+                "calf_link_length_m": 0.21,
+            },
+            "electronics_hardware": {
+                "encoder_setup": {"theta_y_kinematic_sign": 0},
+                "camera": {
+                    "camera_config": {
+                        "camera_beam_offset_m": -0.043,
+                        "camera_height_m": 0.029,
+                        "camera_front_angle_deg": 40.0,
+                    }
+                },
+            },
+            "wheel_config": {
+                "wheel_radius_mm": 100.0,
+                "wheel_width_mm": 100.0,
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "must be exactly -1 or 1"):
+            KinematicsConfig.from_experiment_dict(experiment_config)
 
     def test_forward_kinematics_matches_notebook_reference(self):
         expected = np.array([

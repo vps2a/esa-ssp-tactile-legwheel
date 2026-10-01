@@ -77,7 +77,10 @@ class SynchronizationTest(unittest.TestCase):
                     "calf_link_length_m": 0.2,
                 },
                 "electronics_hardware": {
-                    "encoder_setup": {"ticks_per_legwheel_revolution": 62.5},
+                    "encoder_setup": {
+                        "ticks_per_legwheel_revolution": 62.5,
+                        "theta_y_kinematic_sign": -1,
+                    },
                     "camera": {
                         "camera_config": {
                             "camera_beam_offset_m": -0.043,
@@ -140,7 +143,7 @@ class SynchronizationTest(unittest.TestCase):
                 # The encoder is intentionally only 20 Hz. It corrects theta_y
                 # but must not limit the 100 Hz motor/IMU packet grid.
                 if sample_index % 5 == 0:
-                    ticks.append(timestamp_ns, [-encoder_ticks])
+                    ticks.append(timestamp_ns, [encoder_ticks])
                 imu.append(timestamp_ns, [0.0] * 6)
             for timestamp_ns, torque in (
                 (0, 0.0),
@@ -225,6 +228,16 @@ class SynchronizationTest(unittest.TestCase):
                 validation_report["visualization_preview"]["selection"],
                 "synchronized_pair_closest_to_steady_motion_midpoint",
             )
+            self.assertTrue(validation_report["configuration_valid"])
+            self.assertLess(
+                preview.patch_centre_kinematic_angle_rad
+                - preview.rgb.theta_y_kinematic_rad,
+                -0.3,
+            )
+            self.assertLess(
+                float(np.max(np.abs(preview.rgb.patch.polygon_pixels))),
+                10_000.0,
+            )
             from legwheel_dataset.validation_plot import (
                 create_validation_figure,
                 load_preview_images,
@@ -264,6 +277,17 @@ class SynchronizationTest(unittest.TestCase):
             metadata = json.loads(
                 (packet / "metadata.json").read_text(encoding="utf-8")
             )
+            self.assertEqual(metadata["theta_y_kinematic_sign"], -1.0)
+            self.assertEqual(metadata["travel_direction_motion"], 1.0)
+            self.assertEqual(metadata["travel_direction_kinematic"], -1.0)
+            self.assertAlmostEqual(
+                metadata["theta_y_image_kinematic_rad"],
+                -metadata["theta_y_image_motion_rad"],
+            )
+            self.assertAlmostEqual(
+                metadata["patch_centre_kinematic_angle_rad"],
+                -metadata["patch_centre_motion_angle_rad"],
+            )
             self.assertEqual(len(metadata["telemetry_channel_names"]), 15)
             self.assertFalse(any(
                 "rotation" in name
@@ -287,6 +311,60 @@ class SynchronizationTest(unittest.TestCase):
             )
             self.assertEqual(
                 analysis["resampled_telemetry_channel_count"], 15
+            )
+
+            reverse_ticks = TelemetrySeries(("rotation_encoder.ticks",))
+            for timestamp_ns, row in zip(ticks.times_ns, ticks.rows):
+                reverse_ticks.append(timestamp_ns, [-row[0]])
+            reverse_bag_index = BagIndex(
+                rgb_images=bag_index.rgb_images,
+                depth_images=bag_index.depth_images,
+                rgb_calibrations=bag_index.rgb_calibrations,
+                depth_calibrations=bag_index.depth_calibrations,
+                streams={**bag_index.streams, "ticks": reverse_ticks},
+            )
+            reverse_output = run_directory / "derived_reverse_test"
+            with patch(
+                "legwheel_dataset.processor.index_bag",
+                return_value=reverse_bag_index,
+            ):
+                reverse_report, reverse_preview = (
+                    validate_processing_configuration_with_preview(
+                        run_directory,
+                        ProcessingConfig(),
+                        experiment_config_path=experiment_path,
+                    )
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Reverse recording rejected",
+                ):
+                    isolate_packets(
+                        run_directory,
+                        ProcessingConfig(),
+                        experiment_config_path=experiment_path,
+                        output_directory=reverse_output,
+                    )
+
+            self.assertIsNone(reverse_preview)
+            self.assertFalse(reverse_report["configuration_valid"])
+            self.assertFalse(
+                reverse_report["corrected_motion"]["forward_recording"]
+            )
+            self.assertEqual(
+                reverse_report["visualization_preview"]["reason"],
+                "reverse_recording_rejected",
+            )
+            reverse_analysis = json.loads(
+                (
+                    reverse_output
+                    / "packets"
+                    / "analysis_report.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                reverse_analysis["status"],
+                "failed_reverse_recording",
             )
 
     def test_encoder_correction_preserves_signed_tick_endpoints(self):
@@ -422,8 +500,8 @@ class FeatureTest(unittest.TestCase):
                     "packet_id": "packet_000000",
                     "depth_calibration": calibration,
                     "T_depth_camera_in_base": np.eye(4).tolist(),
-                    "patch_centre_angle_rad": 0.0,
-                    "travel_direction": 1.0,
+                    "patch_centre_kinematic_angle_rad": 0.0,
+                    "travel_direction_kinematic": 1.0,
                     "telemetry_channel_names": ["synthetic"],
                 }),
                 encoding="utf-8",

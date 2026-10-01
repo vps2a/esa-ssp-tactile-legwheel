@@ -221,6 +221,15 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         encoder_setup.get("ticks_per_legwheel_revolution"),
         "electronics_hardware.encoder_setup.ticks_per_legwheel_revolution",
     )
+    theta_y_kinematic_sign = require_number(
+        encoder_setup.get("theta_y_kinematic_sign"),
+        "electronics_hardware.encoder_setup.theta_y_kinematic_sign",
+    )
+    if theta_y_kinematic_sign not in (-1.0, 1.0):
+        raise ValueError(
+            "electronics_hardware.encoder_setup.theta_y_kinematic_sign "
+            "must be exactly -1 or 1."
+        )
 
     camera = require_mapping(
         config.electronics_hardware,

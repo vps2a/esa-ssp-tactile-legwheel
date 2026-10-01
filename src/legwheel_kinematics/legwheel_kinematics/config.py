@@ -11,6 +11,11 @@ from typing import Any
 H_B_M = 0.0761
 CAMERA_OFFSET_FROM_BEAM_CENTRE_M = 0.04
 
+# The camera optical axis in the verified notebook geometry points in the
+# decreasing kinematic-theta direction. Forward recordings are therefore those
+# whose converted motion direction equals this value.
+CAMERA_FORWARD_KINEMATIC_DIRECTION = -1.0
+
 
 def _mapping(parent: dict[str, Any], key: str, path: str) -> dict[str, Any]:
     value = parent.get(key)
@@ -45,6 +50,25 @@ class KinematicsConfig:
     wheel_radius_mm: float
     hip_link_length_m: float
     calf_link_length_m: float
+    theta_y_kinematic_sign: float
+
+    def theta_y_to_kinematic(self, theta_y_motion_rad: float) -> float:
+        """Convert encoder-motion theta_y into the notebook/base convention."""
+        return self.theta_y_kinematic_sign * float(theta_y_motion_rad)
+
+    def direction_to_kinematic(self, motion_direction: float) -> float:
+        """Convert a signed encoder-motion direction into the base convention."""
+        direction = float(motion_direction)
+        if direction not in (-1.0, 1.0):
+            raise ValueError("motion_direction must be exactly -1 or 1.")
+        return self.theta_y_kinematic_sign * direction
+
+    def is_forward_motion(self, motion_direction: float) -> bool:
+        """Return whether motion follows the direction faced by the camera."""
+        return (
+            self.direction_to_kinematic(motion_direction)
+            == CAMERA_FORWARD_KINEMATIC_DIRECTION
+        )
 
     @classmethod
     def from_experiment_dict(
@@ -66,6 +90,11 @@ class KinematicsConfig:
             experiment_config,
             "electronics_hardware",
             "electronics_hardware",
+        )
+        encoder_setup = _mapping(
+            electronics_hardware,
+            "encoder_setup",
+            "electronics_hardware.encoder_setup",
         )
         camera = _mapping(
             electronics_hardware,
@@ -120,6 +149,21 @@ class KinematicsConfig:
             "calf_link_length_m",
             "leg_config.calf_link_length_m",
         )
+        # Keep this at -1 for the current LegWheel geometry. The central
+        # encoder increases during forward motion, while the notebook/DH
+        # theta_y convention increases in the opposite direction. This field
+        # exists to make that hardware-to-geometry mapping explicit; change it
+        # only if the encoder mounting or kinematic convention changes.
+        theta_y_kinematic_sign = _finite_number(
+            encoder_setup,
+            "theta_y_kinematic_sign",
+            "electronics_hardware.encoder_setup.theta_y_kinematic_sign",
+        )
+        if theta_y_kinematic_sign not in (-1.0, 1.0):
+            raise ValueError(
+                "electronics_hardware.encoder_setup.theta_y_kinematic_sign "
+                "must be exactly -1 or 1."
+            )
 
         positive_values = {
             "rig_config.pivot_height_m": d1,
@@ -148,6 +192,7 @@ class KinematicsConfig:
             wheel_radius_mm=wheel_radius_mm,
             hip_link_length_m=hip_link_length_m,
             calf_link_length_m=calf_link_length_m,
+            theta_y_kinematic_sign=theta_y_kinematic_sign,
         )
 
     @classmethod
