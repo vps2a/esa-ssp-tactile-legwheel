@@ -16,6 +16,7 @@ from std_msgs.msg import ColorRGBA, String
 from tf2_ros import TransformBroadcaster
 from visualization_msgs.msg import ImageMarker, Marker, MarkerArray
 
+from legwheel_dataset.frame_playback import FramePose, interpolate_frame_pose
 from legwheel_kinematics.config import KinematicsConfig
 from legwheel_kinematics.track import generate_track_points
 from legwheel_kinematics.transforms import (
@@ -89,8 +90,33 @@ class PacketVisualizationNode(Node):
                     self._records.append(json.loads(line))
         self._records.sort(key=lambda value: int(value["image_time_ns"]))
         self._times = [int(record["image_time_ns"]) for record in self._records]
+        if not self._records:
+            raise ValueError("The dataset manifest contains no packets to visualize.")
+
+        # Packet overlays remain discrete, but TF must be valid at the current
+        # /clock time. Preload the saved poses once so each clock callback can
+        # cheaply interpolate a smooth, correctly timestamped frame chain.
+        self._frame_poses = []
+        for record in self._records:
+            packet_directory = self._dataset_directory / record["packet_path"]
+            metadata = json.loads(
+                (packet_directory / "metadata.json").read_text(encoding="utf-8")
+            )
+            self._frame_poses.append(
+                FramePose(
+                    timestamp_ns=int(metadata["image_time_ns"]),
+                    theta_y_rad=float(metadata["theta_y_image_kinematic_rad"]),
+                    theta_p_rad=float(metadata["theta_p_rgb_rad"]),
+                )
+            )
+        for previous, current in zip(self._frame_poses, self._frame_poses[1:]):
+            if current.timestamp_ns <= previous.timestamp_ns:
+                raise ValueError(
+                    "Dataset packet timestamps must be strictly increasing."
+                )
         self._next_index = 0
         self._last_clock_ns = None
+        self._last_clock_region = None
 
         self._rgb_publisher = self.create_publisher(
             ImageMarker, RGB_ANNOTATION_TOPIC, 20
@@ -112,7 +138,10 @@ class PacketVisualizationNode(Node):
             qos_profile_sensor_data,
         )
         self.get_logger().info(
-            f"Loaded {len(self._records)} derived packets; waiting for /clock."
+            f"Loaded {len(self._records)} derived packets; waiting for /clock. "
+            "Dataset TF will be interpolated at every clock update. "
+            f"Moving-frame interval: {self._times[0]} to {self._times[-1]} ns "
+            f"({(self._times[-1] - self._times[0]) / 1e9:.3f} s)."
         )
 
     def _clock_callback(self, message: Clock) -> None:
@@ -127,6 +156,28 @@ class PacketVisualizationNode(Node):
             ):
                 self._next_index -= 1
         self._last_clock_ns = clock_ns
+
+        # Publish TF at the exact current simulated time. Previously TF was
+        # emitted only at sparse packet timestamps; Foxglove could then have no
+        # transform valid for its current render time and show a frozen chain.
+        frame_pose = interpolate_frame_pose(self._frame_poses, clock_ns)
+        if frame_pose is not None:
+            if self._last_clock_region != "inside":
+                self.get_logger().info(
+                    "Playback entered the dataset moving-frame interval."
+                )
+            self._last_clock_region = "inside"
+            self._publish_transforms(frame_pose)
+        else:
+            clock_region = "before" if clock_ns < self._times[0] else "after"
+            if self._last_clock_region != clock_region:
+                self.get_logger().warning(
+                    "Playback is "
+                    f"{clock_region} the dataset moving-frame interval; "
+                    "seek into the analysed steady-motion interval to see "
+                    "the dataset_* frames move."
+                )
+            self._last_clock_region = clock_region
 
         while (
             self._next_index < len(self._records)
@@ -145,7 +196,6 @@ class PacketVisualizationNode(Node):
         )
         self._publish_image_markers(metadata, geometry, rgb=True)
         self._publish_image_markers(metadata, geometry, rgb=False)
-        self._publish_transforms(metadata)
         self._publish_3d_markers(packet_directory, metadata, geometry)
 
     def _publish_image_markers(self, metadata, geometry, *, rgb: bool) -> None:
@@ -192,14 +242,12 @@ class PacketVisualizationNode(Node):
         marker.scale = 2.0
         return marker
 
-    def _publish_transforms(self, metadata: dict) -> None:
-        theta_y = float(metadata["theta_y_image_kinematic_rad"])
-        # RGB is the displayed reference image for the moving frame chain.
-        theta_p = float(metadata["theta_p_rgb_rad"])
+    def _publish_transforms(self, frame_pose: FramePose) -> None:
+        """Publish the interpolated camera chain at the current bag time."""
         matrices = individual_transformation_matrices(
             d1=self._kinematics_config.d1,
-            theta_y=theta_y,
-            theta_p=theta_p,
+            theta_y=frame_pose.theta_y_rad,
+            theta_p=frame_pose.theta_p_rad,
             a_b=self._kinematics_config.a_b,
             h_b=self._kinematics_config.h_b,
             camera_beam_offset=self._kinematics_config.camera_beam_offset,
@@ -217,7 +265,7 @@ class PacketVisualizationNode(Node):
             "dataset_camera_mount_link",
             "dataset_camera_optical_frame",
         )
-        stamp = _stamp(int(metadata["image_time_ns"]))
+        stamp = _stamp(frame_pose.timestamp_ns)
         transforms = [
             _transform(frame_ids[index], frame_ids[index + 1], matrix, stamp)
             for index, matrix in enumerate(matrices)

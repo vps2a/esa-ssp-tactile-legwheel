@@ -601,8 +601,28 @@ depth-plane inliers, fitted plane outline, plane normal, direction-of-travel
 arrow, radially-outward arrow, and slope text.
 
 Derived TF child names start with `dataset_` so they do not compete with frames
-recorded in the original bag. Set the Foxglove 3D display frame to
-`legwheel_base`.
+recorded in the original bag. The saved packet poses are interpolated at every
+`/clock` update, so the frames move smoothly even though packet overlays only
+change when playback reaches an accepted packet.
+
+In the Foxglove 3D panel, set both **Fixed frame** and **Display frame** to
+`legwheel_base`, turn **Sync timestamps** on, and enable the `dataset_*` entries
+under **Transforms**. Frame labels can be disabled or their scale reduced if
+they obscure the axes. `dataset_theta_y_link` rotates at a fixed origin and
+`dataset_theta_p_link` shares that origin by construction; watch their axis
+orientation or the downstream `dataset_beam_end_link` and
+`dataset_camera_optical_frame` to see the translational motion clearly.
+
+If the frames are visible but do not move, confirm outside Foxglove that the
+transform changes while the bag plays:
+
+```bash
+ros2 run tf2_ros tf2_echo legwheel_base dataset_camera_optical_frame
+```
+
+The translation and rotation should update only during the dataset's analysed
+steady-motion interval. The visualization intentionally publishes no new pose
+before the first or after the last accepted packet.
 
 ## Dataset splitting
 
