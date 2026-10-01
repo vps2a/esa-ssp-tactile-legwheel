@@ -1,5 +1,6 @@
 """Stage 1 packet isolation and Stage 2 feature extraction."""
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -14,6 +15,7 @@ from legwheel_dataset.bag_reader import (
     DEPTH_IMAGE_TOPIC,
     RGB_IMAGE_TOPIC,
     BagIndex,
+    ImageMetadata,
     extract_selected_images,
     index_bag,
 )
@@ -30,6 +32,7 @@ from legwheel_dataset.images import (
     polygon_mask,
 )
 from legwheel_dataset.patch_geometry import (
+    PatchProjection,
     project_full_track_boundaries,
     project_track_patch,
 )
@@ -41,6 +44,7 @@ from legwheel_dataset.run_analysis import (
     time_weighted_mean_absolute_speed,
 )
 from legwheel_dataset.synchronization import (
+    ImagePair,
     interpolate_scalar,
     pair_image_timestamps,
     resample_channels,
@@ -55,6 +59,40 @@ from legwheel_kinematics.transforms import theta_p_from_config
 # but are deliberately excluded from packet arrays and spectral features.
 RESAMPLED_TELEMETRY_STREAM_NAMES = ("leg", "wheel", "imu")
 RESAMPLED_TELEMETRY_CHANNEL_COUNT = 15
+
+
+@dataclass(frozen=True)
+class ValidationCameraView:
+    """Everything needed to plot one midpoint camera projection."""
+
+    label: str
+    image_topic: str
+    metadata: ImageMetadata
+    calibration: CameraCalibration
+    theta_y_rad: float
+    knee_joint_rad: float
+    theta_p_rad: float
+    patch: PatchProjection
+    inner_track_pixels: np.ndarray
+    inner_track_valid: np.ndarray
+    outer_track_pixels: np.ndarray
+    outer_track_valid: np.ndarray
+    visibility_reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ValidationPreview:
+    """Midpoint RGB/depth pair selected for interactive validation."""
+
+    bag_directory: Path
+    pair: ImagePair
+    steady_midpoint_ns: int
+    steady_start_ns: int
+    steady_end_ns: int
+    patch_centre_angle_rad: float
+    travel_direction: float
+    rgb: ValidationCameraView
+    depth: ValidationCameraView
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -470,12 +508,243 @@ def _write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, default=str), encoding="utf-8")
 
 
-def validate_processing_configuration(
+def _patch_visibility_reasons(
+    projection: PatchProjection,
+    calibration: CameraCalibration,
+) -> tuple[str, ...]:
+    """Explain why a projected patch is not completely inside an image."""
+    if projection.fully_visible:
+        return ("complete_patch_visible",)
+
+    pixels = np.vstack((projection.inner_pixels, projection.outer_pixels))
+    in_front = np.concatenate((
+        projection.inner_in_front,
+        projection.outer_in_front,
+    ))
+    reasons = []
+    behind_count = int(np.count_nonzero(~in_front))
+    if behind_count:
+        reasons.append(f"{behind_count}_patch_points_behind_camera")
+
+    finite = np.all(np.isfinite(pixels), axis=1)
+    nonfinite_count = int(np.count_nonzero(~finite))
+    if nonfinite_count:
+        reasons.append(f"{nonfinite_count}_patch_points_nonfinite")
+    if np.any(finite):
+        finite_pixels = pixels[finite]
+        for name, count in (
+            ("left_of_image", np.count_nonzero(finite_pixels[:, 0] < 0.0)),
+            (
+                "right_of_image",
+                np.count_nonzero(finite_pixels[:, 0] >= calibration.width),
+            ),
+            ("above_image", np.count_nonzero(finite_pixels[:, 1] < 0.0)),
+            (
+                "below_image",
+                np.count_nonzero(finite_pixels[:, 1] >= calibration.height),
+            ),
+        ):
+            if count:
+                reasons.append(f"{int(count)}_patch_points_{name}")
+    return tuple(reasons or ["patch_projection_invalid"])
+
+
+def _camera_validation_view(
+    label: str,
+    image_topic: str,
+    metadata: ImageMetadata,
+    calibration: CameraCalibration,
+    kinematics_config: KinematicsConfig,
+    theta_y_rad: float,
+    knee_joint_rad: float,
+    patch_centre_angle_rad: float,
+    processing_config: ProcessingConfig,
+) -> ValidationCameraView:
+    """Project the track and requested patch for one camera timestamp."""
+    theta_p_rad = theta_p_from_config(knee_joint_rad, kinematics_config)
+    patch = project_track_patch(
+        kinematics_config,
+        theta_y_rad,
+        theta_p_rad,
+        patch_centre_angle_rad,
+        processing_config.alpha_sp_rad,
+        calibration,
+        processing_config.track_point_count,
+    )
+    (
+        inner_track_pixels,
+        inner_track_valid,
+        outer_track_pixels,
+        outer_track_valid,
+    ) = project_full_track_boundaries(
+        kinematics_config,
+        theta_y_rad,
+        theta_p_rad,
+        calibration,
+        processing_config.track_point_count,
+    )
+    return ValidationCameraView(
+        label=label,
+        image_topic=image_topic,
+        metadata=metadata,
+        calibration=calibration,
+        theta_y_rad=theta_y_rad,
+        knee_joint_rad=knee_joint_rad,
+        theta_p_rad=theta_p_rad,
+        patch=patch,
+        inner_track_pixels=inner_track_pixels,
+        inner_track_valid=inner_track_valid,
+        outer_track_pixels=outer_track_pixels,
+        outer_track_valid=outer_track_valid,
+        visibility_reasons=_patch_visibility_reasons(patch, calibration),
+    )
+
+
+def _build_validation_preview(
+    run_directory: Path,
+    pairs: list[ImagePair],
+    bag_index: BagIndex,
+    trajectory: CorrectedThetaTrajectory,
+    knee_times: np.ndarray,
+    knee_values: np.ndarray,
+    kinematics_config: KinematicsConfig,
+    processing_config: ProcessingConfig,
+) -> tuple[ValidationPreview | None, dict[str, Any]]:
+    """Select and project the pair nearest the steady-motion midpoint."""
+    steady_midpoint_ns = (
+        trajectory.start_time_ns + trajectory.end_time_ns
+    ) // 2
+    pair = _select_midpoint_pair(
+        pairs,
+        trajectory.start_time_ns,
+        trajectory.end_time_ns,
+    )
+    if pair is None:
+        return None, {
+            "available": False,
+            "reason": "no_synchronized_pair_inside_steady_motion_interval",
+            "steady_midpoint_ns": steady_midpoint_ns,
+        }
+
+    try:
+        theta_y_image = trajectory.theta_y_at(pair.image_time_ns)
+        patch_centre_angle_rad = (
+            theta_y_image
+            + trajectory.travel_direction * processing_config.alpha_off_rad
+        )
+        rgb_metadata = bag_index.rgb_images[pair.rgb_index]
+        depth_metadata = bag_index.depth_images[pair.depth_index]
+        rgb_calibration = _camera_inputs(
+            rgb_metadata,
+            bag_index.rgb_calibrations,
+            pair.rgb_time_ns,
+        )
+        depth_calibration = _camera_inputs(
+            depth_metadata,
+            bag_index.depth_calibrations,
+            pair.depth_time_ns,
+        )
+        rgb_view = _camera_validation_view(
+            "RGB",
+            RGB_IMAGE_TOPIC,
+            rgb_metadata,
+            rgb_calibration,
+            kinematics_config,
+            trajectory.theta_y_at(pair.rgb_time_ns),
+            interpolate_scalar(knee_times, knee_values, pair.rgb_time_ns),
+            patch_centre_angle_rad,
+            processing_config,
+        )
+        depth_view = _camera_validation_view(
+            "Depth",
+            DEPTH_IMAGE_TOPIC,
+            depth_metadata,
+            depth_calibration,
+            kinematics_config,
+            trajectory.theta_y_at(pair.depth_time_ns),
+            interpolate_scalar(knee_times, knee_values, pair.depth_time_ns),
+            patch_centre_angle_rad,
+            processing_config,
+        )
+    except (IndexError, ValueError) as error:
+        return None, {
+            "available": False,
+            "reason": f"midpoint_pair_projection_failed: {error}",
+            "steady_midpoint_ns": steady_midpoint_ns,
+            "selected_image_time_ns": pair.image_time_ns,
+        }
+
+    preview = ValidationPreview(
+        bag_directory=run_directory / "rosbag",
+        pair=pair,
+        steady_midpoint_ns=steady_midpoint_ns,
+        steady_start_ns=trajectory.start_time_ns,
+        steady_end_ns=trajectory.end_time_ns,
+        patch_centre_angle_rad=patch_centre_angle_rad,
+        travel_direction=trajectory.travel_direction,
+        rgb=rgb_view,
+        depth=depth_view,
+    )
+    summary = {
+        "available": True,
+        "selection": "synchronized_pair_closest_to_steady_motion_midpoint",
+        "steady_midpoint_ns": steady_midpoint_ns,
+        "selected_image_time_ns": pair.image_time_ns,
+        "midpoint_offset_ms": (
+            (pair.image_time_ns - steady_midpoint_ns) / 1_000_000.0
+        ),
+        "rgb_time_ns": pair.rgb_time_ns,
+        "depth_time_ns": pair.depth_time_ns,
+        "sync_error_ms": pair.sync_error_ns / 1_000_000.0,
+        "patch_centre_angle_rad": patch_centre_angle_rad,
+        "rgb": {
+            "resolution_pixels": [
+                rgb_metadata.width,
+                rgb_metadata.height,
+            ],
+            "complete_patch_visible": rgb_view.patch.fully_visible,
+            "visibility_reasons": list(rgb_view.visibility_reasons),
+        },
+        "depth": {
+            "resolution_pixels": [
+                depth_metadata.width,
+                depth_metadata.height,
+            ],
+            "complete_patch_visible": depth_view.patch.fully_visible,
+            "visibility_reasons": list(depth_view.visibility_reasons),
+        },
+    }
+    return preview, summary
+
+
+def _select_midpoint_pair(
+    pairs: list[ImagePair],
+    steady_start_ns: int,
+    steady_end_ns: int,
+) -> ImagePair | None:
+    """Return the eligible pair closest to the steady interval midpoint."""
+    steady_midpoint_ns = (steady_start_ns + steady_end_ns) // 2
+    eligible_pairs = [
+        pair for pair in pairs
+        if steady_start_ns <= pair.image_time_ns <= steady_end_ns
+    ]
+    if not eligible_pairs:
+        return None
+    return min(
+        eligible_pairs,
+        key=lambda candidate: (
+            abs(candidate.image_time_ns - steady_midpoint_ns),
+            candidate.image_time_ns,
+        ),
+    )
+
+
+def _analyse_processing_configuration(
     run_directory: Path,
     processing_config: ProcessingConfig,
     experiment_config_path: Path | None = None,
-) -> dict[str, Any]:
-    """Analyse a run and report consequences without creating a dataset."""
+) -> tuple[dict[str, Any], ValidationPreview | None]:
+    """Analyse a run and retain one midpoint pair for optional plotting."""
     run_directory = run_directory.resolve()
     processing_config.validate()
     if experiment_config_path is None:
@@ -531,6 +800,17 @@ def validate_processing_configuration(
     knee_times, knee_values = _finite_column(
         leg_times, leg_values, knee_column
     )
+    preview, preview_summary = _build_validation_preview(
+        run_directory,
+        pairs,
+        bag_index,
+        trajectory,
+        knee_times,
+        knee_values,
+        kinematics_config,
+        processing_config,
+    )
+    report["visualization_preview"] = preview_summary
     depth_pixel_counts = []
     for pair in pairs:
         if not trajectory.start_time_ns <= pair.image_time_ns <= trajectory.end_time_ns:
@@ -585,7 +865,34 @@ def validate_processing_configuration(
         and report["spectral_window_not_shorter_than_local_window"]
         and depth_pixel_counts
     )
+    return report, preview
+
+
+def validate_processing_configuration(
+    run_directory: Path,
+    processing_config: ProcessingConfig,
+    experiment_config_path: Path | None = None,
+) -> dict[str, Any]:
+    """Analyse one run without retaining optional visualization data."""
+    report, _ = _analyse_processing_configuration(
+        run_directory,
+        processing_config,
+        experiment_config_path,
+    )
     return report
+
+
+def validate_processing_configuration_with_preview(
+    run_directory: Path,
+    processing_config: ProcessingConfig,
+    experiment_config_path: Path | None = None,
+) -> tuple[dict[str, Any], ValidationPreview | None]:
+    """Analyse one run and return its midpoint visualization inputs."""
+    return _analyse_processing_configuration(
+        run_directory,
+        processing_config,
+        experiment_config_path,
+    )
 
 
 def isolate_packets(

@@ -16,6 +16,10 @@ from legwheel_dataset.features import (
 from legwheel_dataset.config import ProcessingConfig
 from legwheel_dataset.processor import extract_features
 from legwheel_dataset.processor import isolate_packets
+from legwheel_dataset.processor import (
+    _select_midpoint_pair,
+    validate_processing_configuration_with_preview,
+)
 from legwheel_dataset.bag_reader import (
     BagIndex,
     CalibrationTimeline,
@@ -24,6 +28,7 @@ from legwheel_dataset.bag_reader import (
 )
 from legwheel_kinematics.projection import CameraCalibration
 from legwheel_dataset.synchronization import (
+    ImagePair,
     pair_image_timestamps,
 )
 from legwheel_dataset.run_analysis import (
@@ -40,6 +45,22 @@ class SynchronizationTest(unittest.TestCase):
         self.assertEqual(len(pairs), 2)
         self.assertEqual(pairs[0].sync_error_ns, -4_000_000)
         self.assertEqual(pairs[1].sync_error_ns, 7_000_000)
+
+    def test_validation_pair_is_closest_to_steady_motion_midpoint(self):
+        pairs = [
+            ImagePair(0, 0, 90, 90),
+            ImagePair(1, 1, 170, 172),
+            ImagePair(2, 2, 203, 205),
+            ImagePair(3, 3, 280, 282),
+        ]
+
+        selected = _select_midpoint_pair(
+            pairs,
+            steady_start_ns=100,
+            steady_end_ns=300,
+        )
+
+        self.assertIs(selected, pairs[2])
 
     def test_stage1_builds_packet_from_indexed_sensor_data(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -182,12 +203,52 @@ class SynchronizationTest(unittest.TestCase):
                     side_effect=provide_images,
                 ),
             ):
+                validation_report, preview = (
+                    validate_processing_configuration_with_preview(
+                        run_directory,
+                        ProcessingConfig(),
+                        experiment_config_path=experiment_path,
+                    )
+                )
                 isolate_packets(
                     run_directory,
                     ProcessingConfig(),
                     experiment_config_path=experiment_path,
                     output_directory=output_directory,
                 )
+
+            self.assertIsNotNone(preview)
+            self.assertTrue(
+                validation_report["visualization_preview"]["available"]
+            )
+            self.assertEqual(
+                validation_report["visualization_preview"]["selection"],
+                "synchronized_pair_closest_to_steady_motion_midpoint",
+            )
+            from legwheel_dataset.validation_plot import (
+                create_validation_figure,
+                load_preview_images,
+            )
+
+            with patch(
+                "legwheel_dataset.validation_plot.extract_selected_images",
+                side_effect=provide_images,
+            ):
+                preview_images, preview_error = load_preview_images(preview)
+            self.assertIsNone(preview_error)
+            self.assertEqual(preview_images["rgb"].shape, (480, 640, 3))
+            self.assertEqual(preview_images["depth"].shape, (480, 640))
+
+            import matplotlib
+
+            matplotlib.use("Agg", force=True)
+            import matplotlib.pyplot as plt
+
+            figure = create_validation_figure(preview, preview_images)
+            self.assertEqual(len(figure.axes), 4)
+            self.assertIn("RGB camera window", figure.axes[0].get_title())
+            self.assertIn("Depth expanded diagnostic", figure.axes[3].get_title())
+            plt.close(figure)
 
             manifest = (output_directory / "manifest.jsonl").read_text(
                 encoding="utf-8"

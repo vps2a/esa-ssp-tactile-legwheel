@@ -491,12 +491,21 @@ field to a configuration in one of the three nearest earlier sibling runs,
 then to built-in defaults. At either value prompt, enter `-h` or `--help` for a
 short explanation. The creator validates every change, asks before atomically
 saving, and offers to analyse the result against the recording immediately.
+After printing that JSON report, it asks separately whether to open the
+blocking midpoint visualization.
 
 ```bash
 ros2 run legwheel_dataset validate_config \
   --run-directory /path/to/run_1 \
-  --processing-config /path/to/run_1/postprocess.yaml
+  --processing-config /path/to/run_1/postprocess.yaml \
+  --show-visualization
 ```
+
+The optional visualization selects the synchronized RGB/depth pair nearest the
+steady-motion midpoint. A blocking Matplotlib window shows both recorded images
+at their camera resolutions plus two expanded diagnostic views, with the full
+track, configured patch, patch centre, camera boundary and visibility reasons.
+Omit `--show-visualization` when only the JSON report is required.
 
 ```bash
 ros2 run legwheel_dataset isolate_packets \

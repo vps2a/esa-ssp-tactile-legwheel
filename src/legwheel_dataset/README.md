@@ -47,12 +47,35 @@ Inspect what a configuration will produce without writing packets:
 ```bash
 ros2 run legwheel_dataset validate_config \
   --run-directory /path/to/experiment/run_1 \
-  --processing-config /path/to/experiment/run_1/postprocess.yaml
+  --processing-config /path/to/experiment/run_1/postprocess.yaml \
+  --show-visualization
 ```
 
 The validator reports the measured source rates, calculated local-window
 duration, spectral Nyquist frequency and bin spacing, and an estimate of the
-number of depth pixels in a fully visible patch.
+number of depth pixels in a fully visible patch. `--show-visualization` is
+optional; without it the command only prints JSON.
+
+When requested, the validator selects the synchronized RGB/depth pair closest
+to the temporal midpoint of the steady-motion interval. It then loads those two
+recorded images and opens a blocking Matplotlib window with four panels:
+
+- the RGB and depth images at their actual pixel resolutions;
+- an expanded RGB diagnostic and an expanded depth diagnostic that include
+  projected points outside the camera boundary.
+
+Each panel shows the inner and outer circular tracks, configured patch polygon,
+patch centre and camera boundary. Titles and annotations report complete-patch
+visibility, rejection reasons, sensor timestamps, knee angle, `theta_y` and
+`theta_p`. The expanded views are intentionally allowed to extend beyond the
+camera resolution; this makes an off-screen patch visible instead of clipping
+the evidence needed to correct its configuration.
+
+The JSON always prints before the window opens. If no synchronized pair can be
+projected, the command keeps the JSON result and prints a yellow terminal
+warning instead of opening an empty figure. The interactive `create_config`
+workflow asks a separate question about opening this visualization after it
+prints the validation report.
 
 ### Interactive configuration creator
 
@@ -81,7 +104,8 @@ timestamp without prompting, plus short comments for every editable setting.
 The production configuration loader validates the timestamp but excludes it
 from algorithm settings and the dataset hash. After saving, the script asks
 whether to run the same recording-aware analysis as `validate_config` and
-prints its JSON report if accepted.
+prints its JSON report if accepted. It then asks a separate question before
+opening the blocking Matplotlib visualization.
 
 ## Required input
 

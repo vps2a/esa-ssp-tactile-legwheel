@@ -1,6 +1,7 @@
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from legwheel_dataset.config import ProcessingConfig
 from legwheel_dataset.config_creator import (
@@ -179,6 +180,40 @@ class ConfigCreatorTest(unittest.TestCase):
 
             self.assertIsNone(saved_path)
             self.assertEqual(config_path.read_text(encoding="utf-8"), original)
+
+    def test_validation_report_is_followed_by_separate_visualization_question(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            run_directory = Path(temporary_directory) / "run_1"
+            run_directory.mkdir()
+            editable_count = len(ProcessingConfig().to_dict()) - 1
+            responses = iter(
+                ["n"] * editable_count
+                + ["", "y", "y"]
+            )
+            output = []
+            preview = object()
+            report = {"visualization_preview": {"available": True}}
+
+            with (
+                patch(
+                    "legwheel_dataset.processor."
+                    "validate_processing_configuration_with_preview",
+                    return_value=(report, preview),
+                ) as validate,
+                patch(
+                    "legwheel_dataset.validation_plot.show_validation_preview",
+                    return_value=(True, None),
+                ) as show,
+            ):
+                create_config(
+                    run_directory,
+                    input_function=lambda _prompt: next(responses),
+                    output=output.append,
+                )
+
+            validate.assert_called_once()
+            show.assert_called_once_with(preview)
+            self.assertTrue(any("visualization_preview" in line for line in output))
 
 
 if __name__ == "__main__":

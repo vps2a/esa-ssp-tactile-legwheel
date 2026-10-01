@@ -377,12 +377,37 @@ def create_config(
         input_function,
         output,
     ):
-        from legwheel_dataset.processor import validate_processing_configuration
+        from legwheel_dataset.processor import (
+            validate_processing_configuration_with_preview,
+        )
 
-        report = validate_processing_configuration(
+        report, preview = validate_processing_configuration_with_preview(
             run_directory, saved_config
         )
         output(json.dumps(report, indent=2))
+        if _ask_yes_no(
+            "Open the midpoint track visualization now? [y/N]: ",
+            False,
+            input_function,
+            output,
+        ):
+            if preview is None:
+                reason = report["visualization_preview"]["reason"]
+                output(
+                    "\033[33mWarning: Skipping visualization because "
+                    f"{reason}.\033[0m"
+                )
+            else:
+                from legwheel_dataset.validation_plot import (
+                    show_validation_preview,
+                )
+
+                shown, reason = show_validation_preview(preview)
+                if not shown:
+                    output(
+                        "\033[33mWarning: Skipping visualization because "
+                        f"{reason}.\033[0m"
+                    )
     return config_path
 
 

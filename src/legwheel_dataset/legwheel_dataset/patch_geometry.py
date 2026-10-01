@@ -24,6 +24,10 @@ class PatchProjection:
     outer_points_base_m: FloatArray
     inner_pixels: FloatArray
     outer_pixels: FloatArray
+    inner_in_front: BoolArray
+    outer_in_front: BoolArray
+    inner_valid: BoolArray
+    outer_valid: BoolArray
     polygon_pixels: FloatArray
     fully_visible: bool
     T_camera_in_base: FloatArray
@@ -102,12 +106,14 @@ def project_track_patch(
     inner_points = _points_at_angles(inner_radius_m, angles)
     outer_points = _points_at_angles(outer_radius_m, angles)
     T_camera = camera_pose_in_base(config, theta_y, theta_p)
+    inner_camera_points = _to_camera(inner_points, T_camera)
+    outer_camera_points = _to_camera(outer_points, T_camera)
     inner_pixels, inner_valid = project_camera_points(
-        _to_camera(inner_points, T_camera),
+        inner_camera_points,
         calibration,
     )
     outer_pixels, outer_valid = project_camera_points(
-        _to_camera(outer_points, T_camera),
+        outer_camera_points,
         calibration,
     )
     fully_visible = bool(np.all(inner_valid) and np.all(outer_valid))
@@ -118,6 +124,10 @@ def project_track_patch(
         outer_points_base_m=outer_points,
         inner_pixels=inner_pixels,
         outer_pixels=outer_pixels,
+        inner_in_front=inner_camera_points[:, 2] > 0.0,
+        outer_in_front=outer_camera_points[:, 2] > 0.0,
+        inner_valid=inner_valid,
+        outer_valid=outer_valid,
         polygon_pixels=polygon,
         fully_visible=fully_visible,
         T_camera_in_base=T_camera,

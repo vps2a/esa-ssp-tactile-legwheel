@@ -8,6 +8,7 @@ from legwheel_dataset.processor import (
     extract_features,
     isolate_packets,
     validate_processing_configuration,
+    validate_processing_configuration_with_preview,
 )
 
 
@@ -78,11 +79,49 @@ def validate_config_main(args=None) -> None:
     parser.add_argument("--run-directory", type=Path, required=True)
     parser.add_argument("--experiment-config", type=Path)
     parser.add_argument("--processing-config", type=Path)
+    parser.add_argument(
+        "--show-visualization",
+        "--show-visualisation",
+        action="store_true",
+        help=(
+            "Open a blocking midpoint RGB/depth track diagnostic after printing "
+            "the JSON report."
+        ),
+    )
     options = parser.parse_args(args)
     config = ProcessingConfig.from_yaml(options.processing_config)
-    report = validate_processing_configuration(
-        options.run_directory,
-        config,
-        options.experiment_config,
-    )
-    print(json.dumps(report, indent=2))
+    if options.show_visualization:
+        report, preview = validate_processing_configuration_with_preview(
+            options.run_directory,
+            config,
+            options.experiment_config,
+        )
+    else:
+        report = validate_processing_configuration(
+            options.run_directory,
+            config,
+            options.experiment_config,
+        )
+        preview = None
+    print(json.dumps(report, indent=2), flush=True)
+    if options.show_visualization:
+        if preview is None:
+            reason = report["visualization_preview"]["reason"]
+            _print_yellow_warning(
+                f"Skipping visualization because {reason}."
+            )
+        else:
+            from legwheel_dataset.validation_plot import show_validation_preview
+
+            shown, reason = show_validation_preview(preview)
+            if not shown:
+                _print_yellow_warning(
+                    f"Skipping visualization because {reason}."
+                )
+
+
+def _print_yellow_warning(message: str) -> None:
+    """Write a conspicuous warning without contaminating JSON stdout."""
+    import sys
+
+    print(f"\033[33mWarning: {message}\033[0m", file=sys.stderr)
