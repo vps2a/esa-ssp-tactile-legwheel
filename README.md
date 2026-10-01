@@ -481,15 +481,27 @@ Validate the configuration against the actual recorded rates and camera view
 before creating a dataset:
 
 ```bash
+ros2 run legwheel_dataset create_config \
+  --run-directory /path/to/run_1
+```
+
+The interactive creator writes `/path/to/run_1/postprocess.yaml`. It starts
+with values from that file when it already exists, otherwise falls back per
+field to a configuration in one of the three nearest earlier sibling runs,
+then to built-in defaults. At either value prompt, enter `-h` or `--help` for a
+short explanation. The creator validates every change, asks before atomically
+saving, and offers to analyse the result against the recording immediately.
+
+```bash
 ros2 run legwheel_dataset validate_config \
   --run-directory /path/to/run_1 \
-  --processing-config /path/to/postprocess.yaml
+  --processing-config /path/to/run_1/postprocess.yaml
 ```
 
 ```bash
 ros2 run legwheel_dataset isolate_packets \
   --run-directory /path/to/run_1 \
-  --processing-config /path/to/postprocess.yaml
+  --processing-config /path/to/run_1/postprocess.yaml
 ```
 
 Run Stage 2 on the directory printed by Stage 1:
@@ -504,7 +516,7 @@ Or run both stages together:
 ```bash
 ros2 run legwheel_dataset build_dataset \
   --run-directory /path/to/run_1 \
-  --processing-config /path/to/postprocess.yaml
+  --processing-config /path/to/run_1/postprocess.yaml
 ```
 
 Algorithm settings can be overridden with `--processing-config`; the complete

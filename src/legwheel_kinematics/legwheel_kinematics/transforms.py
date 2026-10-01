@@ -33,9 +33,10 @@ def calculate_theta_p(
 ) -> float:
     """Calculate theta_p from the measured knee joint angle.
 
-    The equation is the rig-specific relationship supplied for this mechanism.
-    It is kept in one function so its physical convention can be tested without
-    requiring ROS messages or a rosbag.
+    The arcsine magnitude is the rig-specific relationship supplied for this
+    mechanism. The returned value is negated because the measured positive
+    physical direction is opposite to the notebook/TF ``theta_p`` frame axis.
+    Keeping the conversion here lets that convention be tested without ROS.
     """
     leg_length_squared = (
         hip_link_length_m**2

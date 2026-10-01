@@ -16,12 +16,19 @@ The package performs two processing stages:
 
 ## Commands
 
+Create or update the run's post-processing configuration interactively:
+
+```bash
+ros2 run legwheel_dataset create_config \
+  --run-directory /path/to/experiment/run_1
+```
+
 Build both stages:
 
 ```bash
 ros2 run legwheel_dataset build_dataset \
   --run-directory /path/to/experiment/run_1 \
-  --processing-config /path/to/postprocess.yaml
+  --processing-config /path/to/experiment/run_1/postprocess.yaml
 ```
 
 Run the stages separately:
@@ -29,7 +36,7 @@ Run the stages separately:
 ```bash
 ros2 run legwheel_dataset isolate_packets \
   --run-directory /path/to/experiment/run_1 \
-  --processing-config /path/to/postprocess.yaml
+  --processing-config /path/to/experiment/run_1/postprocess.yaml
 
 ros2 run legwheel_dataset extract_features \
   --dataset /path/to/experiment/run_1/derived/CONFIGURATION_HASH
@@ -40,12 +47,41 @@ Inspect what a configuration will produce without writing packets:
 ```bash
 ros2 run legwheel_dataset validate_config \
   --run-directory /path/to/experiment/run_1 \
-  --processing-config /path/to/postprocess.yaml
+  --processing-config /path/to/experiment/run_1/postprocess.yaml
 ```
 
 The validator reports the measured source rates, calculated local-window
 duration, spectral Nyquist frequency and bin spacing, and an estimate of the
 number of depth pixels in a fully visible patch.
+
+### Interactive configuration creator
+
+`create_config` writes `RUN_DIRECTORY/postprocess.yaml`. For each algorithm
+setting it shows the selected value and asks whether to change it. Enter `-h`
+or `--help` either at that yes/no question or at the new-value prompt to see a
+short explanation of the setting and its effect. Pressing Enter at the change
+question keeps the displayed value.
+
+Values are selected independently in this order:
+
+1. the current run's existing `postprocess.yaml`;
+2. a `postprocess.yaml` found in the three nearest lower-numbered sibling
+   `run_N` directories, searched newest first;
+3. the built-in default.
+
+This field-by-field fallback means a partial current or previous file remains
+useful. Missing or invalid fields fall through to the next source and produce a
+terminal warning. The script shows the complete result and asks before saving.
+Replacing an existing file requires explicit confirmation and uses an atomic
+filesystem replacement, so an interrupted write cannot leave a partial YAML
+file.
+
+Generated files contain `schema_version` and a timezone-aware `created_utc`
+timestamp without prompting, plus short comments for every editable setting.
+The production configuration loader validates the timestamp but excludes it
+from algorithm settings and the dataset hash. After saving, the script asks
+whether to run the same recording-aware analysis as `validate_config` and
+prints its JSON report if accepted.
 
 ## Required input
 
@@ -438,6 +474,10 @@ plane_ransac_iterations: 200
 plane_inlier_threshold_m: 0.005
 minimum_spectral_valid_fraction: 0.8
 ```
+
+An interactively generated file additionally contains a quoted `created_utc`
+ISO 8601 timestamp. This is file metadata, not an algorithm input, and therefore
+does not change a derived dataset's configuration hash.
 
 `alpha_off_rad` and `alpha_sp_rad` are initial processing defaults, not measured
 rig constants. Validate them against the actual camera view and desired physical

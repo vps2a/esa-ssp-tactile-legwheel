@@ -61,7 +61,9 @@ class SynchronizationTest(unittest.TestCase):
                         "camera_config": {
                             "camera_beam_offset_m": -0.043,
                             "camera_height_m": 0.029,
-                            "camera_front_angle_deg": 40.0,
+                            # Keep the synthetic patch completely in frame so
+                            # this test exercises packet writing, not rejection.
+                            "camera_front_angle_deg": 60.0,
                         }
                     }
                 },

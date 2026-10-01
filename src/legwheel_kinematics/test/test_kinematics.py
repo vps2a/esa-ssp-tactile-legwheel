@@ -115,7 +115,7 @@ class KinematicsTest(unittest.TestCase):
         np.testing.assert_allclose(recovered, rotation, atol=1e-12)
         self.assertAlmostEqual(x * x + y * y + z * z + w * w, 1.0)
 
-    def test_theta_p_uses_supplied_rig_equation(self):
+    def test_theta_p_uses_measured_frame_sign_convention(self):
         knee_joint = 1.0
         expected_argument = (
             100.0 / 1000.0
@@ -126,7 +126,9 @@ class KinematicsTest(unittest.TestCase):
         )
         self.assertAlmostEqual(
             calculate_theta_p(knee_joint, 100.0, 0.2, 0.2, 0.353),
-            math.asin(expected_argument),
+            # The physical magnitude follows the supplied equation. The
+            # notebook/TF theta_p axis is opposite to that positive direction.
+            -math.asin(expected_argument),
         )
 
     def test_theta_p_rejects_impossible_arcsin_input(self):

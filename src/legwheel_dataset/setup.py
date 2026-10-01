@@ -34,6 +34,7 @@ setup(
             "isolate_packets = legwheel_dataset.cli:isolate_packets_main",
             "extract_features = legwheel_dataset.cli:extract_features_main",
             "build_dataset = legwheel_dataset.cli:build_dataset_main",
+            "create_config = legwheel_dataset.config_creator:main",
             "validate_config = legwheel_dataset.cli:validate_config_main",
             "visualise_stream = legwheel_dataset.visualization:main",
         ],

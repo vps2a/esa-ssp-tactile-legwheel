@@ -1,21 +1,34 @@
 schema_version: "2.0"
+# Maximum RGB/depth timestamp separation in milliseconds.
 rgb_depth_max_delta_ms: 10.0
+# Duration of telemetry used for each FFT in milliseconds.
 spectral_window_ms: 1000.0
+# Common sampling frequency for all 17 telemetry channels in hertz.
 telemetry_resample_hz: 100.0
+# Largest source-data gap that interpolation may bridge.
 maximum_interpolation_gap_ms: 50.0
+# Maximum rate at which synchronized packets may be saved.
 maximum_packet_saving_frequency_hz: 10.0
-# Positive angular distance ahead of the camera/beam position. The processor
-# applies the measured direction of travel.
+# Positive angular distance from the camera to the patch centre.
 alpha_off_rad: 0.35
-# Angular width of the terrain patch.
+# Full angular width of the selected terrain patch.
 alpha_sp_rad: 0.10
-# TODO: Estimate the effective grouser-height radius correction experimentally.
+# Effective grouser height added to wheel radius in metres.
+# TODO: Estimate this radius correction experimentally.
 grouser_effective_height_m: 0.0
+# Minimum requested-torque fraction defining the steady run.
 minimum_target_torque_fraction: 0.90
+# Allowed fractional margin above each measured telemetry rate.
 source_rate_tolerance_fraction: 0.05
+# Number of samples around each full circular track boundary.
 track_point_count: 360
+# Metres represented by one integer depth-image unit.
 depth_scale_m: 0.001
+# Minimum depth points and RANSAC inliers required for a plane.
 minimum_plane_points: 40
+# Number of random plane candidates tested by RANSAC.
 plane_ransac_iterations: 200
+# Maximum point-to-plane distance for a RANSAC inlier in metres.
 plane_inlier_threshold_m: 0.005
+# Minimum valid FFT-channel fraction required for spectral analysis.
 minimum_spectral_valid_fraction: 0.8
