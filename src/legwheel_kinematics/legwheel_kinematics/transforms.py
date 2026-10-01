@@ -63,7 +63,7 @@ def calculate_theta_p(
             "theta_p is undefined because its arcsin argument is outside "
             f"[-1, 1]: {arcsin_argument}"
         )
-    return math.asin(arcsin_argument)
+    return -math.asin(arcsin_argument)
 
 
 def theta_p_from_config(knee_joint: float, config: KinematicsConfig) -> float:
