@@ -18,6 +18,8 @@ IMU_TOPIC = "/legwheel_rgbd/gyro_accel/sample"
 LEG_STATE_TOPIC = "/legwheel/joint_states"
 WHEEL_STATE_TOPIC = "/wheel/wheel_state"
 ROTATION_STATE_TOPIC = "/rotation_encoder/joint_state"
+ROTATION_TICKS_TOPIC = "/rotation_encoder/ticks"
+REQUESTED_TORQUE_TOPIC = "/wheel/requested_torque"
 
 INDEX_TOPICS = {
     RGB_IMAGE_TOPIC,
@@ -28,6 +30,8 @@ INDEX_TOPICS = {
     LEG_STATE_TOPIC,
     WHEEL_STATE_TOPIC,
     ROTATION_STATE_TOPIC,
+    ROTATION_TICKS_TOPIC,
+    REQUESTED_TORQUE_TOPIC,
 }
 
 
@@ -49,6 +53,7 @@ class ImageMetadata:
     width: int
     height: int
     encoding: str
+    frame_id: str = ""
 
 
 @dataclass
@@ -87,8 +92,14 @@ class CalibrationTimeline:
 
     times_ns: list[int] = field(default_factory=list)
     calibrations: list[CameraCalibration] = field(default_factory=list)
+    frame_ids: list[str] = field(default_factory=list)
 
-    def append(self, timestamp_ns: int, calibration: CameraCalibration) -> None:
+    def append(
+        self,
+        timestamp_ns: int,
+        calibration: CameraCalibration,
+        frame_id: str = "",
+    ) -> None:
         if self.calibrations:
             previous = self.calibrations[-1]
             unchanged = (
@@ -97,11 +108,13 @@ class CalibrationTimeline:
                 and previous.distortion_model == calibration.distortion_model
                 and np.array_equal(previous.K, calibration.K)
                 and np.array_equal(previous.D, calibration.D)
+                and self.frame_ids[-1] == str(frame_id)
             )
             if unchanged:
                 return
         self.times_ns.append(int(timestamp_ns))
         self.calibrations.append(calibration)
+        self.frame_ids.append(str(frame_id))
 
     def at(self, timestamp_ns: int) -> CameraCalibration:
         if not self.times_ns:
@@ -112,6 +125,15 @@ class CalibrationTimeline:
             # image. It is safe to use that first epoch when no earlier one exists.
             index = 0
         return self.calibrations[index]
+
+    def frame_id_at(self, timestamp_ns: int) -> str:
+        """Return the frame associated with the selected calibration epoch."""
+        if not self.times_ns:
+            raise ValueError("No CameraInfo messages were recorded.")
+        index = int(np.searchsorted(self.times_ns, timestamp_ns, side="right")) - 1
+        if index < 0:
+            index = 0
+        return self.frame_ids[index]
 
 
 @dataclass
@@ -185,7 +207,9 @@ def index_bag(bag_directory: Path) -> BagIndex:
     message_types = _message_types(reader)
     missing = INDEX_TOPICS - set(message_types)
     if missing:
-        raise ValueError("Bag is missing required topics: " + ", ".join(sorted(missing)))
+        raise ValueError(
+            "Bag is missing required topics: " + ", ".join(sorted(missing))
+        )
 
     leg_names = ("hip_joint", "knee_joint")
     leg_channels = tuple(
@@ -216,6 +240,8 @@ def index_bag(bag_directory: Path) -> BagIndex:
                     "imu.linear_acceleration.z",
                 )
             ),
+            "ticks": TelemetrySeries(("rotation_encoder.ticks",)),
+            "torque_command": TelemetrySeries(("wheel.requested_torque",)),
         }
     )
 
@@ -232,6 +258,7 @@ def index_bag(bag_directory: Path) -> BagIndex:
                     int(message.width),
                     int(message.height),
                     str(message.encoding),
+                    str(message.header.frame_id),
                 )
             )
         elif topic == DEPTH_IMAGE_TOPIC:
@@ -241,17 +268,20 @@ def index_bag(bag_directory: Path) -> BagIndex:
                     int(message.width),
                     int(message.height),
                     str(message.encoding),
+                    str(message.header.frame_id),
                 )
             )
         elif topic == RGB_INFO_TOPIC:
             index.rgb_calibrations.append(
                 timestamp_ns,
                 CameraCalibration.from_message(message),
+                str(message.header.frame_id),
             )
         elif topic == DEPTH_INFO_TOPIC:
             index.depth_calibrations.append(
                 timestamp_ns,
                 CameraCalibration.from_message(message),
+                str(message.header.frame_id),
             )
         elif topic == LEG_STATE_TOPIC:
             index.streams["leg"].append(
@@ -270,6 +300,16 @@ def index_bag(bag_directory: Path) -> BagIndex:
                     _joint_value(message, "rotation_joint", "position"),
                     _joint_value(message, "rotation_joint", "velocity"),
                 ],
+            )
+        elif topic == ROTATION_TICKS_TOPIC:
+            index.streams["ticks"].append(
+                timestamp_ns,
+                [float(message.data)],
+            )
+        elif topic == REQUESTED_TORQUE_TOPIC:
+            index.streams["torque_command"].append(
+                timestamp_ns,
+                [float(message.data)],
             )
         elif topic == IMU_TOPIC:
             index.streams["imu"].append(

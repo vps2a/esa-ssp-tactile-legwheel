@@ -93,64 +93,6 @@ def interpolate_scalar(
     return float(values[left] + fraction * (values[right] - values[left]))
 
 
-def find_future_crossing_time(
-    times_ns: IntArray,
-    unwrapped_angles: FloatArray,
-    image_time_ns: int,
-    angle_offset_rad: float,
-) -> tuple[int, float]:
-    """Find when the rig reaches the visible patch midpoint.
-
-    The returned direction is +1 or -1. A patch which lies behind the measured
-    direction of travel is rejected instead of silently selecting another lap.
-    """
-    times_ns = np.asarray(times_ns, dtype=np.int64)
-    unwrapped_angles = np.asarray(unwrapped_angles, dtype=float)
-    current_angle = interpolate_scalar(
-        times_ns,
-        unwrapped_angles,
-        image_time_ns,
-    )
-    right = int(np.searchsorted(times_ns, image_time_ns, side="right"))
-    if right >= times_ns.size:
-        raise ValueError("No encoder samples exist after the image time.")
-
-    direction = 0.0
-    for future_angle in unwrapped_angles[right:]:
-        future_change = float(future_angle - current_angle)
-        if abs(future_change) > 1e-12:
-            direction = float(np.sign(future_change))
-            break
-    if direction == 0.0:
-        raise ValueError("Cannot determine the direction of travel.")
-    if angle_offset_rad * direction <= 0.0:
-        raise ValueError("The visible track midpoint lies behind the wheel.")
-
-    target_angle = current_angle + angle_offset_rad
-    previous_time = image_time_ns
-    previous_angle = current_angle
-    for index in range(right, times_ns.size):
-        current_time = int(times_ns[index])
-        current_sample = float(unwrapped_angles[index])
-        crossed = (
-            current_sample >= target_angle
-            if direction > 0.0
-            else current_sample <= target_angle
-        )
-        if crossed:
-            delta = current_sample - previous_angle
-            if delta == 0.0:
-                return current_time, direction
-            fraction = (target_angle - previous_angle) / delta
-            crossing_time = previous_time + fraction * (
-                current_time - previous_time
-            )
-            return int(round(crossing_time)), direction
-        previous_time = current_time
-        previous_angle = current_sample
-    raise ValueError("The wheel never reaches the visible patch in this bag.")
-
-
 def resample_channels(
     source_times_ns: IntArray,
     source_values: FloatArray,

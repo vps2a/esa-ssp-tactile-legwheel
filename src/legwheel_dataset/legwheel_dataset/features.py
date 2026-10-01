@@ -92,24 +92,32 @@ def fit_plane_ransac(
 
 def slope_from_plane(
     normal: FloatArray,
-    midpoint_angle_rad: float,
+    patch_centre_angle_rad: float,
     travel_direction: float,
 ) -> tuple[float, float]:
-    """Return signed along-track and cross-track slopes in radians."""
+    """Return travel-direction and radially-outward slopes in radians."""
     normal = np.asarray(normal, dtype=float)
     direction = 1.0 if travel_direction >= 0.0 else -1.0
     travel = direction * np.array(
         [
-            -math.sin(midpoint_angle_rad),
-            math.cos(midpoint_angle_rad),
+            -math.sin(patch_centre_angle_rad),
+            math.cos(patch_centre_angle_rad),
             0.0,
         ]
     )
-    cross_track = np.array([-travel[1], travel[0], 0.0])
+    # Cross-slope is deliberately independent of travel direction: positive
+    # means that the fitted terrain rises radially away from the rig centre.
+    radial_outward = np.array(
+        [
+            math.cos(patch_centre_angle_rad),
+            math.sin(patch_centre_angle_rad),
+            0.0,
+        ]
+    )
     up_component = float(normal[2])
     along_slope = math.atan2(-float(np.dot(normal, travel)), up_component)
     cross_slope = math.atan2(
-        -float(np.dot(normal, cross_track)),
+        -float(np.dot(normal, radial_outward)),
         up_component,
     )
     return along_slope, cross_slope
@@ -120,8 +128,9 @@ def calculate_spectra(
     valid: NDArray[np.bool_],
     rate_hz: float,
     minimum_valid_fraction: float,
-) -> tuple[FloatArray, FloatArray, FloatArray]:
-    """Calculate Hann-windowed one-sided power spectra per telemetry channel."""
+    maximum_interpolation_gap_ms: float,
+) -> tuple[FloatArray, FloatArray, FloatArray, FloatArray]:
+    """Calculate spectra and the two strongest distinct non-DC local peaks."""
     telemetry = np.asarray(telemetry, dtype=float)
     valid = np.asarray(valid, dtype=bool) & np.isfinite(telemetry)
     if telemetry.ndim != 2 or valid.shape != telemetry.shape:
@@ -130,7 +139,8 @@ def calculate_spectra(
     sample_count, channel_count = telemetry.shape
     frequencies_hz = np.fft.rfftfreq(sample_count, d=1.0 / rate_hz)
     power = np.full((frequencies_hz.size, channel_count), np.nan)
-    dominant_frequency_hz = np.full(channel_count, np.nan)
+    dominant_frequency_hz = np.full((2, channel_count), np.nan)
+    dominant_power = np.full((2, channel_count), np.nan)
     sample_positions = np.arange(sample_count, dtype=float)
     window = np.hanning(sample_count)
     window_energy = float(np.sum(window**2))
@@ -139,12 +149,40 @@ def calculate_spectra(
         channel_valid = valid[:, channel]
         if np.mean(channel_valid) < minimum_valid_fraction:
             continue
+        # Never extrapolate at either edge. Only short internal missing runs
+        # may be filled; long sensor dropouts remain invalid even when the
+        # overall channel happens to exceed the minimum valid fraction.
+        if not channel_valid[0] or not channel_valid[-1]:
+            continue
         values = telemetry[:, channel]
-        filled = np.interp(
-            sample_positions,
-            sample_positions[channel_valid],
-            values[channel_valid],
+        filled = values.copy()
+        maximum_missing_samples = int(
+            math.floor(maximum_interpolation_gap_ms * rate_hz / 1000.0)
         )
+        invalid_indices = np.flatnonzero(~channel_valid)
+        if invalid_indices.size:
+            run_start = 0
+            while run_start < invalid_indices.size:
+                run_end = run_start + 1
+                while (
+                    run_end < invalid_indices.size
+                    and invalid_indices[run_end] == invalid_indices[run_end - 1] + 1
+                ):
+                    run_end += 1
+                missing = invalid_indices[run_start:run_end]
+                if missing.size > maximum_missing_samples:
+                    break
+                left = int(missing[0]) - 1
+                right = int(missing[-1]) + 1
+                filled[missing] = np.interp(
+                    missing.astype(float),
+                    np.asarray([left, right], dtype=float),
+                    np.asarray([filled[left], filled[right]], dtype=float),
+                )
+                channel_valid[missing] = True
+                run_start = run_end
+        if not np.all(channel_valid):
+            continue
         slope, intercept = np.polyfit(sample_positions, filled, 1)
         detrended = filled - (slope * sample_positions + intercept)
         spectrum = np.fft.rfft(detrended * window)
@@ -153,6 +191,21 @@ def calculate_spectra(
             channel_power[1:-1] *= 2.0
         power[:, channel] = channel_power
         if channel_power.size > 1:
-            dominant_index = 1 + int(np.argmax(channel_power[1:]))
-            dominant_frequency_hz[channel] = frequencies_hz[dominant_index]
-    return frequencies_hz, power, dominant_frequency_hz
+            candidates = []
+            for index in range(1, channel_power.size):
+                left_power = channel_power[index - 1]
+                right_power = (
+                    channel_power[index + 1]
+                    if index + 1 < channel_power.size
+                    else -math.inf
+                )
+                if (
+                    channel_power[index] > left_power
+                    and channel_power[index] >= right_power
+                ):
+                    candidates.append(index)
+            candidates.sort(key=lambda index: channel_power[index], reverse=True)
+            for peak_rank, peak_index in enumerate(candidates[:2]):
+                dominant_frequency_hz[peak_rank, channel] = frequencies_hz[peak_index]
+                dominant_power[peak_rank, channel] = channel_power[peak_index]
+    return frequencies_hz, power, dominant_frequency_hz, dominant_power

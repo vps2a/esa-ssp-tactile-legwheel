@@ -4,7 +4,11 @@ import argparse
 from pathlib import Path
 
 from legwheel_dataset.config import ProcessingConfig
-from legwheel_dataset.processor import extract_features, isolate_packets
+from legwheel_dataset.processor import (
+    extract_features,
+    isolate_packets,
+    validate_processing_configuration,
+)
 
 
 def _stage1_parser(description: str) -> argparse.ArgumentParser:
@@ -60,3 +64,25 @@ def build_dataset_main(args=None) -> None:
     )
     extract_features(output, config)
     print(f"Complete dataset written to {output}")
+
+
+def validate_config_main(args=None) -> None:
+    """Explain a processing configuration without writing packet data."""
+    import json
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Validate LegWheel post-processing settings against one recorded run."
+        )
+    )
+    parser.add_argument("--run-directory", type=Path, required=True)
+    parser.add_argument("--experiment-config", type=Path)
+    parser.add_argument("--processing-config", type=Path)
+    options = parser.parse_args(args)
+    config = ProcessingConfig.from_yaml(options.processing_config)
+    report = validate_processing_configuration(
+        options.run_directory,
+        config,
+        options.experiment_config,
+    )
+    print(json.dumps(report, indent=2))

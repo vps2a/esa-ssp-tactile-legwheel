@@ -1,5 +1,7 @@
 """ROS image decoding, polygon masking, and depth point reconstruction."""
 
+from dataclasses import dataclass
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -11,6 +13,16 @@ from legwheel_kinematics.projection import (
 
 FloatArray = NDArray[np.float64]
 BoolArray = NDArray[np.bool_]
+
+
+@dataclass(frozen=True)
+class DepthPointMap:
+    """Metric depth samples with both source pixels and base-frame positions."""
+
+    points_base_m: FloatArray
+    pixel_uv: FloatArray
+    depth_m: FloatArray
+    valid_depth_fraction: float
 
 
 _ENCODINGS = {
@@ -92,7 +104,7 @@ def polygon_mask(
         intersection_u = x1 + (v_grid - y1) * (x2 - x1) / denominator
         inside ^= crosses_row & (u_grid < intersection_u)
         previous = current
-    mask[min_v : max_v + 1, min_u : max_u + 1] = inside
+    mask[min_v:max_v + 1, min_u:max_u + 1] = inside
     return mask
 
 
@@ -119,6 +131,24 @@ def depth_points_in_base(
     depth_scale_m: float,
     T_cam: FloatArray,
 ) -> tuple[FloatArray, float]:
+    """Backward-compatible wrapper returning only points and valid fraction."""
+    point_map = depth_point_map_in_base(
+        depth_image,
+        mask,
+        calibration,
+        depth_scale_m,
+        T_cam,
+    )
+    return point_map.points_base_m, point_map.valid_depth_fraction
+
+
+def depth_point_map_in_base(
+    depth_image: NDArray,
+    mask: BoolArray,
+    calibration: CameraCalibration,
+    depth_scale_m: float,
+    T_cam: FloatArray,
+) -> DepthPointMap:
     """Map valid masked depth pixels into the rig base coordinate frame."""
     if depth_image.ndim != 2:
         raise ValueError("Depth image must contain one scalar channel.")
@@ -136,7 +166,12 @@ def depth_points_in_base(
     )
     rows, columns = np.nonzero(valid_depth)
     if rows.size == 0:
-        return np.empty((0, 3), dtype=float), valid_fraction
+        return DepthPointMap(
+            points_base_m=np.empty((0, 3), dtype=float),
+            pixel_uv=np.empty((0, 2), dtype=float),
+            depth_m=np.empty(0, dtype=float),
+            valid_depth_fraction=valid_fraction,
+        )
 
     pixels = np.column_stack((columns.astype(float), rows.astype(float)))
     normalized = undistort_pixels(pixels, calibration)
@@ -152,4 +187,9 @@ def depth_points_in_base(
         (points_camera, np.ones(points_camera.shape[0]))
     )
     points_base = (np.asarray(T_cam, dtype=float) @ homogeneous.T).T[:, :3]
-    return points_base, valid_fraction
+    return DepthPointMap(
+        points_base_m=points_base,
+        pixel_uv=pixels,
+        depth_m=depths,
+        valid_depth_fraction=valid_fraction,
+    )

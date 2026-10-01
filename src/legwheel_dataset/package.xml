@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>legwheel_dataset</name>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
   <description>Offline MCAP to machine-learning dataset processing.</description>
   <maintainer email="f.szczebak@gmail.com">Filip Szczebak</maintainer>
   <license>TODO</license>
@@ -11,7 +11,13 @@
   <depend>rclpy</depend>
   <depend>rosbag2_py</depend>
   <depend>rosidl_runtime_py</depend>
+  <depend>builtin_interfaces</depend>
   <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>rosgraph_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <exec_depend>tf2_ros_py</exec_depend>
   <exec_depend>rosbag2_storage_mcap</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-yaml</exec_depend>

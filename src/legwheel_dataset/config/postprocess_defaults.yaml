@@ -1,12 +1,21 @@
-schema_version: "1.0"
+schema_version: "2.0"
 rgb_depth_max_delta_ms: 10.0
-local_window_ms: 100.0
 spectral_window_ms: 1000.0
 telemetry_resample_hz: 100.0
 maximum_interpolation_gap_ms: 50.0
+maximum_packet_saving_frequency_hz: 10.0
+# Positive angular distance ahead of the camera/beam position. The processor
+# applies the measured direction of travel.
+alpha_off_rad: 0.35
+# Angular width of the terrain patch.
+alpha_sp_rad: 0.10
+# TODO: Estimate the effective grouser-height radius correction experimentally.
+grouser_effective_height_m: 0.0
+minimum_target_torque_fraction: 0.90
+source_rate_tolerance_fraction: 0.05
 track_point_count: 360
 depth_scale_m: 0.001
-minimum_plane_points: 100
+minimum_plane_points: 40
 plane_ransac_iterations: 200
 plane_inlier_threshold_m: 0.005
 minimum_spectral_valid_fraction: 0.8
