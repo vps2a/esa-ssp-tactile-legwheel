@@ -29,7 +29,7 @@ FIELD_HELP = {
         "Longer windows improve frequency resolution but need more valid data.",
     ),
     "telemetry_resample_hz": (
-        "Common sampling frequency for all 17 telemetry channels in hertz.",
+        "Common sampling frequency for the 15 motor and IMU channels in hertz.",
         "It sets the FFT Nyquist frequency and must respect measured rates.",
     ),
     "maximum_interpolation_gap_ms": (

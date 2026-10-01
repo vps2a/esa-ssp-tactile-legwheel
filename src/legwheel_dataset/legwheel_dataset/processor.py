@@ -50,7 +50,11 @@ from legwheel_kinematics.projection import CameraCalibration
 from legwheel_kinematics.transforms import theta_p_from_config
 
 
-TELEMETRY_STREAM_NAMES = ("leg", "wheel", "rotation", "imu")
+# Only measurements acquired near 100 Hz belong on the common ML telemetry
+# grid. Central-encoder ticks remain a motion reference for theta_y correction,
+# but are deliberately excluded from packet arrays and spectral features.
+RESAMPLED_TELEMETRY_STREAM_NAMES = ("leg", "wheel", "imu")
+RESAMPLED_TELEMETRY_CHANNEL_COUNT = 15
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -136,12 +140,12 @@ def _resample_all_streams(
     valid_start_time_ns: int,
     valid_end_time_ns: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
-    """Resample all 17 channels without allowing ramp telemetry into a packet."""
+    """Resample the 15 ML channels without adding encoder or ramp data."""
     sampled_streams = []
     sampled_masks = []
     channel_names = []
     relative_times_ns = None
-    for stream_name in TELEMETRY_STREAM_NAMES:
+    for stream_name in RESAMPLED_TELEMETRY_STREAM_NAMES:
         stream = bag_index.streams[stream_name]
         source_times_ns, source_values = stream.arrays()
         inside = (
@@ -167,9 +171,10 @@ def _resample_all_streams(
         sampled_streams.append(values)
         sampled_masks.append(valid)
         channel_names.extend(stream.channel_names)
-    if len(channel_names) != 17:
+    if len(channel_names) != RESAMPLED_TELEMETRY_CHANNEL_COUNT:
         raise RuntimeError(
-            f"Expected 17 telemetry channels, received {len(channel_names)}."
+            f"Expected {RESAMPLED_TELEMETRY_CHANNEL_COUNT} telemetry channels, "
+            f"received {len(channel_names)}."
         )
     return (
         np.column_stack(sampled_streams),
@@ -186,7 +191,7 @@ def _window_has_complete_timestamp_coverage(
     maximum_gap_ns: int,
 ) -> bool:
     """Check local-window timestamp coverage before doing any interpolation."""
-    for stream_name in TELEMETRY_STREAM_NAMES:
+    for stream_name in RESAMPLED_TELEMETRY_STREAM_NAMES:
         times_ns, _ = bag_index.streams[stream_name].arrays()
         if (
             times_ns.size < 2
@@ -360,7 +365,7 @@ def _run_motion_analysis(
 
     source_rates = {}
     rate_limit_violations = []
-    for stream_name in TELEMETRY_STREAM_NAMES:
+    for stream_name in RESAMPLED_TELEMETRY_STREAM_NAMES:
         stream_times, _ = bag_index.streams[stream_name].arrays()
         statistics = effective_rate_statistics(
             stream_times,
@@ -430,6 +435,25 @@ def _run_motion_analysis(
             "local_window_ms": local_window_ms,
         },
         "measured_effective_rates": source_rates,
+        "motion_reference_effective_rate": {
+            "stream": "rotation_encoder_ticks",
+            **effective_rate_statistics(
+                encoder_times,
+                trajectory.start_time_ns,
+                trajectory.end_time_ns,
+            ),
+        },
+        "resampled_telemetry_streams": list(
+            RESAMPLED_TELEMETRY_STREAM_NAMES
+        ),
+        "resampled_telemetry_channel_count": (
+            RESAMPLED_TELEMETRY_CHANNEL_COUNT
+        ),
+        "excluded_from_packet_telemetry": [
+            "rotation_joint.position",
+            "rotation_joint.velocity",
+            "rotation_encoder.ticks",
+        ],
         "requested_resample_rate_hz": processing_config.telemetry_resample_hz,
         "source_rate_tolerance_fraction": (
             processing_config.source_rate_tolerance_fraction

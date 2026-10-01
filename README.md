@@ -475,7 +475,7 @@ constructs continuous encoder-corrected `theta_y(t)`, isolates a configured
 physical terrain patch, finds its future wheel-contact time, and attaches a
 calculated local telemetry window plus a fixed spectral window. Stage 2 saves
 RGB/depth crops, the complete 3D point map, a robust fitted plane, signed
-along/radial slopes, and spectra for all 17 telemetry channels.
+along/radial slopes, and spectra for 15 motor and IMU telemetry channels.
 
 Validate the configuration against the actual recorded rates and camera view
 before creating a dataset:
@@ -576,12 +576,11 @@ in different runs.
 applied automatically. `alpha_sp_rad` is the full angular width of the patch.
 Exact endpoints are inserted regardless of `track_point_count`.
 
-The current encoder firmware publishes at 20 Hz. Because the selected policy
-rejects a common resampling rate above any measured source rate, a 100 Hz
-configuration will be rejected while that remains true. This is intentional:
-interpolation cannot add encoder information or make an 18 Hz encoder spectrum
-observable. The full measured-rate table is printed by `validate_config` and
-stored in `packets/analysis_report.json`.
+Central-encoder ticks remain the motion reference for correcting `theta_y` and
+finding patch contact time, but are not part of the resampled ML telemetry or
+FFT. The common grid therefore contains 15 channels from the approximately
+100 Hz leg, wheel and IMU streams. Encoder rate statistics are still reported
+separately in `packets/analysis_report.json`.
 
 
 ## Key topics

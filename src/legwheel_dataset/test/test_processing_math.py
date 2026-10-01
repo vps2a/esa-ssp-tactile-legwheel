@@ -108,20 +108,18 @@ class SynchronizationTest(unittest.TestCase):
                 "wheel_joint.velocity",
                 "wheel_joint.effort",
             ))
-            rotation = TelemetrySeries((
-                "rotation_joint.position",
-                "rotation_joint.velocity",
-            ))
             ticks = TelemetrySeries(("rotation_encoder.ticks",))
             torque_command = TelemetrySeries(("wheel.requested_torque",))
             imu = TelemetrySeries(tuple(f"imu.channel_{index}" for index in range(6)))
-            for timestamp_ns in sample_times:
+            for sample_index, timestamp_ns in enumerate(sample_times):
                 time_s = timestamp_ns * 1e-9
                 leg.append(timestamp_ns, [0.0, 0.0, 0.0, knee_joint, 0.0, 0.0])
                 wheel.append(timestamp_ns, [time_s, 1.0, 0.5])
                 encoder_ticks = math.floor(time_s * 10.0)
-                rotation.append(timestamp_ns, [-encoder_ticks * 0.1, -1.0])
-                ticks.append(timestamp_ns, [-encoder_ticks])
+                # The encoder is intentionally only 20 Hz. It corrects theta_y
+                # but must not limit the 100 Hz motor/IMU packet grid.
+                if sample_index % 5 == 0:
+                    ticks.append(timestamp_ns, [-encoder_ticks])
                 imu.append(timestamp_ns, [0.0] * 6)
             for timestamp_ns, torque in (
                 (0, 0.0),
@@ -152,7 +150,6 @@ class SynchronizationTest(unittest.TestCase):
                 streams={
                     "leg": leg,
                     "wheel": wheel,
-                    "rotation": rotation,
                     "imu": imu,
                     "ticks": ticks,
                     "torque_command": torque_command,
@@ -202,6 +199,33 @@ class SynchronizationTest(unittest.TestCase):
             self.assertTrue((packet / "depth.npy").is_file())
             self.assertTrue(
                 (output_directory / "packets" / "analysis_report.json").is_file()
+            )
+            metadata = json.loads(
+                (packet / "metadata.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(metadata["telemetry_channel_names"]), 15)
+            self.assertFalse(any(
+                "rotation" in name
+                for name in metadata["telemetry_channel_names"]
+            ))
+            telemetry = np.load(packet / "telemetry.npz", allow_pickle=False)
+            self.assertEqual(telemetry["local_values"].shape[1], 15)
+            self.assertEqual(telemetry["spectral_values"].shape[1], 15)
+            analysis = json.loads(
+                (
+                    output_directory
+                    / "packets"
+                    / "analysis_report.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(analysis["rate_limit_violations"], [])
+            self.assertNotIn("rotation", analysis["measured_effective_rates"])
+            self.assertAlmostEqual(
+                analysis["motion_reference_effective_rate"]["median_rate_hz"],
+                20.0,
+            )
+            self.assertEqual(
+                analysis["resampled_telemetry_channel_count"], 15
             )
 
     def test_encoder_correction_preserves_signed_tick_endpoints(self):
@@ -284,14 +308,14 @@ class FeatureTest(unittest.TestCase):
         self.assertAlmostEqual(dominant[0, 0], 18.0, places=6)
         self.assertTrue(np.isfinite(dominant_power[0, 0]))
 
-    def test_spectrum_outputs_two_peak_slots_for_all_seventeen_channels(self):
+    def test_spectrum_outputs_two_peak_slots_for_all_fifteen_channels(self):
         rate_hz = 100.0
         times = np.arange(101) / rate_hz
         one_channel = (
             np.sin(2.0 * np.pi * 18.0 * times)
             + 0.4 * np.sin(2.0 * np.pi * 7.0 * times)
         )
-        values = np.tile(one_channel[:, None], (1, 17))
+        values = np.tile(one_channel[:, None], (1, 15))
         valid = np.ones(values.shape, dtype=bool)
         _, power, peaks, peak_power = calculate_spectra(
             values,
@@ -300,9 +324,9 @@ class FeatureTest(unittest.TestCase):
             1.0,
             maximum_interpolation_gap_ms=50.0,
         )
-        self.assertEqual(power.shape[1], 17)
-        self.assertEqual(peaks.shape, (2, 17))
-        self.assertEqual(peak_power.shape, (2, 17))
+        self.assertEqual(power.shape[1], 15)
+        self.assertEqual(peaks.shape, (2, 15))
+        self.assertEqual(peak_power.shape, (2, 15))
 
     def test_stage2_extracts_flat_plane_from_synthetic_packet(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

@@ -12,7 +12,7 @@ The package performs two processing stages:
    that patch, and attach resampled telemetry.
 2. **Stage 2 — feature extraction:** crop the images, reconstruct the selected
    depth pixels in 3D, robustly fit a plane, calculate two signed slopes, and
-   calculate spectra for all 17 telemetry channels.
+   calculate spectra for all 15 motor and IMU telemetry channels.
 
 ## Commands
 
@@ -106,7 +106,6 @@ The bag must contain:
 - `/legwheel/joint_states`
 - `/wheel/wheel_state`
 - `/wheel/requested_torque`
-- `/rotation_encoder/joint_state`
 - `/rotation_encoder/ticks`
 
 This implementation deliberately requires the snapshotted camera configuration
@@ -264,21 +263,22 @@ must pad or otherwise batch them deliberately.
 
 ### 5. Measure acquisition rates
 
-The processor calculates actual timestamp rates for the leg, wheel, central
-encoder and IMU streams. `packets/analysis_report.json` records sample count,
-median rate, median period, 95th-percentile period, and minimum/maximum interval
-rates.
+The processor calculates actual timestamp rates for the leg, wheel and IMU
+streams that form the ML telemetry arrays. `packets/analysis_report.json`
+records sample count, median rate, median period, 95th-percentile period, and
+minimum/maximum interval rates.
 
-Packet isolation stops if `telemetry_resample_hz` exceeds a stream's measured
-median rate by more than `source_rate_tolerance_fraction`. Upsampling cannot
-create information that was not measured.
+Packet isolation stops if `telemetry_resample_hz` exceeds one of these three
+streams' measured median rates by more than `source_rate_tolerance_fraction`.
+Upsampling cannot create information that was not measured.
 
-Important: the current Arduino firmware publishes central-encoder counts at
-20 Hz. Therefore a strict all-stream common grid above approximately 20 Hz will
-fail this guard even if motor and IMU streams are faster. This also means that
-the encoder channel alone cannot resolve an 18 Hz signal. Change the acquisition
-rate or revise the common-grid policy deliberately; do not hide this limitation
-with interpolation.
+Central-encoder ticks are deliberately separate. They remain essential for
+correcting `theta_y(t)` and finding terrain contact time, but are not resampled,
+saved as ML telemetry, checked against `telemetry_resample_hz`, or sent through
+the FFT. Their native rate is reported separately under
+`motion_reference_effective_rate`. This allows the approximately 100 Hz motor
+and IMU data to retain an FFT Nyquist frequency near 50 Hz even though the
+encoder normally publishes near 20 Hz.
 
 ## Stage 1, Pass 2: creating packets
 
@@ -350,14 +350,17 @@ Both telemetry arrays are centred on `contact_time`:
 - `local_values`: calculated patch-traversal duration;
 - `spectral_values`: fixed `spectral_window_ms` duration.
 
-All 17 columns use the same grid and order stored in packet metadata:
+All 15 columns use the same grid and order stored in packet metadata:
 
 - hip position, velocity and effort;
 - knee position, velocity and effort;
 - wheel position, velocity and effort;
-- central encoder position and velocity;
 - IMU angular velocity X/Y/Z;
 - IMU linear acceleration X/Y/Z.
+
+The encoder-derived `theta_y`, patch angle and contact time remain in packet
+metadata. Only the encoder's raw position/velocity/tick channels are excluded
+from the resampled arrays.
 
 The complete local window must remain inside the corrected run and have source
 timestamp coverage without an excessive gap. Spectral cells outside the valid
@@ -430,10 +433,10 @@ and degrees are saved.
 
 ### FFT processing
 
-All 17 telemetry channels receive a separate FFT. A channel must first satisfy
-`minimum_spectral_valid_fraction`. Missing samples are filled only for short,
-internal gaps allowed by `maximum_interpolation_gap_ms`; leading, trailing and
-long gaps invalidate that channel.
+All 15 motor and IMU telemetry channels receive a separate FFT. A channel must
+first satisfy `minimum_spectral_valid_fraction`. Missing samples are filled only
+for short, internal gaps allowed by `maximum_interpolation_gap_ms`; leading,
+trailing and long gaps invalidate that channel.
 
 Each accepted channel is linearly detrended, multiplied by a Hann window, and
 converted to a one-sided power spectral density. Zero hertz is excluded from

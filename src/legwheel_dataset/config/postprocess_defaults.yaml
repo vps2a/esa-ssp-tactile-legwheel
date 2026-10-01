@@ -3,7 +3,7 @@ schema_version: "2.0"
 rgb_depth_max_delta_ms: 10.0
 # Duration of telemetry used for each FFT in milliseconds.
 spectral_window_ms: 1000.0
-# Common sampling frequency for all 17 telemetry channels in hertz.
+# Common sampling frequency for the 15 motor and IMU channels in hertz.
 telemetry_resample_hz: 100.0
 # Largest source-data gap that interpolation may bridge.
 maximum_interpolation_gap_ms: 50.0

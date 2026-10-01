@@ -17,7 +17,6 @@ DEPTH_INFO_TOPIC = "/legwheel_rgbd/depth/camera_info"
 IMU_TOPIC = "/legwheel_rgbd/gyro_accel/sample"
 LEG_STATE_TOPIC = "/legwheel/joint_states"
 WHEEL_STATE_TOPIC = "/wheel/wheel_state"
-ROTATION_STATE_TOPIC = "/rotation_encoder/joint_state"
 ROTATION_TICKS_TOPIC = "/rotation_encoder/ticks"
 REQUESTED_TORQUE_TOPIC = "/wheel/requested_torque"
 
@@ -29,7 +28,6 @@ INDEX_TOPICS = {
     IMU_TOPIC,
     LEG_STATE_TOPIC,
     WHEEL_STATE_TOPIC,
-    ROTATION_STATE_TOPIC,
     ROTATION_TICKS_TOPIC,
     REQUESTED_TORQUE_TOPIC,
 }
@@ -227,9 +225,6 @@ def index_bag(bag_directory: Path) -> BagIndex:
                     "wheel_joint.effort",
                 )
             ),
-            "rotation": TelemetrySeries(
-                ("rotation_joint.position", "rotation_joint.velocity")
-            ),
             "imu": TelemetrySeries(
                 (
                     "imu.angular_velocity.x",
@@ -292,14 +287,6 @@ def index_bag(bag_directory: Path) -> BagIndex:
             index.streams["wheel"].append(
                 timestamp_ns,
                 _joint_row(message, ("wheel_joint",)),
-            )
-        elif topic == ROTATION_STATE_TOPIC:
-            index.streams["rotation"].append(
-                timestamp_ns,
-                [
-                    _joint_value(message, "rotation_joint", "position"),
-                    _joint_value(message, "rotation_joint", "velocity"),
-                ],
             )
         elif topic == ROTATION_TICKS_TOPIC:
             index.streams["ticks"].append(
