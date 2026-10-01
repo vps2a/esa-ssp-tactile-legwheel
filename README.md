@@ -502,6 +502,211 @@ modified or overwritten. The dependency-light output uses `.npy` image/patch
 arrays, compressed `.npz` telemetry/features, JSON packet metadata, and JSONL
 manifests. `quality_report.json` records every rejected packet reason.
 
+#### Post-processing configuration reference
+
+The default processing file is:
+
+```yaml
+schema_version: "1.0"
+rgb_depth_max_delta_ms: 10.0
+local_window_ms: 100.0
+spectral_window_ms: 1000.0
+telemetry_resample_hz: 100.0
+maximum_interpolation_gap_ms: 50.0
+track_point_count: 360
+depth_scale_m: 0.001
+minimum_plane_points: 100
+plane_ransac_iterations: 200
+plane_inlier_threshold_m: 0.005
+minimum_spectral_valid_fraction: 0.8
+```
+
+All time settings ending in `_ms` are in milliseconds. Distance settings
+ending in `_m` are in metres. These values affect derived data only; they do
+not change the original MCAP recording.
+
+##### `rgb_depth_max_delta_ms: 10.0`
+
+This is the maximum permitted absolute difference between an RGB image header
+timestamp and a depth image header timestamp. Pairing is nearest-neighbour,
+one-to-one: an accepted depth image cannot be reused by another RGB image. A
+pair is accepted when:
+
+```text
+abs(depth_time - rgb_time) <= rgb_depth_max_delta_ms
+```
+
+The packet's representative image time is the integer midpoint
+`(rgb_time + depth_time) / 2`. Reducing this value improves temporal alignment
+but rejects more image pairs. Increasing it produces more pairs but allows the
+robot to move farther between the RGB and depth exposures. At `4.75 rad/s`, a
+10 ms difference is `0.0475 rad` or approximately `2.72 degrees`; this is about
+`4.75 mm` at a `0.1 m` wheel radius, but about `39 mm` along a `0.83 m` rig
+track. The relevant distance must be chosen for the physical motion being
+modelled. This setting synchronizes timestamps; it does not register depth
+pixels onto the RGB pixel grid.
+
+##### `local_window_ms: 100.0`
+
+This is the duration of the short telemetry packet associated with a terrain
+patch. It is centred on the calculated future wheel-contact time, not on the
+camera timestamp. The default interval is therefore `-50 ms` through `+50 ms`
+relative to contact. At `100 Hz`, both endpoints are included, so the stored
+`local_values` and `local_valid` arrays contain 11 rows at
+`[-50, -40, ..., 0, ..., +40, +50] ms`.
+
+A shorter window isolates contact more tightly but can miss the complete
+mechanical response. A longer window adds context but can mix the selected
+patch with neighbouring terrain. At `4.75 rad/s` and a `0.1 m` wheel radius,
+100 ms represents approximately `4.75 cm` of wheel-surface travel, nominally
+half before and half after the central contact when speed is constant and
+there is no slip.
+
+##### `spectral_window_ms: 1000.0`
+
+This is the separate telemetry duration used for FFT calculation. It is also
+centred on the calculated contact time. The default interval is `-500 ms`
+through `+500 ms`. At `100 Hz`, inclusive endpoints produce 101 rows in
+`spectral_values` and `spectral_valid`.
+
+The longer window is intentional: an 18 Hz oscillation contains only 1.8
+cycles in 100 ms but approximately 18 cycles in one second. Longer windows
+provide finer frequency resolution but cover more neighbouring terrain and
+are harder to obtain near the start or end of a recording. With the current
+101-sample default, NumPy's FFT bins are spaced by approximately
+`100 / 101 = 0.9901 Hz`. `spectral_window_ms` must not be shorter than
+`local_window_ms`.
+
+##### `telemetry_resample_hz: 100.0`
+
+Leg, wheel, rotation-encoder, and IMU messages are not normally recorded at
+identical timestamps. This setting creates one common, uniformly spaced grid
+for all 17 telemetry channels. At `100 Hz`, adjacent target samples are 10 ms
+apart. The exact number of stored rows is:
+
+```text
+max(2, round(window_ms * telemetry_resample_hz / 1000) + 1)
+```
+
+The final `+1` includes both window endpoints. For FFTs, the largest
+representable frequency is the Nyquist frequency, one half of the resampling
+rate: `50 Hz` at the default setting. Increasing the rate creates larger arrays
+and permits higher represented frequencies, but interpolation cannot create
+information that was absent from a slower raw sensor stream. Decreasing it
+reduces storage and frequency range and can lose high-frequency behaviour.
+
+##### `maximum_interpolation_gap_ms: 50.0`
+
+This is the largest allowed time separation between the two source samples
+surrounding a resampling target. If the surrounding samples are 20 ms apart,
+the default permits linear interpolation. If they are 100 ms apart, the output
+cell is set to `NaN` and its validity mask is `false`. Exact source timestamps
+are copied directly, and the processor does not extrapolate beyond the first
+or last source sample.
+
+Reducing the limit is stricter and exposes more dropouts as invalid data.
+Increasing it fills more cells but can hide a sensor dropout by inventing a
+smooth transition across a long unmeasured interval. This value also affects
+whether a channel passes the FFT valid-fraction requirement below.
+
+##### `track_point_count: 360`
+
+This is the number of angular samples generated on each of the inner and outer
+circular track boundaries. The default therefore projects 360 inner points and
+360 outer points, spaced by one degree. At a radius of `0.83 m`, one degree is
+approximately `1.45 cm` of arc length.
+
+These projected boundary samples define the visible RGB/depth polygons and the
+visible patch midpoint angle. Consequently, this setting indirectly affects
+the calculated contact time. It does **not** set the number of reconstructed
+depth points used for plane fitting; those come from all valid depth pixels
+inside the polygon. More samples produce a smoother boundary and finer angular
+midpoint at additional computation cost. Fewer samples produce a coarser mask
+and contact-angle estimate. The minimum accepted value is 16.
+
+##### `depth_scale_m: 0.001`
+
+This converts integer depth-image values into metres:
+
+```text
+depth_m = raw_integer_depth * depth_scale_m
+```
+
+With the default, a raw value of `1000` becomes `1.0 m`, as expected for a
+millimetre-valued `16UC1` image. This scale directly affects every reconstructed
+3D point, the fitted plane offset, RANSAC distances, and plane RMSE. An
+incorrect scale makes the complete 3D reconstruction metrically wrong.
+Floating-point depth images such as `32FC1` are assumed to already contain
+metres and are not multiplied by this value.
+
+##### `minimum_plane_points: 100`
+
+This is the minimum number of valid 3D depth points required before fitting is
+allowed, and also the minimum number of RANSAC inliers required to accept the
+best plane. It is an absolute point count, not a percentage. Raising it demands
+more geometric evidence and can reject small or sparse patches. Lowering it
+accepts smaller patches but makes the plane more sensitive to depth noise. The
+configuration permits no value below three, because three non-collinear points
+are the mathematical minimum for a plane.
+
+##### `plane_ransac_iterations: 200`
+
+For each iteration, deterministic RANSAC selects three depth points, constructs
+a candidate plane, and counts how many other points lie within
+`plane_inlier_threshold_m`. The candidate with the most inliers is retained;
+mean squared inlier error breaks ties. The chosen plane is then refined with
+all its inliers using singular value decomposition. The random generator uses
+a fixed seed, so identical input and settings produce identical output.
+
+More iterations increase the chance of finding the terrain plane when many
+points are outliers, at a proportional CPU cost. Fewer iterations are faster
+but increase the chance of accepting a poor candidate.
+
+##### `plane_inlier_threshold_m: 0.005`
+
+This is the maximum perpendicular point-to-plane distance for a reconstructed
+depth point to count as a RANSAC inlier. The default is `0.005 m`, or `5 mm`.
+A point exactly 5 mm from a candidate plane is included; a point farther away
+is excluded.
+
+A smaller threshold demands a flatter, cleaner surface and can leave fewer
+than `minimum_plane_points` inliers. A larger threshold tolerates depth noise
+and rough terrain but can incorrectly describe curved or uneven terrain as one
+plane. It influences the final normal, along/cross slopes, inlier ratio, and
+plane RMSE. It must use the same metre scale as the reconstructed depth points.
+
+##### `minimum_spectral_valid_fraction: 0.8`
+
+This is the minimum valid-sample fraction required separately for each
+telemetry channel before its FFT is calculated. With 101 default spectral
+samples, 81 valid samples pass (`81 / 101 = 0.802`) while 80 do not
+(`80 / 101 = 0.792`). A passing channel has its remaining missing samples
+filled by interpolation, is linearly detrended, receives a Hann window, and is
+then transformed. A failing channel keeps `NaN` spectral power and has no
+dominant frequency (`null` in JSON). Other channels in the same packet can
+still be valid.
+
+Increasing this fraction demands more complete telemetry and reduces the
+amount of data invented by gap filling. Decreasing it produces more spectra
+but makes them depend more heavily on interpolation. The valid range is greater
+than zero and at most one.
+
+The settings interact in four main groups:
+
+- Image association: `rgb_depth_max_delta_ms`.
+- Contact packet construction: `local_window_ms`,
+  `telemetry_resample_hz`, and `maximum_interpolation_gap_ms`.
+- Frequency analysis: `spectral_window_ms`, `telemetry_resample_hz`,
+  `maximum_interpolation_gap_ms`, and `minimum_spectral_valid_fraction`.
+- Terrain geometry: `track_point_count`, `depth_scale_m`,
+  `minimum_plane_points`, `plane_ransac_iterations`, and
+  `plane_inlier_threshold_m`.
+
+A stricter downstream setting cannot repair an incorrect upstream scale or
+association. For example, more RANSAC iterations cannot correct a wrong depth
+scale, and a longer FFT window cannot recover telemetry hidden by long sensor
+dropouts.
+
 The processor currently fixes `theta_y` to zero because rotating a radially
 circular local track does not change its camera projection. The source contains
 an explicit TODO at this approximation so it can be removed when non-circular
