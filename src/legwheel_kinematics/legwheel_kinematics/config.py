@@ -8,8 +8,8 @@ from typing import Any
 
 # These are measured installation constants rather than experiment settings.
 # Their names deliberately match supporting_files/kinematics_calculator.ipynb.
-H_B_M = 0.0761
-CAMERA_OFFSET_FROM_BEAM_CENTRE_M = 0.04
+H_B_M = 0.0661
+CAMERA_OFFSET_FROM_BEAM_CENTRE_M = 0.054
 
 # The camera optical axis in the verified notebook geometry points in the
 # decreasing kinematic-theta direction. Forward recordings are therefore those
