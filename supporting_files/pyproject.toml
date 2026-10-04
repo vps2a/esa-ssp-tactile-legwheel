@@ -7,8 +7,19 @@ dependencies = [
     "nbformat>=4.2.0",
     "numpy>=2.5.3",
     "plotly>=7.1.0",
+    "pyside6>=6.11.2",
     "sympy>=1.14.0",
 ]
+
+[project.scripts]
+legwheel-dataset-browser = "legwheel_dataset_browser.app:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["legwheel_dataset_browser*"]
 
 [dependency-groups]
 dev = [
