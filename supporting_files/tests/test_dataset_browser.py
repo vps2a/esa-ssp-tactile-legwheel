@@ -103,6 +103,39 @@ class DatasetWindowSmokeTests(unittest.TestCase):
             self.assertEqual((root / "manifest.jsonl").read_bytes(), manifest_before)
             window.close()
 
+    def test_window_jumps_to_one_based_sorted_packet_position(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = create_synthetic_dataset(Path(temporary) / "abc123")
+            window = DatasetBrowserWindow(root)
+
+            # Clicking the button interprets 2 as the second item in the
+            # model's already-sorted packet list, not as a stored packet ID.
+            window.jump_packet_input.setText("2")
+            window.jump_packet_button.click()
+            self.assertEqual(window.packet_index, 1)
+            self.assertEqual(window.jump_packet_input.text(), "")
+            self.assertEqual(window.jump_packet_error_label.text(), "")
+
+            # Pressing Enter uses exactly the same navigation path.
+            window.jump_packet_input.setText("1")
+            window.jump_packet_input.returnPressed.emit()
+            self.assertEqual(window.packet_index, 0)
+            self.assertEqual(window.jump_packet_input.text(), "")
+            window.close()
+
+    def test_invalid_packet_jump_keeps_current_packet_and_shows_inline_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = create_synthetic_dataset(Path(temporary) / "abc123")
+            window = DatasetBrowserWindow(root)
+
+            for invalid_value in ("", "0", "3", "not-a-number"):
+                window.jump_packet_input.setText(invalid_value)
+                window.jump_to_packet()
+                self.assertEqual(window.packet_index, 0)
+                self.assertNotEqual(window.jump_packet_error_label.text(), "")
+
+            window.close()
+
 
 if __name__ == "__main__":
     unittest.main()

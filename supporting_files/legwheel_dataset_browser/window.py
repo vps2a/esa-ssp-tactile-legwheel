@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -121,6 +122,37 @@ class DatasetBrowserWindow(QMainWindow):
         navigation.addWidget(self.next_button)
         outer.addLayout(navigation)
 
+        # Keep direct packet selection in the same persistent bottom area as
+        # sequential navigation, so it remains available on every tab.
+        jump_navigation = QHBoxLayout()
+        self.jump_packet_input = QLineEdit()
+        self.jump_packet_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.jump_packet_input.setFixedWidth(90)
+        self.jump_packet_input.setPlaceholderText("Packet no.")
+        self.jump_packet_input.setToolTip(
+            "Enter the packet's 1-based position in the sorted dataset list."
+        )
+        # Hint that this is a numeric field without blocking invalid text.
+        # Allowing every submission through lets both Enter and the button
+        # produce the same helpful inline validation message.
+        self.jump_packet_input.setInputMethodHints(
+            Qt.InputMethodHint.ImhDigitsOnly
+        )
+        self.jump_packet_input.setEnabled(False)
+        self.jump_packet_button = QPushButton("Jump to packet")
+        self.jump_packet_button.setEnabled(False)
+        self.jump_packet_error_label = QLabel("")
+        self.jump_packet_error_label.setStyleSheet("color: #c62828;")
+        self.jump_packet_error_label.setVisible(False)
+
+        jump_navigation.addStretch(1)
+        jump_navigation.addWidget(QLabel("Go to:"))
+        jump_navigation.addWidget(self.jump_packet_input)
+        jump_navigation.addWidget(self.jump_packet_button)
+        jump_navigation.addWidget(self.jump_packet_error_label)
+        jump_navigation.addStretch(1)
+        outer.addLayout(jump_navigation)
+
         self.setCentralWidget(central)
         self.statusBar().showMessage("Select a configuration-hash dataset directory.")
 
@@ -147,6 +179,9 @@ class DatasetBrowserWindow(QMainWindow):
     def _connect_navigation(self) -> None:
         self.previous_button.clicked.connect(self.previous_packet)
         self.next_button.clicked.connect(self.next_packet)
+        self.jump_packet_button.clicked.connect(self.jump_to_packet)
+        self.jump_packet_input.returnPressed.connect(self.jump_to_packet)
+        self.jump_packet_input.textEdited.connect(self._clear_jump_error)
         self.crop_checkbox.toggled.connect(self._refresh_images)
         self.auto_depth_checkbox.toggled.connect(self._refresh_images)
         QShortcut(QKeySequence(Qt.Key.Key_Left), self).activated.connect(
@@ -188,6 +223,11 @@ class DatasetBrowserWindow(QMainWindow):
         self.dataset = dataset
         self.fixed_depth_limits_m = depth_limits
         self.packet_index = 0
+        self.jump_packet_input.setEnabled(True)
+        self.jump_packet_button.setEnabled(True)
+        self.jump_packet_input.clear()
+        self.jump_packet_input.setPlaceholderText(f"1–{len(dataset)}")
+        self._clear_jump_error()
         self.settings.setValue(self.SETTINGS_LAST_DATASET, str(dataset.root))
         self.identity_label.setText(
             f"Experiment {dataset.experiment_id}  ·  Run {dataset.run_number}"
@@ -200,20 +240,59 @@ class DatasetBrowserWindow(QMainWindow):
         )
         return True
 
-    def show_packet(self, index: int) -> None:
+    def show_packet(self, index: int) -> bool:
+        """Load a zero-based packet index, returning whether it succeeded."""
         if self.dataset is None or not 0 <= index < len(self.dataset):
-            return
+            return False
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             packet = self.dataset.load_packet(index)
         except (DatasetFormatError, OSError, ValueError) as error:
             QMessageBox.critical(self, "Cannot load packet", str(error))
             self.statusBar().showMessage(f"Packet load failed: {error}")
-            return
+            return False
         finally:
             QApplication.restoreOverrideCursor()
         self.packet_index = index
         self._show_loaded_packet(packet)
+        self._clear_jump_error()
+        return True
+
+    def jump_to_packet(self) -> None:
+        """Jump to a 1-based position in the dataset's sorted packet list."""
+        if self.dataset is None:
+            self._show_jump_error("Select a dataset before choosing a packet.")
+            return
+
+        entered_text = self.jump_packet_input.text().strip()
+        try:
+            packet_number = int(entered_text)
+        except ValueError:
+            self._show_jump_error(
+                f"Enter a whole packet number from 1 to {len(self.dataset)}."
+            )
+            return
+
+        if not 1 <= packet_number <= len(self.dataset):
+            self._show_jump_error(
+                f"Packet number must be from 1 to {len(self.dataset)}."
+            )
+            return
+
+        # The model is already chronologically sorted. Convert the user's
+        # 1-based packet number to the model's zero-based list index.
+        if self.show_packet(packet_number - 1):
+            self.jump_packet_input.clear()
+
+    def _show_jump_error(self, message: str) -> None:
+        """Display a non-blocking validation message beside the jump control."""
+        self.jump_packet_error_label.setText(message)
+        self.jump_packet_error_label.setVisible(True)
+
+    def _clear_jump_error(self, _text: str = "") -> None:
+        """Clear stale validation feedback after editing or successful navigation."""
+        self.jump_packet_error_label.clear()
+        self.jump_packet_error_label.setVisible(False)
 
     def _show_loaded_packet(self, packet: PacketData) -> None:
         self.packet = packet

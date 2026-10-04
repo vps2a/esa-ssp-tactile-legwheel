@@ -71,6 +71,11 @@ selection is remembered in the operating system's application settings. Use
 - Click **Previous packet** and **Next packet**, or press the left/right arrow
   keys, to move through the chronologically ordered manifest. Navigation stops
   at the first and last packet.
+- To open a packet directly, enter its 1-based position in the **Go to** field
+  at the bottom and click **Jump to packet** or press **Enter**. For example,
+  entering `64` opens the 64th packet in the sorted list. Invalid or
+  out-of-range values leave the current packet unchanged and show an inline
+  explanation.
 - The title identifies the experiment and run. The lower navigation label shows
   the current packet number and packet ID.
 - **Images and patches** displays the complete RGB and metric depth images with
