@@ -33,7 +33,10 @@ from legwheel_experiments.stream_health import (
     message_stamp_nanoseconds,
 )
 
-_RUNTIME_CAMERA_WATCHDOG_ENABLED = True #This watchdog is used to abort the experiment if the camera stream fails during the experiment. It is disabled by default because it is not yet fully tested and may cause false positives.
+_RUNTIME_CAMERA_WATCHDOG_ENABLED = True
+_TERMINAL_ORANGE = "\033[38;5;208m"
+_TERMINAL_BLUE = "\033[94m"
+_TERMINAL_RESET = "\033[0m"
 
 
 class ExperimentAbortedError(RuntimeError):
@@ -82,6 +85,7 @@ class ExperimentRunnerNode(Node):
         # asynchronous camera failure back to that control thread.
         self._runtime_abort_event = threading.Event()
         self._runtime_abort_reason: str | None = None
+        self._runtime_stale_camera_streams: set[str] = set()
 
         #Initializing the preflight complete event
         #unset = preflight has not completed
@@ -987,18 +991,63 @@ class ExperimentRunnerNode(Node):
         self._last_commanded_zero_position = list(zero_position)
 
     def _runtime_camera_guard_callback(self) -> None:
-        """Disable motion if any camera stream stops advancing during a run."""
+        """Report stale streams, but abort for other camera-health failures."""
         if (
             self._state_machine.state is not ExperimentState.RUNNING
             or self._runtime_abort_event.is_set()
         ):
             return
 
-        failure_reason = self._camera_stream_failure_reason()
-        if failure_reason is None:
+        failure_reason, stale_stream_ages = self._runtime_camera_health()
+        if failure_reason is not None:
+            self._abort_for_camera_failure(failure_reason)
             return
 
-        self._abort_for_camera_failure(failure_reason)
+        stale_streams = set(stale_stream_ages)
+
+        for stream_name, age_s in stale_stream_ages.items():
+            if stream_name in self._runtime_stale_camera_streams:
+                continue
+
+            self.get_logger().warning(
+                f"{_TERMINAL_ORANGE}Camera {stream_name} telemetry is stale: "
+                f"timestamp has not advanced for {age_s:.2f} seconds. "
+                f"Experiment will continue.{_TERMINAL_RESET}"
+            )
+
+        for stream_name in ("RGB", "depth", "IMU"):
+            if (
+                stream_name in self._runtime_stale_camera_streams
+                and stream_name not in stale_streams
+            ):
+                self.get_logger().info(
+                    f"{_TERMINAL_BLUE}Camera {stream_name} telemetry recovered: "
+                    f"timestamp is advancing again.{_TERMINAL_RESET}"
+                )
+
+        self._runtime_stale_camera_streams = stale_streams
+
+    def _runtime_camera_health(self) -> tuple[str | None, dict[str, float]]:
+        """Return a fatal runtime failure or the ages of stale streams."""
+        stale_stream_ages: dict[str, float] = {}
+        now_s = time.monotonic()
+
+        for stream_name, received, maximum_age_s in self._camera_stream_settings():
+            monitor = self._camera_stamp_monitors[stream_name]
+            if not received:
+                return f"camera {stream_name} has not been received", {}
+            if not monitor.ready:
+                return (
+                    f"camera {stream_name} has not made "
+                    f"{self._minimum_camera_stamp_advances} forward timestamp steps",
+                    {},
+                )
+
+            age_s = monitor.age_s(now_s)
+            if age_s > maximum_age_s:
+                stale_stream_ages[stream_name] = age_s
+
+        return None, stale_stream_ages
 
     def _abort_for_camera_failure(self, failure_reason: str) -> None:
         """Record the cause and immediately publish the safe command set."""
@@ -1022,13 +1071,8 @@ class ExperimentRunnerNode(Node):
 
     def _camera_stream_failure_reason(self) -> str | None:
         """Describe the first unavailable, unproven, or stale camera stream."""
-        stream_settings = (
-            ("RGB", self.has_camera_rgb(), self._maximum_camera_image_age_s),
-            ("depth", self.has_camera_depth(), self._maximum_camera_image_age_s),
-            ("IMU", self.has_camera_imu(), self._maximum_camera_imu_age_s),
-        )
         now_s = time.monotonic()
-        for stream_name, received, maximum_age_s in stream_settings:
+        for stream_name, received, maximum_age_s in self._camera_stream_settings():
             monitor = self._camera_stamp_monitors[stream_name]
             if not received:
                 return f"camera {stream_name} has not been received"
@@ -1044,6 +1088,14 @@ class ExperimentRunnerNode(Node):
                     f"{age_s:.2f} seconds"
                 )
         return None
+
+    def _camera_stream_settings(self) -> tuple[tuple[str, bool, float], ...]:
+        """Return camera stream names, receipt states, and age limits."""
+        return (
+            ("RGB", self.has_camera_rgb(), self._maximum_camera_image_age_s),
+            ("depth", self.has_camera_depth(), self._maximum_camera_image_age_s),
+            ("IMU", self.has_camera_imu(), self._maximum_camera_imu_age_s),
+        )
 
     def _raise_if_runtime_abort_requested(self) -> None:
         """Stop blocking control work after the executor has made the rig safe."""
