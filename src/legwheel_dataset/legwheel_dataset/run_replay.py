@@ -22,9 +22,10 @@ from legwheel_dataset.bag_reader import (
     message_stamp_ns,
 )
 from legwheel_dataset.images import decode_image, depth_point_map_in_base
+from legwheel_dataset.imu_pitch import PitchTrajectory, estimate_pitch
 from legwheel_kinematics.config import KinematicsConfig
 from legwheel_kinematics.projection import CameraCalibration, project_camera_points
-from legwheel_kinematics.transforms import frame_coordinates, theta_p_from_config
+from legwheel_kinematics.transforms import frame_coordinates
 
 
 TOPIC_CANDIDATES = {
@@ -35,7 +36,7 @@ TOPIC_CANDIDATES = {
         "/camera/rgbd/depth/camera_info",
     ),
     "rgb_info": ("/legwheel_rgbd/color/camera_info", "/camera/rgbd/rgb/camera_info"),
-    "leg": ("/legwheel/joint_states",),
+    "imu": ("/legwheel_rgbd/gyro_accel/sample", "/camera/imu"),
     "encoder": ("/rotation_encoder/joint_state",),
 }
 POINT_DTYPE = np.dtype(
@@ -60,6 +61,8 @@ class ReplaySettings:
     maximum_depth_m: float = 3.0
     rgb_max_delta_ms: float = 50.0
     maximum_pose_gap_s: float = 0.5
+    maximum_imu_gap_s: float = 0.05
+    maximum_pitch_uncertainty_deg: float = 1.0
     depth_scale_m: float = 0.001
 
     def __post_init__(self):
@@ -73,6 +76,8 @@ class ReplaySettings:
             "cloud_rate_hz",
             "maximum_depth_m",
             "maximum_pose_gap_s",
+            "maximum_imu_gap_s",
+            "maximum_pitch_uncertainty_deg",
             "depth_scale_m",
         ):
             value = getattr(self, name)
@@ -209,24 +214,22 @@ def require_registered_depth(run_directory):
     )
 
 
-def _series(rows):
+def _series(rows, sensor_name):
     """Sort sensor stamps and retain the last value at duplicate timestamps."""
     samples = sorted(dict(rows).items())
     if not samples:
-        raise ValueError("Recording contains no valid joint samples.")
+        raise ValueError(f"Recording contains no valid {sensor_name} samples.")
     return np.array([x[0] for x in samples], dtype=np.int64), np.array(
         [x[1] for x in samples]
     )
 
 
 def sample_angle(series, stamp_ns, maximum_gap_ns):
-    """Interpolate angles; hold endpoints, but reject large interior gaps."""
+    """Interpolate measured angles without extending them beyond the recording."""
     times, values = series
+    if stamp_ns < times[0] or stamp_ns > times[-1]:
+        raise ValueError("Encoder pose is outside the recorded timestamp range.")
     right = int(np.searchsorted(times, stamp_ns))
-    if right == 0:
-        return float(values[0])
-    if right == len(times):
-        return float(values[-1])
     if times[right] == stamp_ns:
         return float(values[right])
     left = right - 1
@@ -241,14 +244,14 @@ def sample_angle(series, stamp_ns, maximum_gap_ns):
 
 @dataclass
 class RecordedRun:
-    """Only image metadata, calibration and joint angles are kept in memory."""
+    """Keep image metadata, calibration, encoder angles and one IMU pitch estimate."""
 
     source: object
     geometry: KinematicsConfig
     settings: ReplaySettings
     topics: dict
     frames: list[CloudFrame]
-    knee: tuple
+    pitch: PitchTrajectory
     encoder: tuple
     depth_calibrations: CalibrationTimeline
     rgb_calibrations: CalibrationTimeline
@@ -267,10 +270,16 @@ class RecordedRun:
                 (name for name in candidates if name in source.types), None
             )
             if topics[role] is None:
+                if role == "imu":
+                    raise ValueError(
+                        "IMU pitch requires a recorded combined accelerometer/gyroscope "
+                        f"topic; expected one of {candidates}. "
+                        "Record the camera IMU stream for this run."
+                    )
                 raise ValueError(f"Missing {role} topic; expected one of {candidates}.")
         images = {"depth": [], "rgb": []}
         calibration_rows = {"depth_info": [], "rgb_info": []}
-        knee, encoder = [], []
+        imu, encoder = [], []
         roles = {topic: role for role, topic in topics.items()}
         for topic, message, log_ns in source.messages(topics.values()):
             role = roles[topic]
@@ -294,14 +303,68 @@ class RecordedRun:
                         str(message.header.frame_id),
                     )
                 )
+            elif role == "imu":
+                # The Gemini 336 combined stream uses nominal camera optical
+                # axes. Reject a declared body frame rather than silently
+                # interpreting its measurements with a different rotation.
+                frame_id = str(getattr(message.header, "frame_id", ""))
+                if frame_id and not frame_id.endswith("optical_frame"):
+                    raise ValueError(
+                        f"IMU frame {frame_id!r} must use camera optical axes "
+                        "(an optical_frame suffix); transform the recorded IMU "
+                        "measurements before replaying this run."
+                    )
+                imu.append(
+                    (
+                        stamp_ns,
+                        (
+                            message.angular_velocity.x,
+                            message.angular_velocity.y,
+                            message.angular_velocity.z,
+                            message.linear_acceleration.x,
+                            message.linear_acceleration.y,
+                            message.linear_acceleration.z,
+                        ),
+                    )
+                )
             else:
-                name = "knee_joint" if role == "leg" else "rotation_joint"
                 try:
-                    angle = float(message.position[list(message.name).index(name)])
+                    angle = float(
+                        message.position[list(message.name).index("rotation_joint")]
+                    )
                 except (ValueError, IndexError):
                     continue
                 if math.isfinite(angle):
-                    (knee if role == "leg" else encoder).append((stamp_ns, angle))
+                    encoder.append((stamp_ns, angle))
+        if not imu:
+            raise ValueError("The recorded camera IMU topic contains no measurements.")
+        encoder_times, encoder_angles = _series(encoder, "central-encoder")
+        # Unwrap before interpolation/differentiation, and apply the experiment's
+        # encoder sign once. Both yaw and circular acceleration use this series.
+        encoder_angles = np.unwrap(encoder_angles)
+        encoder_angles = geometry.theta_y_kinematic_sign * (
+            encoder_angles - encoder_angles[0]
+        )
+        encoder_series = encoder_times, encoder_angles
+        imu_times, imu_values = _series(imu, "camera IMU")
+        # Use the full recording, including pauses before/after motion. Running
+        # the smoother once also makes random access and backward seeks stable.
+        pitch = estimate_pitch(
+            imu_times,
+            imu_values[:, :3],
+            imu_values[:, 3:],
+            encoder_times,
+            encoder_angles,
+            geometry,
+            maximum_gap_s=settings.maximum_imu_gap_s,
+            maximum_uncertainty_deg=settings.maximum_pitch_uncertainty_deg,
+        )
+        notes.append(
+            "Pitch uses recorded camera IMU fusion and offline smoothing, with "
+            "camera_front_angle_deg and encoder circular acceleration compensated. "
+            "The IMU is assumed aligned with nominal camera optical axes; the "
+            "reported uncertainty is a model estimate, not an accuracy guarantee."
+        )
         timelines = {}
         for role, rows in calibration_rows.items():
             timeline = CalibrationTimeline()
@@ -344,20 +407,20 @@ class RecordedRun:
             settings,
             topics,
             frames,
-            _series(knee),
-            _series(encoder),
+            pitch,
+            encoder_series,
             timelines["depth_info"],
             timelines["rgb_info"],
             notes,
         )
 
     def angles_at(self, stamp_ns):
-        """Use measured central rotation and knee position at acquisition time."""
+        """Sample measured yaw and reliable IMU beam pitch at acquisition time."""
         maximum_gap_ns = int(self.settings.maximum_pose_gap_s * 1e9)
-        knee = sample_angle(self.knee, stamp_ns, maximum_gap_ns)
-        encoder = sample_angle(self.encoder, stamp_ns, maximum_gap_ns)
-        yaw = self.geometry.theta_y_to_kinematic(encoder - self.encoder[1][0])
-        return yaw, theta_p_from_config(knee, self.geometry)
+        yaw = sample_angle(self.encoder, stamp_ns, maximum_gap_ns)
+        # Reject uncertain or missing IMU estimates; knee geometry is never a
+        # fallback, and samples outside the recorded IMU span are never clamped.
+        return yaw, self.pitch.sample(stamp_ns, require_reliable=True)
 
     def frames_at(self, stamp_ns):
         """Return the six measured kinematic poses in the stationary base."""

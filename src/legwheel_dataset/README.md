@@ -169,6 +169,47 @@ full experiment YAML. Both offset fields are required for dataset processing.
 Regenerate derived packets after correcting geometry because their projected
 pixel coordinates are saved during packet isolation.
 
+## Offline beam pitch from the camera IMU
+
+Dataset analysis, packet generation and the raw-run 3D viewer estimate
+`theta_p` from the recorded camera accelerometer and gyroscope. Knee angle
+remains diagnostic/ML telemetry and is never a fallback for an unavailable
+inertial pose. Existing live kinematics publishers retain their knee-based
+calculation.
+
+The estimator rotates the Gemini 336's nominal optical-axis IMU measurements
+into the beam frame using the existing camera transform. This includes
+`camera_front_angle_deg` and the optical-axis flip: a level beam has zero
+`theta_p` even when the physical camera is tilted. Camera image projection
+still uses the actual configured mounting angle. Per-device IMU-to-color
+misalignment is not recorded by the current bag format, so this uses the
+manufacturer's nominal optical-axis alignment. Validate physical mounting and
+calibration separately before claiming an absolute one-degree accuracy.
+
+The complete IMU recording is processed before selecting steady wheel motion.
+A pitch-and-gyro-bias filter uses quiet samples to estimate bias, rejects
+acceleration disturbances, and applies an offline smoother within each
+continuous segment. Smoothed central encoder motion and the camera lever arm
+compensate for circular acceleration. Pitch is evaluated separately at each
+RGB and depth acquisition timestamp. Missing data and rejected impacts do not
+get replaced by knee geometry or extrapolated poses.
+
+`maximum_pitch_uncertainty_deg` defaults to `1.0` and limits the estimator's
+two-sigma model uncertainty for retained frames. This confidence bound does
+not include every possible calibration error. Inspect `pitch_estimation` in
+the validation/analysis report and `packets/run_pitch_estimation.npz` for
+confidence, accepted samples and acceleration rejection. Packet metadata
+records the source, estimator version and each exposure's one-sigma
+`theta_p_*_uncertainty_rad`. Estimator version and settings participate in the
+dataset identity; regenerate packets to apply the new poses to Stage 2.
+
+For new recordings, leave the mechanism genuinely still for 5–10 seconds after
+the recorder reports ready and before confirming `START`. A recorded quiet
+period after motion also helps. Shorter existing pauses can still be used;
+the estimator must find quiet measurements rather than assuming the first
+two seconds are motionless. Source timing faults and insufficient trustworthy
+IMU data can leave frames unavailable; the report explains rejected pairs.
+
 ## Output layout
 
 By default, output is placed in:
@@ -177,8 +218,8 @@ By default, output is placed in:
 RUN_DIRECTORY/derived/CONFIGURATION_HASH/
 ```
 
-The hash covers the experiment configuration, run configuration, and complete
-post-processing configuration. An existing derived directory is never
+The hash covers the experiment configuration, run configuration, complete
+post-processing configuration and pitch estimator version. An existing derived directory is never
 overwritten.
 
 ```text
@@ -190,6 +231,7 @@ CONFIGURATION_HASH/
 └── packets/
     ├── analysis_report.json
     ├── run_motion_analysis.npz
+    ├── run_pitch_estimation.npz
     └── e<experiment>_r<run>_theta_<angle>_<hash>/
         ├── metadata.json
         ├── geometry.npz
@@ -423,7 +465,7 @@ patch_end   = patch_kinematic + alpha_sp_rad / 2
 end angles are always inserted, so the requested patch width is never rounded
 to that grid.
 
-The RGB and depth projections each use their own image timestamp, knee angle,
+The RGB and depth projections each use their own image timestamp, IMU-derived
 `theta_p`, `CameraInfo`, image frame, and camera pose. A patch is accepted only
 when its complete inner boundary, outer boundary and angular endpoints are in
 front of the camera and inside both images. Partial patches are rejected and
@@ -565,6 +607,7 @@ rgb_depth_max_delta_ms: 10.0
 spectral_window_ms: 1000.0
 telemetry_resample_hz: 100.0
 maximum_interpolation_gap_ms: 50.0
+maximum_pitch_uncertainty_deg: 1.0
 maximum_packet_saving_frequency_hz: 10.0
 alpha_off_rad: 0.35
 alpha_sp_rad: 0.10

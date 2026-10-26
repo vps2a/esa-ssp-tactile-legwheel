@@ -28,6 +28,8 @@ from legwheel_dataset.bag_reader import (
     TelemetrySeries,
 )
 from legwheel_kinematics.projection import CameraCalibration
+from legwheel_kinematics.config import KinematicsConfig
+from legwheel_kinematics.transforms import frame_coordinates
 from legwheel_dataset.synchronization import (
     ImagePair,
     pair_image_timestamps,
@@ -43,6 +45,13 @@ class SynchronizationTest(unittest.TestCase):
         with patch("legwheel_dataset.processor.KINEMATICS_MODEL_VERSION", 2):
             old_identifier = _dataset_identifier({}, {}, ProcessingConfig())
         with patch("legwheel_dataset.processor.KINEMATICS_MODEL_VERSION", 3):
+            new_identifier = _dataset_identifier({}, {}, ProcessingConfig())
+        self.assertNotEqual(old_identifier, new_identifier)
+
+    def test_dataset_identifier_changes_with_pitch_estimator(self):
+        with patch("legwheel_dataset.processor.PITCH_ESTIMATOR_VERSION", 1):
+            old_identifier = _dataset_identifier({}, {}, ProcessingConfig())
+        with patch("legwheel_dataset.processor.PITCH_ESTIMATOR_VERSION", 2):
             new_identifier = _dataset_identifier({}, {}, ProcessingConfig())
         self.assertNotEqual(old_identifier, new_identifier)
 
@@ -130,7 +139,14 @@ class SynchronizationTest(unittest.TestCase):
                 distortion_model="plumb_bob",
             )
             sample_times = np.arange(0, 401, dtype=np.int64) * 10_000_000
-            knee_joint = 1.0
+            # This knee position deliberately disagrees with the true pitch.
+            # Camera pose must follow inertial measurements rather than legs.
+            knee_joint = 0.0
+            true_pitch_rad = 0.12
+            geometry_config = KinematicsConfig.from_experiment_dict(
+                experiment_config
+            )
+            yaw_rate_rad_s = -10.0 * 2.0 * math.pi / 62.5
             leg = TelemetrySeries(tuple(
                 f"{name}.{field}"
                 for name in ("hip_joint", "knee_joint")
@@ -153,7 +169,24 @@ class SynchronizationTest(unittest.TestCase):
                 # but must not limit the 100 Hz motor/IMU packet grid.
                 if sample_index % 5 == 0:
                     ticks.append(timestamp_ns, [encoder_ticks])
-                imu.append(timestamp_ns, [0.0] * 6)
+                camera_pose = frame_coordinates(
+                    geometry_config, true_pitch_rad,
+                    theta_y=yaw_rate_rad_s * time_s,
+                )[-1]
+                camera_rotation = camera_pose[:3, :3]
+                camera_position = camera_pose[:3, 3]
+                circular_acceleration = -yaw_rate_rad_s**2 * np.array([
+                    camera_position[0], camera_position[1], 0.0,
+                ])
+                # Generate optical-frame measurements independently from the
+                # estimator, using gravity and the world-space circular path.
+                acceleration = camera_rotation.T @ (
+                    circular_acceleration + [0.0, 0.0, 9.80665]
+                )
+                angular_velocity = camera_rotation.T @ np.array([
+                    0.0, 0.0, yaw_rate_rad_s,
+                ])
+                imu.append(timestamp_ns, [*angular_velocity, *acceleration])
             for timestamp_ns, torque in (
                 (0, 0.0),
                 (500_000_000, -0.95),
@@ -300,11 +333,16 @@ class SynchronizationTest(unittest.TestCase):
             self.assertEqual(len(metadata["telemetry_channel_names"]), 15)
             self.assertAlmostEqual(
                 metadata["theta_p_rgb_rad"],
-                -math.asin((
-                    0.05 + 0.085 + math.sqrt(
-                        0.2**2 + 0.2**2 - 2.0 * 0.2 * 0.2 * math.cos(knee_joint)
-                    ) - 0.0661 - 0.353
-                ) / 0.83),
+                true_pitch_rad,
+                delta=math.radians(0.5),
+            )
+            self.assertEqual(metadata["theta_p_source"], "camera_imu")
+            self.assertLessEqual(
+                2.0 * metadata["theta_p_rgb_uncertainty_rad"],
+                math.radians(1.0),
+            )
+            self.assertTrue(
+                (output_directory / "packets" / "run_pitch_estimation.npz").is_file()
             )
             with np.load(packet / "geometry.npz", allow_pickle=False) as geometry:
                 for key, radius in (
@@ -344,6 +382,72 @@ class SynchronizationTest(unittest.TestCase):
             self.assertEqual(
                 analysis["resampled_telemetry_channel_count"], 15
             )
+
+            # Missing knee position may degrade its own ML channel, but it
+            # must not suppress an otherwise supported camera pose or preview.
+            missing_knee = TelemetrySeries(leg.channel_names)
+            for timestamp_ns, row in zip(leg.times_ns, leg.rows):
+                diagnostic_row = row.copy()
+                diagnostic_row[3] = float("nan")
+                missing_knee.append(timestamp_ns, diagnostic_row)
+            without_knee = BagIndex(
+                rgb_images=bag_index.rgb_images,
+                depth_images=bag_index.depth_images,
+                rgb_calibrations=timeline,
+                depth_calibrations=timeline,
+                streams={**bag_index.streams, "leg": missing_knee},
+            )
+            with patch(
+                "legwheel_dataset.processor.index_bag", return_value=without_knee
+            ):
+                no_knee_report, no_knee_preview = (
+                    validate_processing_configuration_with_preview(
+                        run_directory, ProcessingConfig(),
+                        experiment_config_path=experiment_path,
+                    )
+                )
+            self.assertTrue(no_knee_report["configuration_valid"])
+            self.assertIsNone(no_knee_preview.rgb.knee_joint_rad)
+            self.assertAlmostEqual(
+                no_knee_preview.rgb.theta_p_rad, metadata["theta_p_rgb_rad"]
+            )
+
+            # A coincident impact invalidates the image pair even though knee
+            # position, camera calibration and all timestamps remain available.
+            impact_imu = TelemetrySeries(imu.channel_names)
+            for timestamp_ns, row in zip(imu.times_ns, imu.rows):
+                impact_row = row.copy()
+                if 1_400_000_000 <= timestamp_ns <= 1_700_000_000:
+                    impact_row[3:] = [0.0, 0.0, 0.0]
+                impact_imu.append(timestamp_ns, impact_row)
+            during_impact = BagIndex(
+                rgb_images=bag_index.rgb_images,
+                depth_images=bag_index.depth_images,
+                rgb_calibrations=timeline,
+                depth_calibrations=timeline,
+                streams={**bag_index.streams, "imu": impact_imu},
+            )
+            impact_output = run_directory / "derived_impact"
+            with (
+                patch("legwheel_dataset.processor.index_bag", return_value=during_impact),
+                patch(
+                    "legwheel_dataset.processor.extract_selected_images",
+                    side_effect=provide_images,
+                ),
+            ):
+                isolate_packets(
+                    run_directory, ProcessingConfig(),
+                    experiment_config_path=experiment_path,
+                    output_directory=impact_output,
+                )
+            self.assertEqual((impact_output / "manifest.jsonl").read_text(), "")
+            impact_report = json.loads(
+                (impact_output / "packets" / "analysis_report.json").read_text()
+            )
+            self.assertTrue(any(
+                "IMU pitch is unreliable" in reason
+                for reason in impact_report["rejection_counts"]
+            ))
 
             reverse_ticks = TelemetrySeries(("rotation_encoder.ticks",))
             for timestamp_ns, row in zip(ticks.times_ns, ticks.rows):

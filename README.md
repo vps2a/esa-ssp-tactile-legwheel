@@ -459,6 +459,15 @@ centreline radius is `beam_radius_m - wheel_width_m / 2`. The knee-derived beam
 pitch uses the vertical displacement divided by `beam_radius_m` inside the
 arcsine, retaining the measured negative sign convention.
 
+Offline dataset analysis and `visualise_run` instead estimate `theta_p` from
+the recorded camera IMU, with gyro bias estimation, circular-acceleration
+compensation and offline smoothing. The full camera rotation compensates
+`camera_front_angle_deg` when interpreting IMU vectors. Unreliable image-time
+poses are rejected; knee angle remains telemetry. See the
+[offline IMU pitch documentation](src/legwheel_dataset/README.md#offline-beam-pitch-from-the-camera-imu)
+for confidence limits and recording recommendations. Live kinematics publishers
+continue to use the knee-derived angle.
+
 After a kinematics change, regenerate derived packets before inspecting dataset
 overlays: those overlays contain saved pixel coordinates. The kinematics model
 version is included in new dataset identifiers and provenance, giving corrected
@@ -518,7 +527,7 @@ This viewer reads a **raw recorded run**, reconstructs a coloured point cloud
 from depth and RGB images, and accumulates it around the stationary central
 pivot. It displays the corrected inner/outer tracks, a red preview patch,
 labelled coordinate axes, the kinematic chain, and a purple camera frustum.
-Central rotation and beam pitch animate from recorded encoder and knee data.
+Central rotation and beam pitch animate from recorded encoder and camera IMU data.
 The camera frustum is drawn 0.20 m long as a direction/FOV aid.
 
 No connected camera or motors are needed. The viewer publishes visualization
@@ -690,8 +699,9 @@ surfaces caused by a calibration error.
 
 - Both the current `/legwheel_rgbd/...` image topics and legacy
   `/camera/rgbd/...` topics are detected automatically. A matching pair of
-  `CameraInfo` topics, `/legwheel/joint_states` with `knee_joint`, and
-  `/rotation_encoder/joint_state` with `rotation_joint` are required.
+  `CameraInfo` topics, `/legwheel_rgbd/gyro_accel/sample` (or legacy
+  `/camera/imu`), and `/rotation_encoder/joint_state` with `rotation_joint`
+  are required.
 - Older camera fields are converted locally: `sensor_height_mm / 1000` becomes
   `camera_height_m`. When `sensor_front_offset_m` is absent, the former signed
   `camera_beam_offset_m` is negated into `sensor_front_offset_m`; the oldest
@@ -702,13 +712,12 @@ surfaces caused by a calibration error.
   logged; use `--experiment-config` with a corrected full copy if an older
   installation used different measurements. Recordings are left untouched.
 - Geometry uses the current shared model: inner radius `beam_radius_m -
-  wheel_width_m`, outer radius `beam_radius_m`, and beam-length-normalized pitch.
-  The first recorded encoder angle defines zero yaw. Angles are held before
-  their first and after their last sample; interior gaps beyond the configured
-  tolerance reject affected clouds. This endpoint hold assumes the rig is
-  stationary outside the recorded encoder interval.
+  wheel_width_m`, outer radius `beam_radius_m`, and IMU-derived beam pitch.
+  The first recorded encoder angle defines zero yaw. Poses outside recorded
+  coverage, across excessive gaps, or with unreliable IMU pitch reject affected
+  clouds.
 - Depth is reconstructed using its calibration at acquisition time, then moved
-  into `replay_base` using interpolated knee and encoder angles. RGB is projected
+  into `replay_base` using estimated IMU pitch and interpolated encoder yaw. RGB is projected
   separately using its own calibration and acquisition pose. It is not assumed
   that aligned RGB and depth have identical distortion coefficients.
 - The cloud covers the valid camera image, rather than only an ML patch. Raw
@@ -837,6 +846,7 @@ rgb_depth_max_delta_ms: 10.0
 spectral_window_ms: 1000.0
 telemetry_resample_hz: 100.0
 maximum_interpolation_gap_ms: 50.0
+maximum_pitch_uncertainty_deg: 1.0
 maximum_packet_saving_frequency_hz: 10.0
 alpha_off_rad: 0.35
 alpha_sp_rad: 0.10

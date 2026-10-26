@@ -143,6 +143,7 @@ class BagIndex:
     rgb_calibrations: CalibrationTimeline = field(default_factory=CalibrationTimeline)
     depth_calibrations: CalibrationTimeline = field(default_factory=CalibrationTimeline)
     streams: dict[str, TelemetrySeries] = field(default_factory=dict)
+    imu_frame_ids: set[str] = field(default_factory=set)
 
 
 def _joint_value(message, name: str, field_name: str) -> float:
@@ -299,6 +300,9 @@ def index_bag(bag_directory: Path) -> BagIndex:
                 [float(message.data)],
             )
         elif topic == IMU_TOPIC:
+            # Keep the declared basis so offline pose estimation can reject a
+            # body-frame stream instead of assuming it uses Gemini optical axes.
+            index.imu_frame_ids.add(str(getattr(message.header, "frame_id", "")))
             index.streams["imu"].append(
                 timestamp_ns,
                 [

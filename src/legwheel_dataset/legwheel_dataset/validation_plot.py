@@ -278,11 +278,15 @@ def create_validation_figure(
             _draw_image(axis, image, view)
             _draw_overlay(axis, view, expanded=expanded)
             _configure_axis(axis, view, expanded=expanded)
+        knee_label = (
+            "unavailable" if view.knee_joint_rad is None
+            else f"{view.knee_joint_rad:.5f} rad"
+        )
         detail = (
             f"timestamp={view.metadata.timestamp_ns} ns\n"
             f"theta_y motion={view.theta_y_motion_rad:.5f} rad, "
             f"kinematic={view.theta_y_kinematic_rad:.5f} rad\n"
-            f"knee={view.knee_joint_rad:.5f} rad, "
+            f"knee={knee_label}, "
             f"theta_p={view.theta_p_rad:.5f} rad\n"
             f"status: {_format_reasons(view)}"
         )
