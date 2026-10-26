@@ -1,0 +1,480 @@
+"""Read a raw run and accumulate camera points in the stationary rig frame.
+
+This module has no ROS imports at module scope. Only RosbagSource needs ROS;
+configuration, interpolation, cloud construction and seeking can be tested
+with ordinary Python objects. Raw recordings are opened read-only.
+"""
+
+from bisect import bisect_left
+from copy import deepcopy
+from dataclasses import dataclass, field
+import math
+from pathlib import Path
+
+import numpy as np
+import yaml
+
+from legwheel_dataset.bag_reader import (
+    CalibrationTimeline,
+    _deserialize,
+    _message_types,
+    _open_reader,
+    message_stamp_ns,
+)
+from legwheel_dataset.images import decode_image, depth_point_map_in_base
+from legwheel_kinematics.config import KinematicsConfig
+from legwheel_kinematics.projection import CameraCalibration, project_camera_points
+from legwheel_kinematics.transforms import frame_coordinates, theta_p_from_config
+
+
+TOPIC_CANDIDATES = {
+    "depth": ("/legwheel_rgbd/depth/image_raw", "/camera/rgbd/depth/image_raw"),
+    "rgb": ("/legwheel_rgbd/color/image_raw", "/camera/rgbd/rgb/image_raw"),
+    "depth_info": (
+        "/legwheel_rgbd/depth/camera_info",
+        "/camera/rgbd/depth/camera_info",
+    ),
+    "rgb_info": ("/legwheel_rgbd/color/camera_info", "/camera/rgbd/rgb/camera_info"),
+    "leg": ("/legwheel/joint_states",),
+    "encoder": ("/rotation_encoder/joint_state",),
+}
+POINT_DTYPE = np.dtype(
+    [
+        ("x", "<f4"),
+        ("y", "<f4"),
+        ("z", "<f4"),
+        ("rgb", "<u4"),
+    ]
+)
+
+
+@dataclass(frozen=True)
+class ReplaySettings:
+    """Small, explicit controls for cloud detail and association tolerances."""
+
+    pixel_stride: int = 4
+    voxel_size_m: float = 0.01
+    max_points: int = 500_000
+    cloud_rate_hz: float = 5.0
+    minimum_depth_m: float = 0.15
+    maximum_depth_m: float = 3.0
+    rgb_max_delta_ms: float = 50.0
+    maximum_pose_gap_s: float = 0.5
+    depth_scale_m: float = 0.001
+
+    def __post_init__(self):
+        """Reject invalid settings before reading a bag."""
+        for name in ("pixel_stride", "max_points"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer.")
+        for name in (
+            "voxel_size_m",
+            "cloud_rate_hz",
+            "maximum_depth_m",
+            "maximum_pose_gap_s",
+            "depth_scale_m",
+        ):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive.")
+        if not 0 <= self.minimum_depth_m < self.maximum_depth_m:
+            raise ValueError("Require 0 <= minimum_depth_m < maximum_depth_m.")
+        if not math.isfinite(self.rgb_max_delta_ms) or self.rgb_max_delta_ms < 0:
+            raise ValueError("rgb_max_delta_ms must be finite and nonnegative.")
+
+
+@dataclass(frozen=True)
+class ImageRecord:
+    """Image address in the bag, with acquisition and playback times distinct."""
+
+    topic: str
+    log_time_ns: int
+    stamp_ns: int
+    width: int
+    height: int
+    frame_id: str
+
+
+@dataclass(frozen=True)
+class CloudFrame:
+    """One depth frame, with an optional nearby RGB exposure."""
+
+    depth: ImageRecord
+    rgb: ImageRecord | None
+
+
+class RosbagSource:
+    """Index once, then seek directly to individual image records as needed."""
+
+    def __init__(self, directory: Path):
+        self.reader = _open_reader(directory)
+        self.types = _message_types(self.reader)
+
+    def _select(self, topics, start_ns=0):
+        import rosbag2_py
+
+        self.reader.set_filter(rosbag2_py.StorageFilter(topics=list(topics)))
+        self.reader.seek(int(start_ns))
+
+    def messages(self, topics):
+        """Yield decoded messages without retaining image payloads."""
+        self._select(topics)
+        while self.reader.has_next():
+            topic, data, log_ns = self.reader.read_next()
+            yield topic, _deserialize(data, self.types[topic]), int(log_ns)
+
+    def image(self, record: ImageRecord):
+        """Read exactly the image selected by topic and bag receipt time."""
+        self._select([record.topic], record.log_time_ns)
+        if self.reader.has_next():
+            topic, data, log_ns = self.reader.read_next()
+            if topic == record.topic and int(log_ns) == record.log_time_ns:
+                return _deserialize(data, self.types[topic])
+        raise ValueError(f"Image not found: {record.topic}@{record.log_time_ns}")
+
+    def close(self):
+        """Release the read-only bag handle."""
+        self.reader.close()
+
+
+def _yaml(path):
+    with Path(path).open(encoding="utf-8") as stream:
+        values = yaml.safe_load(stream)
+    if not isinstance(values, dict):
+        raise ValueError(f"Expected a YAML mapping: {path}")
+    return values
+
+
+def load_geometry(run_directory, experiment_config=None):
+    """Adapt legacy camera units locally, leaving recorded snapshots untouched."""
+    run_directory = Path(run_directory)
+    if experiment_config is None:
+        paths = sorted(run_directory.glob("experiment_config_run_*_snapshot.yaml"))
+        if len(paths) != 1:
+            raise ValueError(
+                "Run must contain one experiment snapshot, or supply --experiment-config."
+            )
+        experiment_config = paths[0]
+    values = deepcopy(_yaml(Path(experiment_config).expanduser()))
+    hardware = values["electronics_hardware"]
+    camera = hardware["camera"]["camera_config"]
+    notes = []
+    if "camera_height_m" not in camera and "sensor_height_mm" in camera:
+        camera["camera_height_m"] = camera["sensor_height_mm"] / 1000.0
+        notes.append("Legacy sensor_height_mm converted to camera_height_m.")
+    if "camera_beam_offset_m" not in camera and "sensor_front_offset_mm" in camera:
+        camera["camera_beam_offset_m"] = -camera["sensor_front_offset_mm"] / 1000.0
+        notes.append(
+            "Legacy front offset converted to a negative beam offset in metres."
+        )
+    if "theta_y_kinematic_sign" not in hardware["encoder_setup"]:
+        hardware["encoder_setup"]["theta_y_kinematic_sign"] = -1
+        notes.append("Legacy encoder sign defaults to -1 for the current rig.")
+    return KinematicsConfig.from_experiment_dict(values), notes
+
+
+def require_registered_depth(run_directory):
+    """Colour projection assumes depth has already been aligned to colour."""
+    for pattern in (
+        "camera_driver_config_run_*_snapshot.yaml",
+        "gemini_336_run_*_snapshot.yaml",
+    ):
+        paths = sorted(Path(run_directory).glob(pattern))
+        if len(paths) == 1:
+            config = _yaml(paths[0])
+            if (
+                config.get("depth_registration") is True
+                and str(config.get("align_target_stream", "")).upper() == "COLOR"
+            ):
+                return
+            raise ValueError(
+                "3D replay requires depth_registration: true and align_target_stream: COLOR."
+            )
+    raise ValueError(
+        "Cannot find one camera-driver snapshot to verify colour-aligned depth."
+    )
+
+
+def _series(rows):
+    """Sort sensor stamps and retain the last value at duplicate timestamps."""
+    samples = sorted(dict(rows).items())
+    if not samples:
+        raise ValueError("Recording contains no valid joint samples.")
+    return np.array([x[0] for x in samples], dtype=np.int64), np.array(
+        [x[1] for x in samples]
+    )
+
+
+def sample_angle(series, stamp_ns, maximum_gap_ns):
+    """Interpolate angles; hold endpoints, but reject large interior gaps."""
+    times, values = series
+    right = int(np.searchsorted(times, stamp_ns))
+    if right == 0:
+        return float(values[0])
+    if right == len(times):
+        return float(values[-1])
+    if times[right] == stamp_ns:
+        return float(values[right])
+    left = right - 1
+    gap = int(times[right]) - int(times[left])
+    if gap > maximum_gap_ns:
+        raise ValueError(
+            "Joint interpolation crosses a gap larger than maximum_pose_gap_s."
+        )
+    fraction = (stamp_ns - int(times[left])) / gap
+    return float(values[left] + fraction * (values[right] - values[left]))
+
+
+@dataclass
+class RecordedRun:
+    """Only image metadata, calibration and joint angles are kept in memory."""
+
+    source: object
+    geometry: KinematicsConfig
+    settings: ReplaySettings
+    topics: dict
+    frames: list[CloudFrame]
+    knee: tuple
+    encoder: tuple
+    depth_calibrations: CalibrationTimeline
+    rgb_calibrations: CalibrationTimeline
+    notes: list[str] = field(default_factory=list)
+
+    @classmethod
+    def load(cls, directory, settings, experiment_config=None, source=None):
+        """Read both current and legacy raw runs, without ML packet filtering."""
+        directory = Path(directory).expanduser().resolve()
+        geometry, notes = load_geometry(directory, experiment_config)
+        require_registered_depth(directory)
+        source = source if source is not None else RosbagSource(directory / "rosbag")
+        topics = {}
+        for role, candidates in TOPIC_CANDIDATES.items():
+            topics[role] = next(
+                (name for name in candidates if name in source.types), None
+            )
+            if topics[role] is None:
+                raise ValueError(f"Missing {role} topic; expected one of {candidates}.")
+        images = {"depth": [], "rgb": []}
+        calibration_rows = {"depth_info": [], "rgb_info": []}
+        knee, encoder = [], []
+        roles = {topic: role for role, topic in topics.items()}
+        for topic, message, log_ns in source.messages(topics.values()):
+            role = roles[topic]
+            stamp_ns = message_stamp_ns(message, log_ns)
+            if role in images:
+                images[role].append(
+                    ImageRecord(
+                        topic,
+                        log_ns,
+                        stamp_ns,
+                        int(message.width),
+                        int(message.height),
+                        str(message.header.frame_id),
+                    )
+                )
+            elif role in calibration_rows:
+                calibration_rows[role].append(
+                    (
+                        stamp_ns,
+                        CameraCalibration.from_message(message),
+                        str(message.header.frame_id),
+                    )
+                )
+            else:
+                name = "knee_joint" if role == "leg" else "rotation_joint"
+                try:
+                    angle = float(message.position[list(message.name).index(name)])
+                except (ValueError, IndexError):
+                    continue
+                if math.isfinite(angle):
+                    (knee if role == "leg" else encoder).append((stamp_ns, angle))
+        timelines = {}
+        for role, rows in calibration_rows.items():
+            timeline = CalibrationTimeline()
+            for stamp_ns, calibration, frame_id in sorted(rows, key=lambda x: x[0]):
+                timeline.append(stamp_ns, calibration, frame_id)
+            if not timeline.calibrations:
+                raise ValueError(f"No calibration messages on {topics[role]}.")
+            timelines[role] = timeline
+        rgb = sorted(images["rgb"], key=lambda x: x.stamp_ns)
+        rgb_times = [image.stamp_ns for image in rgb]
+        frames = []
+        period_ns = int(1e9 / settings.cloud_rate_hz)
+        last_log_ns = None
+        for depth in images["depth"]:
+            if last_log_ns is not None and depth.log_time_ns - last_log_ns < period_ns:
+                continue
+            right = bisect_left(rgb_times, depth.stamp_ns)
+            candidates = rgb[max(0, right - 1) : right + 1]
+            colour = (
+                min(candidates, key=lambda x: abs(x.stamp_ns - depth.stamp_ns))
+                if candidates
+                else None
+            )
+            if (
+                colour
+                and abs(colour.stamp_ns - depth.stamp_ns)
+                > settings.rgb_max_delta_ms * 1e6
+            ):
+                colour = None
+            frames.append(CloudFrame(depth, colour))
+            last_log_ns = depth.log_time_ns
+        if not frames:
+            raise ValueError("Recording contains no depth images.")
+        notes.append(
+            f"Selected {len(frames)} depth frames; {sum(x.rgb is None for x in frames)} use grey because no RGB exposure is close enough."
+        )
+        return cls(
+            source,
+            geometry,
+            settings,
+            topics,
+            frames,
+            _series(knee),
+            _series(encoder),
+            timelines["depth_info"],
+            timelines["rgb_info"],
+            notes,
+        )
+
+    def angles_at(self, stamp_ns):
+        """Use measured central rotation and knee position at acquisition time."""
+        maximum_gap_ns = int(self.settings.maximum_pose_gap_s * 1e9)
+        knee = sample_angle(self.knee, stamp_ns, maximum_gap_ns)
+        encoder = sample_angle(self.encoder, stamp_ns, maximum_gap_ns)
+        yaw = self.geometry.theta_y_to_kinematic(encoder - self.encoder[1][0])
+        return yaw, theta_p_from_config(knee, self.geometry)
+
+    def frames_at(self, stamp_ns):
+        """Return the six measured kinematic poses in the stationary base."""
+        yaw, pitch = self.angles_at(stamp_ns)
+        return frame_coordinates(self.geometry, pitch, theta_y=yaw)
+
+    def calibration(self, image, *, depth):
+        """Check that image geometry matches its calibration epoch."""
+        timeline = self.depth_calibrations if depth else self.rgb_calibrations
+        calibration = timeline.at(image.stamp_ns)
+        if (image.width, image.height) != (calibration.width, calibration.height):
+            raise ValueError("Image and CameraInfo dimensions differ.")
+        frame_id = timeline.frame_id_at(image.stamp_ns)
+        if image.frame_id and frame_id and image.frame_id != frame_id:
+            raise ValueError("Image and CameraInfo optical frames differ.")
+        return calibration
+
+    def cloud(self, frame):
+        """Reconstruct measured depth; never flatten it onto the modelled ground."""
+        settings = self.settings
+        depth = decode_image(self.source.image(frame.depth))
+        depth_m = (
+            depth
+            if np.issubdtype(depth.dtype, np.floating)
+            else depth * settings.depth_scale_m
+        )
+        mask = np.zeros(depth.shape, dtype=bool)
+        mask[:: settings.pixel_stride, :: settings.pixel_stride] = True
+        mask &= (depth_m >= settings.minimum_depth_m) & (
+            depth_m <= settings.maximum_depth_m
+        )
+        T_depth = self.frames_at(frame.depth.stamp_ns)[-1]
+        point_map = depth_point_map_in_base(
+            depth,
+            mask,
+            self.calibration(frame.depth, depth=True),
+            settings.depth_scale_m,
+            T_depth,
+        )
+        points = point_map.points_base_m
+        colours = np.full((len(points), 3), 160, dtype=np.uint8)
+        if frame.rgb is not None and len(points):
+            if frame.rgb.frame_id != frame.depth.frame_id:
+                raise ValueError(
+                    "Registered RGB and depth must share the colour optical frame."
+                )
+            rgb_message = self.source.image(frame.rgb)
+            rgb = decode_image(rgb_message)
+            if rgb.ndim != 3 or rgb.shape[2] < 3:
+                raise ValueError("Colour image must have at least three channels.")
+            if str(rgb_message.encoding).lower().startswith("bgr"):
+                rgb = rgb[:, :, [2, 1, 0]]
+            else:
+                rgb = rgb[:, :, :3]
+            # RGB and aligned depth can have different distortion coefficients.
+            # Reproject through RGB calibration instead of copying pixel colours.
+            T_rgb = self.frames_at(frame.rgb.stamp_ns)[-1]
+            in_rgb = (
+                np.linalg.inv(T_rgb) @ np.column_stack((points, np.ones(len(points)))).T
+            ).T[:, :3]
+            pixels, valid = project_camera_points(
+                in_rgb, self.calibration(frame.rgb, depth=False)
+            )
+            uv = np.floor(np.where(np.isfinite(pixels), pixels, 0)).astype(np.int64)
+            colours[valid] = rgb[uv[valid, 1], uv[valid, 0]]
+        return points, colours
+
+
+class VoxelCloud:
+    """Keep the first measured point per voxel, with a strict memory bound."""
+
+    def __init__(self, voxel_size_m, max_points):
+        self.voxel_size_m = voxel_size_m
+        self.max_points = max_points
+        self.points = {}
+        self.limit_reached = False
+
+    def clear(self):
+        """Forget all accumulated geometry when playback moves backward."""
+        self.points.clear()
+        self.limit_reached = False
+
+    def add(self, points, colours):
+        """Add points without averaging away calibration errors or double walls."""
+        keys = np.floor(points / self.voxel_size_m).astype(np.int64)
+        _, first = np.unique(keys, axis=0, return_index=True)
+        for index in sorted(first):
+            key = tuple(keys[index])
+            if key in self.points:
+                continue
+            if len(self.points) >= self.max_points:
+                self.limit_reached = True
+                continue
+            r, g, b = map(int, colours[index])
+            self.points[key] = (*map(float, points[index]), (r << 16) | (g << 8) | b)
+
+    def packed(self):
+        """Return standard little-endian XYZ plus packed RGB, 16 bytes per point."""
+        return np.array(list(self.points.values()), dtype=POINT_DTYPE)
+
+
+class CloudReplay:
+    """Advance through bag receipt times, rebuilding history after backward seeks."""
+
+    def __init__(self, run):
+        self.run = run
+        self.cloud = VoxelCloud(run.settings.voxel_size_m, run.settings.max_points)
+        self.next_index = 0
+        self.last_time_ns = None
+        self.failures = {}
+
+    def advance(self, time_ns, budget=4):
+        """Process a bounded batch so the ROS node stays responsive during seeks."""
+        changed = False
+        if self.last_time_ns is not None and time_ns < self.last_time_ns:
+            self.cloud.clear()
+            self.next_index = 0
+            self.failures.clear()
+            changed = True
+        self.last_time_ns = time_ns
+        for _ in range(budget):
+            if self.next_index >= len(self.run.frames):
+                break
+            frame = self.run.frames[self.next_index]
+            if frame.depth.log_time_ns > time_ns:
+                break
+            try:
+                self.cloud.add(*self.run.cloud(frame))
+            except ValueError as error:
+                self.failures[self.next_index] = str(error)
+            self.next_index += 1
+            changed = True
+        return changed

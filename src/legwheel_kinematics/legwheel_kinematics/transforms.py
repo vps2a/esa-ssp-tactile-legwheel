@@ -156,12 +156,9 @@ def individual_transformation_matrices(
 def transformation_matrices_from_config(
     config: KinematicsConfig,
     theta_p: float,
+    theta_y: float = 0.0,
 ) -> tuple[FloatArray, FloatArray, FloatArray, FloatArray, FloatArray]:
-    """Return T01 through T45 using one experiment configuration."""
-    # TODO: theta_y is consciously fixed at zero while the processed track is
-    # radially circular. When theta_y is measured, T01 must also be published
-    # as a dynamic transform by the post-processing visualization node.
-    theta_y = 0.0
+    """Return T01 through T45, optionally rotating the rig in a fixed base."""
 
     return individual_transformation_matrices(
         d1=config.d1,
@@ -181,11 +178,13 @@ def transformation_matrices_from_config(
 def frame_coordinates(
     config: KinematicsConfig,
     theta_p: float,
+    theta_y: float = 0.0,
 ) -> tuple[FloatArray, ...]:
     """Return Base, F1, F2, F3, F4 and Camera poses in base coordinates."""
     T01, T12, T23, T34, T45 = transformation_matrices_from_config(
         config,
         theta_p,
+        theta_y,
     )
 
     # Keep the notebook name here so the implementation can be checked against

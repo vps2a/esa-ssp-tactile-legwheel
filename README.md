@@ -23,6 +23,9 @@ experiment runner that records MCAP rosbags.
 | `legwheel_kinematics` | Implements the verified rig kinematics and publishes track annotations for Foxglove. | `ros2 launch legwheel_kinematics track_overlay.launch.py experiment_config:=<file>` |
 | `legwheel_dataset` | Converts recorded MCAP runs into synchronized packets, terrain-slope labels, and telemetry spectra. | `ros2 run legwheel_dataset build_dataset --run-directory <run>` |
 
+For an accumulated RGB-D cloud with animated tracks and coordinate frames, see
+[the raw-run Foxglove 3D tutorial](#accumulated-rgb-d-and-tracks-in-foxglove-3d).
+
 The workspace includes the MAB CANdle-SDK as a Git submodule. Orbbec's ROS 2
 driver is downloaded through `dependencies.repos`.
 
@@ -489,9 +492,233 @@ would create competing TF authorities. The direct kinematics visualization
 launch is preferred for rosbag post-processing and does not require TF to have
 been recorded in the raw bag.
 
+### Accumulated RGB-D and tracks in Foxglove 3D
+
+This viewer reads a **raw recorded run**, reconstructs a coloured point cloud
+from depth and RGB images, and accumulates it around the stationary central
+pivot. It displays the corrected inner/outer tracks, a red preview patch,
+labelled coordinate axes, the kinematic chain, and a purple camera frustum.
+Central rotation and beam pitch animate from recorded encoder and knee data.
+The camera frustum is drawn 0.20 m long as a direction/FOV aid.
+
+No connected camera or motors are needed. The viewer publishes visualization
+topics only and opens recordings read-only. It does not require ML packet
+generation, steady wheel torque, recorded point clouds, or recorded TF.
+
+#### 1. Build the two required workspace packages
+
+Run on the **ROS 2 Jazzy computer**. If the recording is in Google Drive on a
+different computer, copy or mount the complete run directory onto this one,
+including its `rosbag` directory and YAML snapshots. Download cloud-only files
+before starting. The run path is an argument, not hard-coded into the viewer.
+
+```bash
+cd /path/to/esa-ssp-tactile-legwheel
+source /opt/ros/jazzy/setup.bash
+rosdep install --from-paths src/legwheel_kinematics src/legwheel_dataset \
+  --ignore-src -r -y
+sudo apt install ros-jazzy-foxglove-bridge
+colcon build --symlink-install \
+  --packages-select legwheel_kinematics legwheel_dataset
+source install/setup.bash
+```
+
+Repeat the `cd` and both `source` commands in every terminal below. Use the
+same `ROS_DOMAIN_ID` in all three terminals if you set one.
+
+The normal run layout is:
+
+```text
+run_3/
+  experiment_config_run_3_snapshot.yaml
+  camera_driver_config_run_3_snapshot.yaml
+  rosbag/
+    metadata.yaml
+    rosbag_0.mcap
+```
+
+Older runs with `gemini_336_run_3_snapshot.yaml` instead of the camera-driver
+snapshot are supported too. Depth must have been registered to colour
+(`depth_registration: true`, `align_target_stream: COLOR`). Native, unregistered
+depth is rejected because its optical pose needs a different extrinsic model.
+
+#### 2. Terminal A: start the Foxglove bridge
+
+```bash
+ros2 launch foxglove_bridge foxglove_bridge_launch.xml use_sim_time:=true
+```
+
+The bridge must use simulated time so its live connection follows the bag's
+historical timestamps. It will wait for `/clock` until Terminal C starts.
+
+#### 3. Terminal B: start the reconstruction viewer
+
+Choose the run directory on the ROS computer; quote paths containing spaces:
+
+```bash
+RUN_DIR="/path/to/Experiment_Recordings/experiment_3/run_3"
+ros2 run legwheel_dataset visualise_run --run-directory "$RUN_DIR"
+```
+
+Wait until the viewer prints **`READY`**. It first indexes calibration, joint
+angles, and image metadata. Image payloads are read from MCAP on demand, rather
+than retaining all full-resolution images in memory. Keep this terminal open
+to see compatibility notes and any skipped-frame or point-limit warnings.
+
+#### 4. Terminal C: play the original bag
+
+Set the same run path in this terminal:
+
+```bash
+RUN_DIR="/path/to/Experiment_Recordings/experiment_3/run_3"
+ros2 bag play "$RUN_DIR/rosbag" --clock --rate 0.5
+```
+
+Start at half speed while inspecting alignment. Use `--rate 1.0` for normal
+speed. The player terminal prints its keyboard controls, including pause and
+resume. Only one bag player should publish `/clock` for this viewer.
+
+#### 5. Connect and configure Foxglove
+
+1. Choose **Open connection → Foxglove WebSocket**. Use
+   `ws://localhost:8765` if Foxglove runs on the ROS computer, or
+   `ws://<ROS_COMPUTER_IP>:8765` from another computer.
+2. Add a **3D** panel. Set both **Fixed frame** and **Display frame** to
+   **`replay_base`**. Set **Follow mode** to **Off** to keep the inspection
+   camera stationary while the rig frames move.
+3. Enable **`/legwheel/replay/accumulated_cloud`**. Select **BGR (packed)**
+   colour mode using its `rgb` field. Start with point size **2–3 pixels**.
+   Set **Decay time to 0**: each message already contains the accumulated cloud,
+   so Foxglove should display the latest message without adding another trail.
+4. Enable **`/legwheel/replay/scene`**. Cyan is the inner track, orange is the
+   outer track, red is the preview patch, and yellow joins the frame origins.
+   Frame-axis colours are X red, Y green, and Z blue. Labels are included in the
+   markers; enabling Foxglove's transform labels as well is optional.
+5. Add a **Raw Messages** panel for **`/legwheel/replay/status`** to see the
+   processed-frame count, retained voxels, skipped frames, and whether the
+   point limit has been reached.
+6. Optionally add an **Image** panel for recorded RGB. Current recordings use
+   `/legwheel_rgbd/color/image_raw`; older recordings use
+   `/camera/rgbd/rgb/image_raw`. This provides an image reference beside the 3D
+   reconstruction. Save the Foxglove layout once configured.
+
+This workflow uses a WebSocket connection: `ros2 bag play` supplies its clock
+and playback controls. Opening only the original MCAP as a local Foxglove file
+does not run this reconstruction node or create its visualization topics.
+
+The viewer uses an independent `replay_*` TF tree, so recorded transforms and
+the existing dataset/kinematics visualizers cannot overwrite its frame names.
+No original driver frame is silently reparented.
+
+Official references: [ROS 2 bridge setup](https://docs.foxglove.dev/docs/getting-started/frameworks/ros2?modality=live)
+and [3D panel settings](https://docs.foxglove.dev/docs/visualization/panels/3d).
+
+#### Pause, restart, loop, and seek
+
+While paused, the accumulated cloud remains visible. The viewer can also finish
+rebuilding a seek while paused. It republishes its current snapshot periodically
+so a newly connected Foxglove client can receive it.
+
+To restart from the beginning, stop the bag player with Ctrl+C and run its
+command again; the viewer can stay running. For continuous loops, add `--loop`
+to the bag-play command. When `/clock` moves backward, the viewer clears all
+future points and rebuilds accumulation from the beginning up to the new time.
+Forward seeks include intervening frames too. Large seeks rebuild in batches;
+watch the frame count catch up while the interface remains responsive. Seeking
+must change the ROS player's `/clock`, rather than only a Foxglove panel's view.
+
+#### Adjust detail, range, and memory use
+
+For example:
+
+```bash
+ros2 run legwheel_dataset visualise_run \
+  --run-directory "$RUN_DIR" \
+  --pixel-stride 4 \
+  --voxel-size-m 0.01 \
+  --max-points 500000 \
+  --cloud-rate-hz 5 \
+  --maximum-depth-m 3.0
+```
+
+Restart the viewer after changing settings. Run `visualise_run --help` through
+`ros2 run legwheel_dataset` for the full option list.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--run-directory` | required | Run containing `rosbag/` and configuration snapshots. |
+| `--experiment-config` | run snapshot | Optional geometry YAML override; the original stays untouched. |
+| `--pixel-stride` | `4` | Sample every fourth row and column. Smaller retains more detail. |
+| `--voxel-size-m` | `0.01` | Retain the first measured point in each 1 cm cube. Smaller preserves more detail and uses more memory. |
+| `--max-points` | `500000` | Hard limit on retained voxels. New voxels are ignored after the limit, with a warning. |
+| `--cloud-rate-hz` | `5.0` | Maximum selected depth-frame rate, measured in bag receipt time. Does not interpolate missing camera frames. |
+| `--minimum-depth-m` | `0.15` | Reject closer depth measurements and invalid zero depth. |
+| `--maximum-depth-m` | `3.0` | Reject more distant depth measurements. |
+| `--rgb-max-delta-ms` | `50.0` | Maximum acquisition-time separation for RGB colour. Unmatched depth still appears in grey. |
+| `--maximum-pose-gap-s` | `0.5` | Reject interpolation across larger interior gaps in joint/encoder samples. |
+| `--depth-scale-m` | `0.001` | Metres per integer depth unit. Floating-point depth is already treated as metres. |
+| `--alpha-off-rad` | `0.35` | Preview patch offset ahead of the camera around the circle. |
+| `--alpha-sp-rad` | `0.10` | Preview patch's full angular span. |
+
+Reduce `--cloud-rate-hz`, increase `--pixel-stride`, or increase
+`--voxel-size-m` if processing or the bridge becomes slow. Increase voxel size
+or the point limit if the viewer reports that it stopped retaining new terrain.
+The first-point-per-voxel rule deliberately avoids averaging away duplicated
+surfaces caused by a calibration error.
+
+#### Compatibility and interpretation
+
+- Both the current `/legwheel_rgbd/...` image topics and legacy
+  `/camera/rgbd/...` topics are detected automatically. A matching pair of
+  `CameraInfo` topics, `/legwheel/joint_states` with `knee_joint`, and
+  `/rotation_encoder/joint_state` with `rotation_joint` are required.
+- Older camera fields are converted locally: `sensor_height_mm / 1000` becomes
+  `camera_height_m`, and `-sensor_front_offset_mm / 1000` becomes
+  `camera_beam_offset_m`. A missing `theta_y_kinematic_sign` defaults to `-1`
+  for this rig. Every assumption is logged; use `--experiment-config` with a
+  corrected copy if an older installation used different conventions.
+- Geometry uses the current shared model: inner radius `beam_radius_m -
+  wheel_width_m`, outer radius `beam_radius_m`, and beam-length-normalized pitch.
+  The first recorded encoder angle defines zero yaw. Angles are held before
+  their first and after their last sample; interior gaps beyond the configured
+  tolerance reject affected clouds. This endpoint hold assumes the rig is
+  stationary outside the recorded encoder interval.
+- Depth is reconstructed using its calibration at acquisition time, then moved
+  into `replay_base` using interpolated knee and encoder angles. RGB is projected
+  separately using its own calibration and acquisition pose. It is not assumed
+  that aligned RGB and depth have identical distortion coefficients.
+- The cloud covers the valid camera image, rather than only an ML patch. Raw
+  points are not fitted to the ground, registered with ICP, or corrected with
+  SLAM. Tracks and the preview patch lie on modelled `z=0`; their discrepancy
+  with measured terrain remains visible. The preview patch is a geometric
+  reference, not a claim of future wheel contact during reverse motion.
+- Sparse recordings update in steps. Grey regions indicate missing nearby RGB,
+  not necessarily missing depth. Increasing the RGB tolerance can introduce
+  colours from a different exposure, so it should be a deliberate tradeoff.
+
+#### Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| No replay topics | Source the rebuilt workspace, start Terminal B, and wait for `READY`. Check the ROS domain and bridge connection. |
+| `READY` but no animation | Start the player with `--clock`; inspect `ros2 topic echo /clock --once`. |
+| Empty 3D panel | Select `replay_base` for both frame settings and enable both replay topics. |
+| Axes appear frozen between cloud frames | Disable **Sync timestamps** in the 3D panel; the accumulated cloud updates less frequently than frame axes. |
+| Cloud is a single colour | Select **BGR (packed)** / `rgb`; grey points can legitimately lack a close RGB exposure. |
+| Cloud stops covering new terrain | Check `/legwheel/replay/status` and the point-limit warning; adjust voxel size or point limit. |
+| Frames are skipped | Read Terminal B's specific error: missing pose support, invalid geometry, calibration dimensions, or optical frame mismatch. |
+| Double surfaces or ground displaced from tracks | Check geometry, encoder scale/sign, camera offsets, timestamp alignment, and actual ground height. Accumulation makes these errors visible. |
+
+The implementation is split into `run_replay.py` (read-only indexing,
+interpolation, cloud construction and accumulation) and `run_replay_node.py`
+(ROS messages, clock following and scene drawing). The core is testable without
+a ROS installation. An optional real-recording test accepts
+`LEGWHEEL_SAMPLE_RUN=/path/to/run_3` and uses the test-only `mcap-ros2-support`
+package; it is not a runtime dependency of the viewer.
+
 ### Build learning packets
 
-`legwheel_dataset` is strictly offline. It determines the steady-torque run,
+Learning packet generation is strictly offline. It determines the steady-torque run,
 constructs continuous encoder-corrected `theta_y(t)`, isolates a configured
 physical terrain patch, finds its future wheel-contact time, and attaches a
 calculated local telemetry window plus a fixed spectral window. Stage 2 saves
@@ -633,6 +860,9 @@ separately in `packets/analysis_report.json`.
 | `/legwheel_rgbd/gyro_accel/sample` | `sensor_msgs/msg/Imu` | Orbbec driver | Raw combined camera IMU stream. |
 | `/tf`, `/tf_static` | `tf2_msgs/msg/TFMessage` | Post-processing visualization | Dynamic and fixed frame transforms regenerated while replaying a bag. |
 | `/legwheel/visualization/kinematics_3d` | `visualization_msgs/msg/MarkerArray` | Post-processing visualization | Inner/outer track points and moving kinematic-chain origins for Foxglove. |
+| `/legwheel/replay/accumulated_cloud` | `sensor_msgs/msg/PointCloud2` | `visualise_run` | Accumulated measured XYZ/RGB points in stationary `replay_base`. |
+| `/legwheel/replay/scene` | `visualization_msgs/msg/MarkerArray` | `visualise_run` | Tracks, preview patch, labelled frame axes, chain, and camera frustum. |
+| `/legwheel/replay/status` | `std_msgs/msg/String` | `visualise_run` | Processed frames, retained voxels, skipped frames, and point-limit state. |
 | `/legwheel/dataset/rgb_annotations` | `visualization_msgs/msg/ImageMarker` | Dataset visualization | Selected RGB patch and track boundaries synchronized to bag time. |
 | `/legwheel/dataset/depth_annotations` | `visualization_msgs/msg/ImageMarker` | Dataset visualization | Selected depth patch and track boundaries synchronized to bag time. |
 | `/legwheel/dataset/geometry` | `visualization_msgs/msg/MarkerArray` | Dataset visualization | Track, patch, point cloud, plane, frame directions, and slope label. |

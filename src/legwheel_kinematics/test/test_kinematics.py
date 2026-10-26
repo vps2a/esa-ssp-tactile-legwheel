@@ -161,6 +161,21 @@ class KinematicsTest(unittest.TestCase):
         np.testing.assert_allclose(recovered, rotation, atol=1e-12)
         self.assertAlmostEqual(x * x + y * y + z * z + w * w, 1.0)
 
+    def test_frame_coordinates_apply_measured_yaw_in_stationary_base(self):
+        config = notebook_config()
+        yaw = 0.7
+        rotation = np.array([
+            [math.cos(yaw), -math.sin(yaw), 0, 0],
+            [math.sin(yaw), math.cos(yaw), 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1],
+        ])
+        original = frame_coordinates(config, theta_p=0.2)
+        rotated = frame_coordinates(config, theta_p=0.2, theta_y=yaw)
+        np.testing.assert_array_equal(rotated[0], np.eye(4))
+        for fixed_pose, yaw_pose in zip(original[1:], rotated[1:]):
+            np.testing.assert_allclose(yaw_pose, rotation @ fixed_pose, atol=1e-12)
+
     def test_theta_p_uses_measured_frame_sign_convention(self):
         knee_joint = 1.0
         expected_argument = (

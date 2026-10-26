@@ -37,6 +37,7 @@ setup(
             "create_config = legwheel_dataset.config_creator:main",
             "validate_config = legwheel_dataset.cli:validate_config_main",
             "visualise_stream = legwheel_dataset.visualization:main",
+            "visualise_run = legwheel_dataset.run_replay_node:main",
         ],
     },
 )
