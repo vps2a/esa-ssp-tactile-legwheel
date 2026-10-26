@@ -67,7 +67,8 @@ def experiment():
             "camera": {
                 "camera_config": {
                     "camera_height_m": 0.029,
-                    "camera_beam_offset_m": -0.043,
+                    "sensor_front_offset_m": 0.043,
+                    "camera_beam_offset_m": 0.054,
                     "camera_front_angle_deg": 40.0,
                 }
             },
@@ -158,7 +159,11 @@ class RecordedRunTest(unittest.TestCase):
         current, _ = load_geometry(self.directory)
         legacy = deepcopy(experiment())
         camera = legacy["electronics_hardware"]["camera"]["camera_config"]
-        del camera["camera_height_m"], camera["camera_beam_offset_m"]
+        del (
+            camera["camera_height_m"],
+            camera["camera_beam_offset_m"],
+            camera["sensor_front_offset_m"],
+        )
         camera.update(sensor_height_mm=29, sensor_front_offset_mm=43)
         del legacy["electronics_hardware"]["encoder_setup"]["theta_y_kinematic_sign"]
         original = yaml.safe_dump(legacy)
@@ -168,6 +173,49 @@ class RecordedRunTest(unittest.TestCase):
         self.assertEqual(self.config_path.read_text(), original)
         self.assertEqual(run.topics["depth"], "/camera/rgbd/depth/image_raw")
         self.assertTrue(any("sign defaults" in note for note in run.notes))
+        self.assertTrue(any("0.054 m" in note for note in run.notes))
+
+    def test_old_signed_x_offset_migrates_without_changing_snapshot(self):
+        current, _ = load_geometry(self.directory)
+        legacy = experiment()
+        camera = legacy["electronics_hardware"]["camera"]["camera_config"]
+        del camera["sensor_front_offset_m"]
+        camera["camera_beam_offset_m"] = -0.043
+        original = yaml.safe_dump(legacy)
+        self.config_path.write_text(original)
+        geometry, notes = load_geometry(self.directory)
+        self.assertEqual(geometry, current)
+        self.assertEqual(self.config_path.read_text(), original)
+        self.assertTrue(any("Legacy signed" in note for note in notes))
+
+    def test_explicit_offsets_override_legacy_values_and_defaults(self):
+        values = experiment()
+        camera = values["electronics_hardware"]["camera"]["camera_config"]
+        camera.update(
+            sensor_front_offset_m=0.031,
+            camera_beam_offset_m=0.067,
+            sensor_front_offset_mm=999,
+        )
+        override = self.directory / "corrected.yaml"
+        original = self.config_path.read_text()
+        override.write_text(yaml.safe_dump(values))
+        geometry, notes = load_geometry(self.directory, override)
+        self.assertEqual(geometry.sensor_front_offset, 0.031)
+        self.assertEqual(geometry.camera_beam_offset, 0.067)
+        self.assertEqual(notes, [])
+        self.assertEqual(self.config_path.read_text(), original)
+
+    def test_camera_offsets_must_be_finite_numbers(self):
+        for field in ("sensor_front_offset_m", "camera_beam_offset_m"):
+            for invalid in (None, True, "0.043", float("nan"), float("inf")):
+                with self.subTest(field=field, invalid=invalid):
+                    values = experiment()
+                    values["electronics_hardware"]["camera"]["camera_config"][field] = (
+                        invalid
+                    )
+                    self.config_path.write_text(yaml.safe_dump(values))
+                    with self.assertRaisesRegex(ValueError, field):
+                        load_geometry(self.directory)
 
     def test_index_retains_no_images_and_geometry_does_not_require_rgb_pair(self):
         source = FakeSource()

@@ -25,7 +25,8 @@ def experiment_config(theta_y_kinematic_sign=-1) -> ExperimentConfig:
             "encoder_setup": encoder_setup,
             "camera": {
                 "camera_config": {
-                    "camera_beam_offset_m": -0.043,
+                    "sensor_front_offset_m": 0.043,
+                    "camera_beam_offset_m": 0.054,
                     "camera_height_m": 0.029,
                     "camera_front_angle_deg": 40.0,
                 }
@@ -41,6 +42,14 @@ def experiment_config(theta_y_kinematic_sign=-1) -> ExperimentConfig:
 
 def test_current_geometry_accepts_negative_kinematic_sign():
     validate_experiment_config(experiment_config(-1))
+
+
+@pytest.mark.parametrize("field", ["sensor_front_offset_m", "camera_beam_offset_m"])
+def test_camera_offsets_are_required(field):
+    config = experiment_config()
+    del config.electronics_hardware["camera"]["camera_config"][field]
+    with pytest.raises(ValueError, match=field):
+        validate_experiment_config(config)
 
 
 @pytest.mark.parametrize("invalid_sign", [None, 0, 0.5, 2])

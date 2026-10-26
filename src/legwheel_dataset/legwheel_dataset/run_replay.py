@@ -147,7 +147,7 @@ def _yaml(path):
 
 
 def load_geometry(run_directory, experiment_config=None):
-    """Adapt legacy camera units locally, leaving recorded snapshots untouched."""
+    """Adapt legacy camera units/names, leaving recorded snapshots untouched."""
     run_directory = Path(run_directory)
     if experiment_config is None:
         paths = sorted(run_directory.glob("experiment_config_run_*_snapshot.yaml"))
@@ -163,11 +163,24 @@ def load_geometry(run_directory, experiment_config=None):
     if "camera_height_m" not in camera and "sensor_height_mm" in camera:
         camera["camera_height_m"] = camera["sensor_height_mm"] / 1000.0
         notes.append("Legacy sensor_height_mm converted to camera_height_m.")
-    if "camera_beam_offset_m" not in camera and "sensor_front_offset_mm" in camera:
-        camera["camera_beam_offset_m"] = -camera["sensor_front_offset_mm"] / 1000.0
-        notes.append(
-            "Legacy front offset converted to a negative beam offset in metres."
-        )
+    if "sensor_front_offset_m" not in camera:
+        # Old layouts used a signed X offset (or its positive mm magnitude),
+        # with the perpendicular +Z installation offset fixed at 54 mm.
+        if "camera_beam_offset_m" in camera:
+            camera["sensor_front_offset_m"] = -camera["camera_beam_offset_m"]
+            camera["camera_beam_offset_m"] = 0.054
+            notes.append(
+                "Legacy signed camera_beam_offset_m converted to "
+                "sensor_front_offset_m; perpendicular camera_beam_offset_m "
+                "uses the legacy 0.054 m installation offset."
+            )
+        elif "sensor_front_offset_mm" in camera:
+            camera["sensor_front_offset_m"] = camera["sensor_front_offset_mm"] / 1000.0
+            camera["camera_beam_offset_m"] = 0.054
+            notes.append(
+                "Legacy sensor_front_offset_mm converted to sensor_front_offset_m; "
+                "camera_beam_offset_m uses the legacy 0.054 m installation offset."
+            )
     if "theta_y_kinematic_sign" not in hardware["encoder_setup"]:
         hardware["encoder_setup"]["theta_y_kinematic_sign"] = -1
         notes.append("Legacy encoder sign defaults to -1 for the current rig.")

@@ -146,6 +146,12 @@ electronics_hardware:
     # opposite to positive notebook/DH theta_y. Changing this mirrors all
     # camera projections, 3D points, and signed slope directions.
     theta_y_kinematic_sign: -1
+  camera:
+    camera_config:
+      sensor_front_offset_m: 0.043  # Along the beam towards the pivot (-X).
+      camera_beam_offset_m: 0.054   # Towards the camera-facing side (+Z).
+      camera_height_m: 0.029
+      camera_front_angle_deg: 40.0
 ```
 
 This is a coordinate-convention mapping, not a post-processing tuning value.
@@ -154,6 +160,14 @@ changed unless the encoder mounting or kinematic-frame convention changes.
 For an older recorded run whose snapshot predates this field, make a corrected
 copy of the experiment YAML containing the value above and pass it with
 `--experiment-config`; the MCAP itself does not need to be changed.
+
+Camera offsets are translations in the beam-end frame before camera tilt:
+`[-sensor_front_offset_m, camera_height_m, camera_beam_offset_m]`. To migrate
+the former signed-X field `camera_beam_offset_m: -0.043`, replace it with
+`sensor_front_offset_m: 0.043` and `camera_beam_offset_m: 0.054` in the corrected
+full experiment YAML. Both offset fields are required for dataset processing.
+Regenerate derived packets after correcting geometry because their projected
+pixel coordinates are saved during packet isolation.
 
 ## Output layout
 

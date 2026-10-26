@@ -250,11 +250,9 @@ class PacketVisualizationNode(Node):
             theta_p=frame_pose.theta_p_rad,
             a_b=self._kinematics_config.a_b,
             h_b=self._kinematics_config.h_b,
-            camera_beam_offset=self._kinematics_config.camera_beam_offset,
+            sensor_front_offset=self._kinematics_config.sensor_front_offset,
             camera_height=self._kinematics_config.camera_height,
-            camera_offset_from_beam_centre=(
-                self._kinematics_config.camera_offset_from_beam_centre
-            ),
+            camera_beam_offset=self._kinematics_config.camera_beam_offset,
             camera_angle_deg=self._kinematics_config.camera_angle_deg,
         )
         frame_ids = (

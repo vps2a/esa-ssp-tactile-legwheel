@@ -6,14 +6,12 @@ from pathlib import Path
 from typing import Any
 
 
-# These are measured installation constants rather than experiment settings.
-# Their names deliberately match supporting_files/kinematics_calculator.ipynb.
+# Measured vertical installation offset, also used by the kinematics notebook.
 H_B_M = 0.0661
-CAMERA_OFFSET_FROM_BEAM_CENTRE_M = 0.054
 
-# Increment when the pitch or track equations change so derived datasets get
+# Increment when geometry or its configuration convention changes so datasets get
 # a new identity instead of reusing geometry calculated with an older model.
-KINEMATICS_MODEL_VERSION = 2
+KINEMATICS_MODEL_VERSION = 3
 
 # The camera optical axis in the verified notebook geometry points in the
 # decreasing kinematic-theta direction. Forward recordings are therefore those
@@ -45,9 +43,9 @@ class KinematicsConfig:
     d1: float
     a_b: float
     h_b: float
-    camera_beam_offset: float
+    sensor_front_offset: float  # Positive towards the pivot: beam-end -X (metres).
     camera_height: float
-    camera_offset_from_beam_centre: float
+    camera_beam_offset: float  # Positive towards the camera-facing side: +Z (metres).
     camera_angle_deg: float
     Beam_radius: float
     Wheel_width: float
@@ -145,6 +143,11 @@ class KinematicsConfig:
 
         d1 = _finite_number(rig_config, "pivot_height_m", "rig_config.pivot_height_m")
         a_b = _finite_number(rig_config, "beam_radius_m", "rig_config.beam_radius_m")
+        sensor_front_offset = _finite_number(
+            camera_config,
+            "sensor_front_offset_m",
+            "electronics_hardware.camera.camera_config.sensor_front_offset_m",
+        )
         camera_beam_offset = _finite_number(
             camera_config,
             "camera_beam_offset_m",
@@ -212,11 +215,9 @@ class KinematicsConfig:
             d1=d1,
             a_b=a_b,
             h_b=H_B_M,
-            camera_beam_offset=camera_beam_offset,
+            sensor_front_offset=sensor_front_offset,
             camera_height=camera_height,
-            camera_offset_from_beam_centre=(
-                CAMERA_OFFSET_FROM_BEAM_CENTRE_M
-            ),
+            camera_beam_offset=camera_beam_offset,
             camera_angle_deg=camera_angle_deg,
             Beam_radius=a_b,
             Wheel_width=wheel_width_mm / 1000.0,

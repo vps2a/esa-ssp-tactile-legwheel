@@ -45,9 +45,9 @@ def camera_pose_in_base(
         theta_p=theta_p,
         a_b=config.a_b,
         h_b=config.h_b,
-        camera_beam_offset=config.camera_beam_offset,
+        sensor_front_offset=config.sensor_front_offset,
         camera_height=config.camera_height,
-        camera_offset_from_beam_centre=config.camera_offset_from_beam_centre,
+        camera_beam_offset=config.camera_beam_offset,
         camera_angle_deg=config.camera_angle_deg,
     )
     transform = np.eye(4, dtype=float)

@@ -40,9 +40,9 @@ from legwheel_dataset.run_analysis import (
 
 class SynchronizationTest(unittest.TestCase):
     def test_dataset_identifier_changes_with_kinematics_model(self):
-        with patch("legwheel_dataset.processor.KINEMATICS_MODEL_VERSION", 1):
-            old_identifier = _dataset_identifier({}, {}, ProcessingConfig())
         with patch("legwheel_dataset.processor.KINEMATICS_MODEL_VERSION", 2):
+            old_identifier = _dataset_identifier({}, {}, ProcessingConfig())
+        with patch("legwheel_dataset.processor.KINEMATICS_MODEL_VERSION", 3):
             new_identifier = _dataset_identifier({}, {}, ProcessingConfig())
         self.assertNotEqual(old_identifier, new_identifier)
 
@@ -91,7 +91,8 @@ class SynchronizationTest(unittest.TestCase):
                     },
                     "camera": {
                         "camera_config": {
-                            "camera_beam_offset_m": -0.043,
+                            "sensor_front_offset_m": 0.043,
+                            "camera_beam_offset_m": 0.054,
                             "camera_height_m": 0.029,
                             # Keep the synthetic patch completely in frame so
                             # this test exercises packet writing, not rejection.
@@ -316,7 +317,7 @@ class SynchronizationTest(unittest.TestCase):
             provenance = json.loads(
                 (output_directory / "provenance.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(provenance["kinematics_model_version"], 2)
+            self.assertEqual(provenance["kinematics_model_version"], 3)
             self.assertFalse(any(
                 "rotation" in name
                 for name in metadata["telemetry_channel_names"]

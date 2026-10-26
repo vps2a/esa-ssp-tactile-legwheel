@@ -91,12 +91,16 @@ def individual_transformation_matrices(
     theta_p: float,
     a_b: float,
     h_b: float,
-    camera_beam_offset: float,
+    sensor_front_offset: float,
     camera_height: float,
-    camera_offset_from_beam_centre: float,
+    camera_beam_offset: float,
     camera_angle_deg: float,
 ) -> tuple[FloatArray, FloatArray, FloatArray, FloatArray, FloatArray]:
-    """Return T01, T12, T23, T34 and T45 from the notebook."""
+    """Return T01 through T45; camera offsets are in the beam-end frame.
+
+    Positive sensor_front_offset moves towards the pivot (-X). Positive
+    camera_beam_offset moves to the camera-facing side (+Z), before tilt.
+    """
     cos_y = math.cos(theta_y)
     sin_y = math.sin(theta_y)
     cos_p = math.cos(theta_p)
@@ -134,9 +138,9 @@ def individual_transformation_matrices(
     )
     T34 = np.array(
         [
-            [1.0, 0.0, 0.0, camera_beam_offset],
+            [1.0, 0.0, 0.0, -sensor_front_offset],
             [0.0, 1.0, 0.0, camera_height],
-            [0.0, 0.0, 1.0, camera_offset_from_beam_centre],
+            [0.0, 0.0, 1.0, camera_beam_offset],
             [0.0, 0.0, 0.0, 1.0],
         ],
         dtype=float,
@@ -166,11 +170,9 @@ def transformation_matrices_from_config(
         theta_p=theta_p,
         a_b=config.a_b,
         h_b=config.h_b,
-        camera_beam_offset=config.camera_beam_offset,
+        sensor_front_offset=config.sensor_front_offset,
         camera_height=config.camera_height,
-        camera_offset_from_beam_centre=(
-            config.camera_offset_from_beam_centre
-        ),
+        camera_beam_offset=config.camera_beam_offset,
         camera_angle_deg=config.camera_angle_deg,
     )
 

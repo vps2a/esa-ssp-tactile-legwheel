@@ -326,7 +326,8 @@ electronics_hardware:
     theta_y_kinematic_sign: -1
   camera:
     camera_config:
-      camera_beam_offset_m: -0.043
+      sensor_front_offset_m: 0.043  # Positive along the beam towards the pivot.
+      camera_beam_offset_m: 0.054   # Positive towards the camera-facing side.
       camera_height_m: 0.029
       camera_front_angle_deg: 40.0
 wheel_config:
@@ -429,9 +430,28 @@ Two packages keep analysis code out of the motor-control and recording process:
 | `legwheel_dataset` | Reads MCAP directly, isolates synchronized packets, extracts RGB/depth patches, fits terrain planes, and calculates telemetry spectra. |
 
 The experiment YAML must include the geometry shown in the example experiment
-configuration above. `h_b` is the measured constant `0.0661 m`, and the camera
-offset from the beam centre is the measured constant `0.054 m`; neither is
-duplicated in the experiment file.
+configuration above. `h_b` remains the measured constant `0.0661 m`. Both camera
+offsets are explicit configuration values, measured in the **beam-end frame
+before camera tilt**:
+
+| Field | Positive direction | Current measurement |
+| --- | --- | --- |
+| `sensor_front_offset_m` | Along the beam towards the central pivot (local `-X`). | `0.043 m` |
+| `camera_height_m` | Up from the beam-end mount (local `+Y`). | `0.029 m` |
+| `camera_beam_offset_m` | Perpendicular to the beam, towards the camera-facing side (local `+Z`). | `0.054 m` |
+
+The mount translation is `[-sensor_front_offset_m, camera_height_m,
+camera_beam_offset_m]`. These values change camera position; the viewing
+orientation still comes from `camera_front_angle_deg` and the optical-frame
+rotation.
+
+**Migrating an existing experiment YAML:** the old `camera_beam_offset_m`
+represented signed local X. For example, replace `camera_beam_offset_m: -0.043`
+with `sensor_front_offset_m: 0.043` and `camera_beam_offset_m: 0.054`. General
+configuration loading requires both offset fields, so an old file cannot silently
+use the new meaning. Equivalent migrated measurements preserve the camera pose.
+Rebuild the affected packages, source the workspace, and restart geometry
+publishers after updating code and configuration.
 
 The wheel sits inward from the beam end: its outer track radius is
 `beam_radius_m`, its inner radius is `beam_radius_m - wheel_width_m`, and its
@@ -673,10 +693,14 @@ surfaces caused by a calibration error.
   `CameraInfo` topics, `/legwheel/joint_states` with `knee_joint`, and
   `/rotation_encoder/joint_state` with `rotation_joint` are required.
 - Older camera fields are converted locally: `sensor_height_mm / 1000` becomes
-  `camera_height_m`, and `-sensor_front_offset_mm / 1000` becomes
-  `camera_beam_offset_m`. A missing `theta_y_kinematic_sign` defaults to `-1`
-  for this rig. Every assumption is logged; use `--experiment-config` with a
-  corrected copy if an older installation used different conventions.
+  `camera_height_m`. When `sensor_front_offset_m` is absent, the former signed
+  `camera_beam_offset_m` is negated into `sensor_front_offset_m`; the oldest
+  snapshots instead use `sensor_front_offset_mm / 1000`. Both old layouts use
+  the former fixed `0.054 m` as the perpendicular `camera_beam_offset_m`.
+  Supplying **both new offset fields** overrides this migration. A missing
+  `theta_y_kinematic_sign` defaults to `-1` for this rig. Every assumption is
+  logged; use `--experiment-config` with a corrected full copy if an older
+  installation used different measurements. Recordings are left untouched.
 - Geometry uses the current shared model: inner radius `beam_radius_m -
   wheel_width_m`, outer radius `beam_radius_m`, and beam-length-normalized pitch.
   The first recorded encoder angle defines zero yaw. Angles are held before

@@ -242,6 +242,10 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         "electronics_hardware.camera.camera_config",
     )
     require_number(
+        camera_config.get("sensor_front_offset_m"),
+        "electronics_hardware.camera.camera_config.sensor_front_offset_m",
+    )
+    require_number(
         camera_config.get("camera_beam_offset_m"),
         "electronics_hardware.camera.camera_config.camera_beam_offset_m",
     )

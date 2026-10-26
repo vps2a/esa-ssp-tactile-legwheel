@@ -1,6 +1,8 @@
 import math
 from dataclasses import replace
+from pathlib import Path
 import unittest
+import xml.etree.ElementTree as ET
 
 import numpy as np
 
@@ -21,9 +23,9 @@ def notebook_config() -> KinematicsConfig:
         d1=0.353,
         a_b=0.83,
         h_b=0.0761,
-        camera_beam_offset=-0.043,
+        sensor_front_offset=0.043,
         camera_height=0.029,
-        camera_offset_from_beam_centre=0.04,
+        camera_beam_offset=0.054,
         camera_angle_deg=40.0,
         Beam_radius=0.83,
         Wheel_width=0.1,
@@ -35,7 +37,7 @@ def notebook_config() -> KinematicsConfig:
 
 
 class KinematicsTest(unittest.TestCase):
-    def test_experiment_mapping_uses_measured_constants(self):
+    def test_experiment_mapping_uses_explicit_camera_offsets(self):
         config = KinematicsConfig.from_experiment_dict({
             "rig_config": {"pivot_height_m": 0.353, "beam_radius_m": 0.83},
             "leg_config": {
@@ -46,7 +48,8 @@ class KinematicsTest(unittest.TestCase):
                 "encoder_setup": {"theta_y_kinematic_sign": -1},
                 "camera": {
                     "camera_config": {
-                        "camera_beam_offset_m": -0.043,
+                        "sensor_front_offset_m": 0.039,
+                        "camera_beam_offset_m": 0.062,
                         "camera_height_m": 0.029,
                         "camera_front_angle_deg": 40.0,
                     }
@@ -56,7 +59,8 @@ class KinematicsTest(unittest.TestCase):
         })
         self.assertEqual(config.d1, 0.353)
         self.assertEqual(config.h_b, 0.0661)
-        self.assertEqual(config.camera_offset_from_beam_centre, 0.054)
+        self.assertEqual(config.sensor_front_offset, 0.039)
+        self.assertEqual(config.camera_beam_offset, 0.062)
         self.assertAlmostEqual(config.track_inner_radius_m, 0.73)
         self.assertAlmostEqual(config.track_outer_radius_m, 0.83)
         self.assertAlmostEqual(config.track_center_radius_m, 0.78)
@@ -86,7 +90,8 @@ class KinematicsTest(unittest.TestCase):
                 "encoder_setup": {"theta_y_kinematic_sign": 0},
                 "camera": {
                     "camera_config": {
-                        "camera_beam_offset_m": -0.043,
+                        "sensor_front_offset_m": 0.043,
+                        "camera_beam_offset_m": 0.054,
                         "camera_height_m": 0.029,
                         "camera_front_angle_deg": 40.0,
                     }
@@ -103,7 +108,7 @@ class KinematicsTest(unittest.TestCase):
     def test_forward_kinematics_matches_notebook_reference(self):
         expected = np.array([
             [-1.0, 0.0, 0.0, 0.787],
-            [0.0, 0.64278761, -0.76604444, -0.04],
+            [0.0, 0.64278761, -0.76604444, -0.054],
             [0.0, -0.76604444, -0.64278761, 0.4581],
             [0.0, 0.0, 0.0, 1.0],
         ])
@@ -129,11 +134,77 @@ class KinematicsTest(unittest.TestCase):
                 [0.0, 0.0, 0.353],
                 [0.0, 0.0, 0.353],
                 [0.83, 0.0, 0.4291],
-                [0.787, -0.04, 0.4581],
-                [0.787, -0.04, 0.4581],
+                [0.787, -0.054, 0.4581],
+                [0.787, -0.054, 0.4581],
             ]),
             atol=1e-12,
         )
+
+    def test_camera_offsets_follow_beam_axes_without_rotating_camera(self):
+        reference = replace(
+            notebook_config(), sensor_front_offset=0.0, camera_beam_offset=0.0
+        )
+        for yaw in (0.0, 0.7):
+            for pitch in (0.0, -0.2):
+                original = frame_coordinates(reference, pitch, yaw)
+                beam_axes = original[3][:3, :3]
+                for offset in (-0.01, 0.02):
+                    cases = (
+                        (
+                            replace(reference, sensor_front_offset=offset),
+                            -offset * beam_axes[:, 0],
+                        ),
+                        (
+                            replace(reference, camera_beam_offset=offset),
+                            offset * beam_axes[:, 2],
+                        ),
+                    )
+                    for geometry, expected_displacement in cases:
+                        with self.subTest(yaw=yaw, pitch=pitch, geometry=geometry):
+                            shifted = frame_coordinates(geometry, pitch, yaw)
+                            np.testing.assert_allclose(
+                                shifted[-1][:3, 3] - original[-1][:3, 3],
+                                expected_displacement,
+                                atol=1e-12,
+                            )
+                            np.testing.assert_array_equal(shifted[3], original[3])
+                            np.testing.assert_array_equal(
+                                shifted[-1][:3, :3], original[-1][:3, :3]
+                            )
+
+    def test_robot_description_uses_the_same_signed_camera_offsets(self):
+        try:
+            import xacro
+        except ImportError:
+            self.skipTest("Install xacro to check the robot description.")
+        path = (
+            Path(__file__).resolve().parents[2]
+            / "legwheel_description/urdf/legwheel.urdf.xacro"
+        )
+        for front, side in ((0.043, 0.054), (0.0, 0.0), (-0.01, -0.02)):
+            with self.subTest(front=front, side=side):
+                config = replace(
+                    notebook_config(), sensor_front_offset=front, camera_beam_offset=side
+                )
+                mappings = {
+                    name: str(getattr(config, name))
+                    for name in (
+                        "d1", "a_b", "h_b",
+                        "sensor_front_offset", "camera_height", "camera_beam_offset",
+                    )
+                }
+                mappings["camera_angle_rad"] = str(
+                    math.radians(config.camera_angle_deg)
+                )
+                robot = ET.fromstring(
+                    xacro.process_file(str(path), mappings=mappings).toxml()
+                )
+                origin = robot.find("joint[@name='camera_mount_translation']/origin")
+                np.testing.assert_allclose(
+                    [float(value) for value in origin.attrib["xyz"].split()],
+                    [-front, config.camera_height, side],
+                    atol=1e-12,
+                )
 
     def test_rotation_matrix_to_quaternion_preserves_rotation(self):
         rotation = forward_kinematics(

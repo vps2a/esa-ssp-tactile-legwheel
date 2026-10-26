@@ -26,13 +26,11 @@ def _launch_nodes(context):
         mappings={
             "d1": str(config.d1),
             "a_b": str(config.a_b),
-            "camera_beam_offset": str(config.camera_beam_offset),
+            "sensor_front_offset": str(config.sensor_front_offset),
             "camera_height": str(config.camera_height),
             "camera_angle_rad": str(math.radians(config.camera_angle_deg)),
             "h_b": str(config.h_b),
-            "camera_offset_from_beam_centre": str(
-                config.camera_offset_from_beam_centre
-            ),
+            "camera_beam_offset": str(config.camera_beam_offset),
         },
     ).toxml()
     return [
