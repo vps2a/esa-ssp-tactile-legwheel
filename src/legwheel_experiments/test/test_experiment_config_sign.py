@@ -47,3 +47,17 @@ def test_current_geometry_accepts_negative_kinematic_sign():
 def test_kinematic_sign_is_required_and_discrete(invalid_sign):
     with pytest.raises(ValueError, match="theta_y_kinematic_sign"):
         validate_experiment_config(experiment_config(invalid_sign))
+
+
+@pytest.mark.parametrize("invalid_width_mm", [0.0, 830.0, 900.0, 1660.0])
+def test_wheel_width_must_leave_a_positive_inner_track_radius(invalid_width_mm):
+    config = experiment_config()
+    config.wheel_config["wheel_width_mm"] = invalid_width_mm
+    with pytest.raises(ValueError, match="wheel_width_mm"):
+        validate_experiment_config(config)
+
+
+def test_wheel_width_can_be_just_smaller_than_beam_radius():
+    config = experiment_config()
+    config.wheel_config["wheel_width_mm"] = 829.0
+    validate_experiment_config(config)

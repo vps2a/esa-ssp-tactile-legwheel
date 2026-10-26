@@ -1,4 +1,5 @@
 import math
+from dataclasses import replace
 import unittest
 
 import numpy as np
@@ -11,6 +12,7 @@ from legwheel_kinematics.transforms import (
     forward_kinematics,
     frame_coordinates,
     rotation_matrix_to_quaternion,
+    theta_p_from_config,
 )
 
 
@@ -53,9 +55,18 @@ class KinematicsTest(unittest.TestCase):
             "wheel_config": {"wheel_radius_mm": 100.0, "wheel_width_mm": 100.0},
         })
         self.assertEqual(config.d1, 0.353)
-        self.assertEqual(config.h_b, 0.0761)
-        self.assertEqual(config.camera_offset_from_beam_centre, 0.04)
+        self.assertEqual(config.h_b, 0.0661)
+        self.assertEqual(config.camera_offset_from_beam_centre, 0.054)
+        self.assertAlmostEqual(config.track_inner_radius_m, 0.73)
+        self.assertAlmostEqual(config.track_outer_radius_m, 0.83)
+        self.assertAlmostEqual(config.track_center_radius_m, 0.78)
         self.assertEqual(config.theta_y_kinematic_sign, -1.0)
+
+    def test_track_width_must_leave_a_positive_inner_radius(self):
+        for width in (0.0, -0.1, 0.83, 0.9, math.inf, math.nan):
+            with self.subTest(width=width):
+                with self.assertRaisesRegex(ValueError, "Wheel width"):
+                    replace(notebook_config(), Wheel_width=width)
 
     def test_motion_angles_are_converted_to_notebook_convention(self):
         config = notebook_config()
@@ -158,17 +169,42 @@ class KinematicsTest(unittest.TestCase):
             + math.sqrt(0.2**2 + 0.2**2 - 2 * 0.2 * 0.2 * math.cos(knee_joint))
             - 0.0761
             - 0.353
-        )
+        ) / 0.83
         self.assertAlmostEqual(
-            calculate_theta_p(knee_joint, 100.0, 0.2, 0.2, 0.353),
+            calculate_theta_p(
+                knee_joint, 100.0, 0.2, 0.2, 0.353, 0.83, h_b=0.0761
+            ),
             # The physical magnitude follows the supplied equation. The
             # notebook/TF theta_p axis is opposite to that positive direction.
             -math.asin(expected_argument),
         )
 
+    def test_theta_p_scales_vertical_displacement_by_beam_length(self):
+        # This pose gives a -0.3 m vertical displacement. A 0.6 m beam
+        # therefore has sin(theta_p)=0.5 with the measured frame convention.
+        theta_p = calculate_theta_p(0.0, 100.0, 0.2, 0.2, 0.385, 0.6, h_b=0.1)
+        self.assertAlmostEqual(theta_p, math.pi / 6.0)
+        longer_beam_theta_p = calculate_theta_p(
+            0.0, 100.0, 0.2, 0.2, 0.385, 1.2, h_b=0.1
+        )
+        self.assertAlmostEqual(math.sin(longer_beam_theta_p), 0.25)
+
+    def test_theta_p_from_config_passes_beam_length_and_offsets(self):
+        config = notebook_config()
+        self.assertAlmostEqual(
+            theta_p_from_config(1.0, config),
+            calculate_theta_p(1.0, 100.0, 0.2, 0.2, 0.353, 0.83, h_b=0.0761),
+        )
+
+    def test_theta_p_rejects_nonpositive_or_nonfinite_beam_length(self):
+        for beam_radius in (0.0, -0.83, math.inf, math.nan):
+            with self.subTest(beam_radius=beam_radius):
+                with self.assertRaisesRegex(ValueError, "Beam radius"):
+                    calculate_theta_p(1.0, 100.0, 0.2, 0.2, 0.353, beam_radius)
+
     def test_theta_p_rejects_impossible_arcsin_input(self):
         with self.assertRaisesRegex(ValueError, "outside"):
-            calculate_theta_p(0.0, 2000.0, 0.2, 0.2, 0.1)
+            calculate_theta_p(0.0, 2000.0, 0.2, 0.2, 0.1, 0.83)
 
     def test_projected_track_forms_visible_polygon(self):
         calibration = CameraCalibration(
@@ -196,8 +232,8 @@ class KinematicsTest(unittest.TestCase):
         points = generate_track_points(notebook_config(), point_count=360)
         inner_radii = np.linalg.norm(points.inner_track_points[:, :2], axis=1)
         outer_radii = np.linalg.norm(points.outer_track_points[:, :2], axis=1)
-        np.testing.assert_allclose(inner_radii, 0.78, atol=1e-12)
-        np.testing.assert_allclose(outer_radii, 0.88, atol=1e-12)
+        np.testing.assert_allclose(inner_radii, 0.73, atol=1e-12)
+        np.testing.assert_allclose(outer_radii, 0.83, atol=1e-12)
         np.testing.assert_array_equal(
             points.inner_track_points[:, 2],
             np.zeros(360),

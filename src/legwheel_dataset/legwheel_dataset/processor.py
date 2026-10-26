@@ -49,7 +49,7 @@ from legwheel_dataset.synchronization import (
     pair_image_timestamps,
     resample_channels,
 )
-from legwheel_kinematics.config import KinematicsConfig
+from legwheel_kinematics.config import KINEMATICS_MODEL_VERSION, KinematicsConfig
 from legwheel_kinematics.projection import CameraCalibration
 from legwheel_kinematics.transforms import theta_p_from_config
 
@@ -153,6 +153,7 @@ def _dataset_identifier(
 ) -> str:
     payload = json.dumps(
         {
+            "kinematics_model_version": KINEMATICS_MODEL_VERSION,
             "experiment": experiment_config,
             "run": run_config,
             "processing": processing_config.to_dict(),
@@ -370,9 +371,7 @@ def _run_motion_analysis(
         wheel_velocity_column,
     )
 
-    track_radius_m = (
-        kinematics_config.Beam_radius - kinematics_config.Wheel_width / 2.0
-    )
+    track_radius_m = kinematics_config.track_center_radius_m
     trajectory = build_corrected_theta_trajectory(
         encoder_times,
         encoder_angles,
@@ -1449,6 +1448,7 @@ def isolate_packets(
         "stage": "stage1_complete",
         "dataset_identifier": dataset_identifier,
         "run_directory": str(run_directory),
+        "kinematics_model_version": KINEMATICS_MODEL_VERSION,
         "bag_directory": str(bag_directory),
         "experiment_config_source": str(experiment_config_path),
         "experiment_config": experiment_config,

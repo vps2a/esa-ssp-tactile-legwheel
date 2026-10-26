@@ -47,12 +47,8 @@ def generate_track_points(
     if point_count < 16:
         raise ValueError("point_count must be at least 16.")
 
-    Beam_radius = config.Beam_radius
-    Wheel_width = config.Wheel_width
-    inner_track_radius = Beam_radius - Wheel_width / 2.0
-    outer_track_radius = Beam_radius + Wheel_width / 2.0
-    if inner_track_radius <= 0.0:
-        raise ValueError("Wheel width leaves no positive inner track radius.")
+    inner_track_radius = config.track_inner_radius_m
+    outer_track_radius = config.track_outer_radius_m
 
     angles = np.linspace(-np.pi, np.pi, point_count, endpoint=False)
     inner_track_points = np.column_stack(

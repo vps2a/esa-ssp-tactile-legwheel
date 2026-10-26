@@ -240,7 +240,8 @@ invalid and prevents useful packet generation.
 
 ### 3. Construct continuous encoder-corrected `theta_y(t)`
 
-The effective track radius is:
+The effective track radius is the wheel centreline. The wheel is mounted
+inward from the beam end, so this is the midpoint of the inner and outer edges:
 
 ```text
 r_b = beam_radius_m - wheel_width_m / 2
@@ -389,9 +390,13 @@ plane.
 The radial limits are:
 
 ```text
-inner_radius = beam_radius_m - wheel_width_m / 2
-outer_radius = beam_radius_m + wheel_width_m / 2
+inner_radius = beam_radius_m - wheel_width_m
+outer_radius = beam_radius_m
 ```
+
+The same radial limits are used for the patch, full-track image overlays, and
+3D track markers. The width must be positive and smaller than the beam radius,
+so the inner radius remains positive.
 
 The angular limits are:
 

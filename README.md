@@ -426,9 +426,20 @@ Two packages keep analysis code out of the motor-control and recording process:
 | `legwheel_dataset` | Reads MCAP directly, isolates synchronized packets, extracts RGB/depth patches, fits terrain planes, and calculates telemetry spectra. |
 
 The experiment YAML must include the geometry shown in the example experiment
-configuration above. `h_b` is the measured constant `0.0761 m`, and the camera
-offset from the beam centre is the measured constant `0.04 m`; neither is
+configuration above. `h_b` is the measured constant `0.0661 m`, and the camera
+offset from the beam centre is the measured constant `0.054 m`; neither is
 duplicated in the experiment file.
+
+The wheel sits inward from the beam end: its outer track radius is
+`beam_radius_m`, its inner radius is `beam_radius_m - wheel_width_m`, and its
+centreline radius is `beam_radius_m - wheel_width_m / 2`. The knee-derived beam
+pitch uses the vertical displacement divided by `beam_radius_m` inside the
+arcsine, retaining the measured negative sign convention.
+
+After a kinematics change, regenerate derived packets before inspecting dataset
+overlays: those overlays contain saved pixel coordinates. The kinematics model
+version is included in new dataset identifiers and provenance, giving corrected
+geometry a different default output directory from older datasets.
 
 ### Verify the projection in Foxglove
 

@@ -200,16 +200,16 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         config.wheel_config.get("wheel_radius_mm"),
         "wheel_config.wheel_radius_mm",
     )
-    wheel_width_mm = require_number(
+    wheel_width_mm = require_positive_number(
         config.wheel_config.get("wheel_width_mm"),
         "wheel_config.wheel_width_mm",
-        minimum=0.0,
     )
 
-    # The wheel centreline must remain inside the beam radius used by _wheel_control.
-    if wheel_width_mm >= 2.0 * beam_radius_m * 1000.0:
+    # The wheel sits inward from the beam end, leaving a positive inner radius.
+    if wheel_width_mm >= beam_radius_m * 1000.0:
         raise ValueError(
-            "wheel_config.wheel_width_mm must be smaller than the rig diameter."
+            "wheel_config.wheel_width_mm must be smaller than the beam radius "
+            "in millimetres."
         )
 
     encoder_setup = require_mapping(

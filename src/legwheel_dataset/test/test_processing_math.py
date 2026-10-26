@@ -17,6 +17,7 @@ from legwheel_dataset.config import ProcessingConfig
 from legwheel_dataset.processor import extract_features
 from legwheel_dataset.processor import isolate_packets
 from legwheel_dataset.processor import (
+    _dataset_identifier,
     _select_midpoint_pair,
     validate_processing_configuration_with_preview,
 )
@@ -38,6 +39,13 @@ from legwheel_dataset.run_analysis import (
 
 
 class SynchronizationTest(unittest.TestCase):
+    def test_dataset_identifier_changes_with_kinematics_model(self):
+        with patch("legwheel_dataset.processor.KINEMATICS_MODEL_VERSION", 1):
+            old_identifier = _dataset_identifier({}, {}, ProcessingConfig())
+        with patch("legwheel_dataset.processor.KINEMATICS_MODEL_VERSION", 2):
+            new_identifier = _dataset_identifier({}, {}, ProcessingConfig())
+        self.assertNotEqual(old_identifier, new_identifier)
+
     def test_pairing_is_nearest_one_to_one_with_tolerance(self):
         rgb = np.array([100_000_000, 200_000_000, 300_000_000])
         depth = np.array([96_000_000, 207_000_000, 320_000_000])
@@ -289,6 +297,26 @@ class SynchronizationTest(unittest.TestCase):
                 -metadata["patch_centre_motion_angle_rad"],
             )
             self.assertEqual(len(metadata["telemetry_channel_names"]), 15)
+            self.assertAlmostEqual(
+                metadata["theta_p_rgb_rad"],
+                -math.asin((
+                    0.05 + 0.085 + math.sqrt(
+                        0.2**2 + 0.2**2 - 2.0 * 0.2 * 0.2 * math.cos(knee_joint)
+                    ) - 0.0661 - 0.353
+                ) / 0.83),
+            )
+            with np.load(packet / "geometry.npz", allow_pickle=False) as geometry:
+                for key, radius in (
+                    ("patch_inner_points_base_m", 0.73),
+                    ("patch_outer_points_base_m", 0.83),
+                ):
+                    np.testing.assert_allclose(
+                        np.linalg.norm(geometry[key][:, :2], axis=1), radius,
+                    )
+            provenance = json.loads(
+                (output_directory / "provenance.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(provenance["kinematics_model_version"], 2)
             self.assertFalse(any(
                 "rotation" in name
                 for name in metadata["telemetry_channel_names"]
@@ -304,6 +332,9 @@ class SynchronizationTest(unittest.TestCase):
                 ).read_text(encoding="utf-8")
             )
             self.assertEqual(analysis["rate_limit_violations"], [])
+            self.assertAlmostEqual(
+                analysis["corrected_motion"]["track_radius_m"], 0.78,
+            )
             self.assertNotIn("rotation", analysis["measured_effective_rates"])
             self.assertAlmostEqual(
                 analysis["motion_reference_effective_rate"]["median_rate_hz"],

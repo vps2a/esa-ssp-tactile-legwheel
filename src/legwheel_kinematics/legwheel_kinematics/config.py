@@ -11,6 +11,10 @@ from typing import Any
 H_B_M = 0.0661
 CAMERA_OFFSET_FROM_BEAM_CENTRE_M = 0.054
 
+# Increment when the pitch or track equations change so derived datasets get
+# a new identity instead of reusing geometry calculated with an older model.
+KINEMATICS_MODEL_VERSION = 2
+
 # The camera optical axis in the verified notebook geometry points in the
 # decreasing kinematic-theta direction. Forward recordings are therefore those
 # whose converted motion direction equals this value.
@@ -51,6 +55,33 @@ class KinematicsConfig:
     hip_link_length_m: float
     calf_link_length_m: float
     theta_y_kinematic_sign: float
+
+    def __post_init__(self) -> None:
+        """Require wheel geometry with a positive inner track radius."""
+        if not math.isfinite(self.Beam_radius) or self.Beam_radius <= 0.0:
+            raise ValueError("Beam radius must be finite and greater than zero.")
+        if (
+            not math.isfinite(self.Wheel_width)
+            or not 0.0 < self.Wheel_width < self.Beam_radius
+        ):
+            raise ValueError(
+                "Wheel width must be positive and smaller than the beam radius."
+            )
+
+    @property
+    def track_inner_radius_m(self) -> float:
+        """Return the inner edge of the wheel mounted inward from the beam end."""
+        return self.Beam_radius - self.Wheel_width
+
+    @property
+    def track_outer_radius_m(self) -> float:
+        """Return the outer track edge, which coincides with the beam radius."""
+        return self.Beam_radius
+
+    @property
+    def track_center_radius_m(self) -> float:
+        """Return the wheel centreline radius used for motion calculations."""
+        return (self.track_inner_radius_m + self.track_outer_radius_m) / 2.0
 
     def theta_y_to_kinematic(self, theta_y_motion_rad: float) -> float:
         """Convert encoder-motion theta_y into the notebook/base convention."""

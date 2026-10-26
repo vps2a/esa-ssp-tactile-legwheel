@@ -92,10 +92,8 @@ def project_track_patch(
     if not 0.0 < patch_spread_rad < 2.0 * math.pi:
         raise ValueError("invalid_patch_angular_spread")
 
-    inner_radius_m = config.Beam_radius - config.Wheel_width / 2.0
-    outer_radius_m = config.Beam_radius + config.Wheel_width / 2.0
-    if inner_radius_m <= 0.0:
-        raise ValueError("nonpositive_inner_track_radius")
+    inner_radius_m = config.track_inner_radius_m
+    outer_radius_m = config.track_outer_radius_m
 
     full_circle_step = 2.0 * math.pi / track_point_count
     interval_count = max(1, int(math.ceil(patch_spread_rad / full_circle_step)))
@@ -143,8 +141,8 @@ def project_full_track_boundaries(
 ) -> tuple[FloatArray, BoolArray, FloatArray, BoolArray]:
     """Project the complete inner and outer boundaries for Foxglove overlays."""
     angles = np.linspace(-math.pi, math.pi, track_point_count, endpoint=False)
-    inner_radius_m = config.Beam_radius - config.Wheel_width / 2.0
-    outer_radius_m = config.Beam_radius + config.Wheel_width / 2.0
+    inner_radius_m = config.track_inner_radius_m
+    outer_radius_m = config.track_outer_radius_m
     T_camera = camera_pose_in_base(config, theta_y, theta_p)
     inner_pixels, inner_valid = project_camera_points(
         _to_camera(_points_at_angles(inner_radius_m, angles), T_camera),

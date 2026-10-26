@@ -29,15 +29,20 @@ def calculate_theta_p(
     hip_link_length_m: float,
     calf_link_length_m: float,
     pivot_height_m: float,
+    beam_radius_m: float,
     h_b: float = H_B_M,
 ) -> float:
     """Calculate theta_p from the measured knee joint angle.
 
     The arcsine magnitude is the rig-specific relationship supplied for this
-    mechanism. The returned value is negated because the measured positive
+    mechanism, with the vertical displacement divided by the beam length.
+    The returned value is negated because the measured positive
     physical direction is opposite to the notebook/TF ``theta_p`` frame axis.
     Keeping the conversion here lets that convention be tested without ROS.
     """
+    if not math.isfinite(beam_radius_m) or beam_radius_m <= 0.0:
+        raise ValueError("Beam radius must be finite and greater than zero.")
+
     leg_length_squared = (
         hip_link_length_m**2
         + calf_link_length_m**2
@@ -58,7 +63,7 @@ def calculate_theta_p(
         + leg_length
         - h_b
         - pivot_height_m
-    )
+    ) / beam_radius_m
     if not -1.0 <= arcsin_argument <= 1.0:
         raise ValueError(
             "theta_p is undefined because its arcsin argument is outside "
@@ -75,6 +80,7 @@ def theta_p_from_config(knee_joint: float, config: KinematicsConfig) -> float:
         hip_link_length_m=config.hip_link_length_m,
         calf_link_length_m=config.calf_link_length_m,
         pivot_height_m=config.d1,
+        beam_radius_m=config.Beam_radius,
         h_b=config.h_b,
     )
 
