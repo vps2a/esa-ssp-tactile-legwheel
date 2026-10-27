@@ -1,11 +1,21 @@
 import pytest
+from dataclasses import asdict
+import yaml
 
-from legwheel_experiments.schemas import ExperimentConfig, validate_experiment_config
+from legwheel_experiments.data_recorder import RunRecorder
+from legwheel_experiments.schemas import ExperimentConfig, RunConfig, validate_experiment_config
 
 
 def experiment_config(theta_y_kinematic_sign=-1) -> ExperimentConfig:
     """Return the smallest valid experiment containing the direction mapping."""
-    encoder_setup = {"ticks_per_legwheel_revolution": 62.5}
+    encoder_setup = {
+        "port": "/dev/ttyUSB0",
+        "baudrate": 9600,
+        "ticks_per_legwheel_revolution": 62.5,
+        "publish_rate_hz": 100.0,
+        "invert_direction": False,
+        "zero_on_start": True,
+    }
     if theta_y_kinematic_sign is not None:
         encoder_setup["theta_y_kinematic_sign"] = theta_y_kinematic_sign
     return ExperimentConfig(
@@ -70,3 +80,25 @@ def test_wheel_width_can_be_just_smaller_than_beam_radius():
     config = experiment_config()
     config.wheel_config["wheel_width_mm"] = 829.0
     validate_experiment_config(config)
+
+
+def test_recording_saves_validated_values_and_needs_no_separate_encoder_file(tmp_path):
+    config = experiment_config()
+    source = tmp_path / "experiment.yaml"
+    # Simulate editing the source after the CLI has loaded and validated it.
+    changed_source = asdict(config)
+    changed_source["electronics_hardware"]["encoder_setup"]["ticks_per_legwheel_revolution"] = 83.3
+    source.write_text(yaml.safe_dump(changed_source))
+    run = RunConfig(
+        run_length_loops=1.0,
+        leg_parameters={
+            "knee_stiffness_nm_per_rad": 10.0,
+            "knee_spring_zeroposition_rad": 0.5,
+            "knee_damping_nms_per_rad": 1.0,
+        },
+        wheel_parameters={"commanded_wheel_torque_nm": 2.0, "wheel_torque_ramp_time_sec": 1.0},
+    )
+    directory = RunRecorder(tmp_path).start_run(run, config, source, 1)
+    snapshot = yaml.safe_load((directory / "experiment_config_run_1_snapshot.yaml").read_text())
+    assert snapshot == asdict(config)
+    assert not list(directory.glob("rotation_encoder_config*"))

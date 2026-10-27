@@ -2,16 +2,20 @@ from collections.abc import Callable, Sequence
 from numbers import Real
 from typing import Any
 
+import json
 import queue
 import rclpy
 import threading
 import time
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from sensor_msgs.msg import Image, Imu, JointState
 from std_msgs.msg import Bool
 from std_msgs.msg import Float64
 from std_msgs.msg import Float64MultiArray
+from std_msgs.msg import String
+
+from legwheel_encoder.config import CONFIG_TOPIC, EncoderConfig
 
 from legwheel_experiments.camera_topics import (
     CAMERA_DEPTH_IMAGE_TOPIC,
@@ -58,6 +62,8 @@ class ExperimentRunnerNode(Node):
         self._latest_leg_state = None
         self._latest_wheel_state = None
         self._latest_encoder_state = None
+        self._expected_encoder_config = None
+        self._reported_encoder_config = None
         #These store when the node received them
         self._leg_state_received_at_s = None
         self._wheel_state_received_at_s = None
@@ -157,6 +163,12 @@ class ExperimentRunnerNode(Node):
             self._encoder_state_callback,
             qos_profile_sensor_data,
         )
+        self._encoder_config_subscription = self.create_subscription(
+            String,
+            CONFIG_TOPIC,
+            self._encoder_config_callback,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
 
         # Subscribe to the camera driver's raw streams. Relaying full images
         # through a Python node caused severe rate loss, while this node only
@@ -242,6 +254,22 @@ class ExperimentRunnerNode(Node):
     def _encoder_state_callback(self, message: JointState) -> None:
         self._latest_encoder_state = message
         self._encoder_state_received_at_s = time.monotonic()
+
+    def _encoder_config_callback(self, message: String) -> None:
+        """Compare effective driver values, rather than just YAML filenames."""
+        try:
+            self._reported_encoder_config = EncoderConfig.from_setup(
+                json.loads(message.data)
+            )
+        except (ValueError, TypeError) as error:
+            self._reported_encoder_config = None
+            self.get_logger().warning(f"Invalid encoder configuration report: {error}")
+
+    def _encoder_configuration_matches(self) -> bool:
+        return (
+            self._expected_encoder_config is not None
+            and self._reported_encoder_config == self._expected_encoder_config
+        )
 
     def _camera_rgb_callback(self, message: Image) -> None:
         self._latest_camera_rgb = message
@@ -418,6 +446,9 @@ class ExperimentRunnerNode(Node):
         # The node repeats validation so no other caller can set the flag blindly.
         validate_experiment_config(experiment_config)
         validate_run_config(run_config)
+        self._expected_encoder_config = EncoderConfig.from_setup(
+            experiment_config.electronics_hardware["encoder_setup"]
+        )
         self._configuration_valid = True
         self.get_logger().info(
             "Experiment and run configurations passed validation."
@@ -486,6 +517,12 @@ class ExperimentRunnerNode(Node):
                 "Experiment configuration is valid",
                 self._configuration_valid,
                 "Waiting for valid experiment configuration",
+            ),
+            (
+                "Encoder settings match the experiment configuration",
+                self._encoder_configuration_matches(),
+                "Waiting for encoder settings matching the experiment config; "
+                "restart the encoder with this experiment YAML if they differ",
             ),
             # (
             #     "Recording has started",

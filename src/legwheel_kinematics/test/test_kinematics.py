@@ -10,11 +10,9 @@ from legwheel_kinematics.config import KinematicsConfig
 from legwheel_kinematics.projection import CameraCalibration
 from legwheel_kinematics.track import generate_track_points, project_track
 from legwheel_kinematics.transforms import (
-    calculate_theta_p,
     forward_kinematics,
     frame_coordinates,
     rotation_matrix_to_quaternion,
-    theta_p_from_config,
 )
 
 
@@ -246,51 +244,6 @@ class KinematicsTest(unittest.TestCase):
         np.testing.assert_array_equal(rotated[0], np.eye(4))
         for fixed_pose, yaw_pose in zip(original[1:], rotated[1:]):
             np.testing.assert_allclose(yaw_pose, rotation @ fixed_pose, atol=1e-12)
-
-    def test_theta_p_uses_measured_frame_sign_convention(self):
-        knee_joint = 1.0
-        expected_argument = (
-            100.0 / 1000.0
-            + 0.085
-            + math.sqrt(0.2**2 + 0.2**2 - 2 * 0.2 * 0.2 * math.cos(knee_joint))
-            - 0.0761
-            - 0.353
-        ) / 0.83
-        self.assertAlmostEqual(
-            calculate_theta_p(
-                knee_joint, 100.0, 0.2, 0.2, 0.353, 0.83, h_b=0.0761
-            ),
-            # The physical magnitude follows the supplied equation. The
-            # notebook/TF theta_p axis is opposite to that positive direction.
-            -math.asin(expected_argument),
-        )
-
-    def test_theta_p_scales_vertical_displacement_by_beam_length(self):
-        # This pose gives a -0.3 m vertical displacement. A 0.6 m beam
-        # therefore has sin(theta_p)=0.5 with the measured frame convention.
-        theta_p = calculate_theta_p(0.0, 100.0, 0.2, 0.2, 0.385, 0.6, h_b=0.1)
-        self.assertAlmostEqual(theta_p, math.pi / 6.0)
-        longer_beam_theta_p = calculate_theta_p(
-            0.0, 100.0, 0.2, 0.2, 0.385, 1.2, h_b=0.1
-        )
-        self.assertAlmostEqual(math.sin(longer_beam_theta_p), 0.25)
-
-    def test_theta_p_from_config_passes_beam_length_and_offsets(self):
-        config = notebook_config()
-        self.assertAlmostEqual(
-            theta_p_from_config(1.0, config),
-            calculate_theta_p(1.0, 100.0, 0.2, 0.2, 0.353, 0.83, h_b=0.0761),
-        )
-
-    def test_theta_p_rejects_nonpositive_or_nonfinite_beam_length(self):
-        for beam_radius in (0.0, -0.83, math.inf, math.nan):
-            with self.subTest(beam_radius=beam_radius):
-                with self.assertRaisesRegex(ValueError, "Beam radius"):
-                    calculate_theta_p(1.0, 100.0, 0.2, 0.2, 0.353, beam_radius)
-
-    def test_theta_p_rejects_impossible_arcsin_input(self):
-        with self.assertRaisesRegex(ValueError, "outside"):
-            calculate_theta_p(0.0, 2000.0, 0.2, 0.2, 0.1, 0.83)
 
     def test_projected_track_forms_visible_polygon(self):
         calibration = CameraCalibration(

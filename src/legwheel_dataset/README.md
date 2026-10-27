@@ -132,6 +132,12 @@ The bag must contain:
 - `/wheel/requested_torque`
 - `/rotation_encoder/ticks`
 
+Ticks use their original bag receipt timestamps because `std_msgs/msg/Int64`
+has no header. Raw-run replay and the clock-driven visualization adapter use
+the same timestamps and recording origin. Wheel-velocity refinement between
+ticks is unchanged. `/rotation_encoder/joint_state` is not used for offline
+position reconstruction.
+
 This implementation deliberately requires the snapshotted camera configuration
 to contain `depth_registration: true` and `align_target_stream: COLOR`.
 Unregistered depth is rejected instead of silently using the wrong RGB/depth
@@ -142,6 +148,7 @@ The experiment snapshot must also contain:
 ```yaml
 electronics_hardware:
   encoder_setup:
+    ticks_per_legwheel_revolution: 62.5
     # Keep -1 for this LegWheel geometry. Encoder-positive forward motion is
     # opposite to positive notebook/DH theta_y. Changing this mirrors all
     # camera projections, 3D points, and signed slope directions.
@@ -169,6 +176,64 @@ full experiment YAML. Both offset fields are required for dataset processing.
 Regenerate derived packets after correcting geometry because their projected
 pixel coordinates are saved during packet isolation.
 
+## Offline beam pitch from the camera IMU
+
+Dataset analysis, packet generation and the raw-run 3D viewer estimate
+`theta_p` from the recorded camera accelerometer and gyroscope. Knee angle
+remains diagnostic/ML telemetry and is never a fallback for an unavailable
+inertial pose. Live/bag-stream kinematics publishers use the same shared
+estimator in `legwheel_kinematics`; knee geometry is not a pitch source in any
+visualizer. Datasets saved before IMU pitch was introduced must be regenerated:
+`visualise_stream` refuses their old poses and overlays rather than presenting
+them as current inertial results.
+
+The estimator rotates the Gemini 336's nominal optical-axis IMU measurements
+into the beam frame using the existing camera transform. This includes
+`camera_front_angle_deg` and the optical-axis flip: a level beam has zero
+`theta_p` even when the physical camera is tilted. Camera image projection
+still uses the actual configured mounting angle. Per-device IMU-to-color
+misalignment is not recorded by the current bag format, so this uses the
+manufacturer's nominal optical-axis alignment. Validate physical mounting and
+calibration separately before claiming an absolute one-degree accuracy.
+
+The complete IMU recording is processed before selecting steady wheel motion.
+A pitch-and-gyro-bias filter uses quiet samples to estimate bias, rejects
+acceleration disturbances, and applies an offline smoother within each
+continuous segment. Smoothed central encoder motion and the camera lever arm
+compensate for circular acceleration. Pitch is evaluated separately at each
+RGB and depth acquisition timestamp. An impact can disable an accelerometer
+correction while the gyro still supplies a finite pitch estimate. Those
+low-confidence estimates are retained for packets, point clouds, frames and
+image overlays. Only timestamps with no estimate at all, such as startup or a
+genuine data gap, remain unavailable; no knee fallback or invented gap filling
+is used. All other packet checks, such as image visibility, still apply.
+
+Every new packet saves `imu_uncertainty_deg` in its metadata. Stage 2 exposes
+the same scalar feature as **`"IMU uncertainty"`** in the packet's `features.json`
+and the dataset's `features.jsonl`, and as `imu_uncertainty_deg` in `features.npz`.
+It is the larger RGB/depth **two-sigma pitch uncertainty in degrees**. It is
+descriptive and never invalidates a packet or its other features. The browser
+shows it as **IMU uncertainty** with degree/2σ units, including Stage 1 metadata
+before feature extraction. Unknown uncertainty in older packets is shown as
+unavailable rather than zero.
+
+`maximum_pitch_uncertainty_deg` defaults to `1.0` and now controls only a
+diagnostic confidence flag; exceeding it does not skip packets or visualization
+updates. Inspect `pitch_estimation` and `packets/run_pitch_estimation.npz` for
+the separate `available` and diagnostic `valid` masks, uncertainty and
+acceleration rejection. Packet metadata also retains each exposure's one-sigma
+`theta_p_*_uncertainty_rad`. These are model confidence bounds and do not include
+every calibration error. Estimator version and settings participate in the
+dataset identity; regenerate packets to retain formerly rejected frames and
+populate the new feature.
+
+For new recordings, leave the mechanism genuinely still for 5–10 seconds after
+the recorder reports ready and before confirming `START`. A recorded quiet
+period after motion also helps. Shorter existing pauses can still be used;
+the estimator must find quiet measurements rather than assuming the first
+two seconds are motionless. Source timing faults and insufficient trustworthy
+IMU data can leave frames unavailable; the report explains rejected pairs.
+
 ## Output layout
 
 By default, output is placed in:
@@ -177,8 +242,8 @@ By default, output is placed in:
 RUN_DIRECTORY/derived/CONFIGURATION_HASH/
 ```
 
-The hash covers the experiment configuration, run configuration, and complete
-post-processing configuration. An existing derived directory is never
+The hash covers the experiment configuration, run configuration, complete
+post-processing configuration and pitch estimator version. An existing derived directory is never
 overwritten.
 
 ```text
@@ -190,6 +255,7 @@ CONFIGURATION_HASH/
 └── packets/
     ├── analysis_report.json
     ├── run_motion_analysis.npz
+    ├── run_pitch_estimation.npz
     └── e<experiment>_r<run>_theta_<angle>_<hash>/
         ├── metadata.json
         ├── geometry.npz
@@ -239,13 +305,22 @@ intermediate commands and may not publish the nominal endpoint exactly.
 ### 2. Define `t0` and reject reverse encoder changes
 
 Repeated central-encoder values are collapsed. `t0` is the first actual encoder
-count change after the torque threshold is reached. The raw encoder angle at
-that point is retained in `analysis_report.json`, while the processed angle is
-rebased:
+count change after the torque threshold is reached. This selects the analysis
+interval without changing the position origin. Every angle uses the first
+recorded tick in the complete run:
 
 ```text
-theta_y(t0) = 0
+theta_y_at_tick = (ticks - first_recorded_ticks) * 2*pi / ticks_per_legwheel_revolution
 ```
+
+The first count may be nonzero when the encoder was started before recording.
+The driver has already applied `invert_direction`; offline code must not apply
+it again. `theta_y_kinematic_sign` subsequently maps the motion angle into the
+geometry convention. Complete revolutions are preserved without wrapping.
+The recording origin, calibration and bag timestamp source are saved in
+`analysis_report.json` and dataset provenance. Regenerate previously derived
+datasets to adopt this common origin; new dataset identifiers include the
+encoder-position convention version.
 
 Actual encoder differences are used, including a change of more than one tick.
 Isolated changes opposite to the dominant run direction are treated as encoder
@@ -423,7 +498,7 @@ patch_end   = patch_kinematic + alpha_sp_rad / 2
 end angles are always inserted, so the requested patch width is never rounded
 to that grid.
 
-The RGB and depth projections each use their own image timestamp, knee angle,
+The RGB and depth projections each use their own image timestamp, IMU-derived
 `theta_p`, `CameraInfo`, image frame, and camera pose. A patch is accepted only
 when its complete inner boundary, outer boundary and angular endpoints are in
 front of the camera and inside both images. Partial patches are rejected and
@@ -565,6 +640,7 @@ rgb_depth_max_delta_ms: 10.0
 spectral_window_ms: 1000.0
 telemetry_resample_hz: 100.0
 maximum_interpolation_gap_ms: 50.0
+maximum_pitch_uncertainty_deg: 1.0
 maximum_packet_saving_frequency_hz: 10.0
 alpha_off_rad: 0.35
 alpha_sp_rad: 0.10

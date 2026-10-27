@@ -8,6 +8,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from legwheel_kinematics.projection import CameraCalibration
+from legwheel_encoder.config import TICKS_TOPIC
 
 
 RGB_IMAGE_TOPIC = "/legwheel_rgbd/color/image_raw"
@@ -17,7 +18,7 @@ DEPTH_INFO_TOPIC = "/legwheel_rgbd/depth/camera_info"
 IMU_TOPIC = "/legwheel_rgbd/gyro_accel/sample"
 LEG_STATE_TOPIC = "/legwheel/joint_states"
 WHEEL_STATE_TOPIC = "/wheel/wheel_state"
-ROTATION_TICKS_TOPIC = "/rotation_encoder/ticks"
+ROTATION_TICKS_TOPIC = TICKS_TOPIC
 REQUESTED_TORQUE_TOPIC = "/wheel/requested_torque"
 
 INDEX_TOPICS = {
@@ -143,6 +144,7 @@ class BagIndex:
     rgb_calibrations: CalibrationTimeline = field(default_factory=CalibrationTimeline)
     depth_calibrations: CalibrationTimeline = field(default_factory=CalibrationTimeline)
     streams: dict[str, TelemetrySeries] = field(default_factory=dict)
+    imu_frame_ids: set[str] = field(default_factory=set)
 
 
 def _joint_value(message, name: str, field_name: str) -> float:
@@ -299,6 +301,9 @@ def index_bag(bag_directory: Path) -> BagIndex:
                 [float(message.data)],
             )
         elif topic == IMU_TOPIC:
+            # Keep the declared basis so offline pose estimation can reject a
+            # body-frame stream instead of assuming it uses Gemini optical axes.
+            index.imu_frame_ids.add(str(getattr(message.header, "frame_id", "")))
             index.streams["imu"].append(
                 timestamp_ns,
                 [

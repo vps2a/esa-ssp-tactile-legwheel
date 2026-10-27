@@ -86,6 +86,13 @@ def metadata_rows(packet: PacketData) -> list[tuple[str, str]]:
         ("θp RGB", _number(metadata.get("theta_p_rgb_rad"), "rad")),
         ("θp depth", _number(metadata.get("theta_p_depth_rad"), "rad")),
         (
+            "IMU uncertainty",
+            _number(
+                features.get("IMU uncertainty", metadata.get("imu_uncertainty_deg")),
+                "° (2σ)", 3,
+            ),
+        ),
+        (
             "Patch-centre angle",
             _number(metadata.get("patch_centre_kinematic_angle_rad"), "rad"),
         ),

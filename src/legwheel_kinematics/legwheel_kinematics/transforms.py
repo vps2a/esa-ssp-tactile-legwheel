@@ -5,7 +5,7 @@ import math
 import numpy as np
 from numpy.typing import NDArray
 
-from legwheel_kinematics.config import H_B_M, KinematicsConfig
+from legwheel_kinematics.config import KinematicsConfig
 
 
 FloatArray = NDArray[np.float64]
@@ -21,68 +21,6 @@ KINEMATIC_FRAME_IDS = (
     "camera_mount_link",
     "legwheel_camera_optical_frame",
 )
-
-
-def calculate_theta_p(
-    knee_joint: float,
-    wheel_radius_mm: float,
-    hip_link_length_m: float,
-    calf_link_length_m: float,
-    pivot_height_m: float,
-    beam_radius_m: float,
-    h_b: float = H_B_M,
-) -> float:
-    """Calculate theta_p from the measured knee joint angle.
-
-    The arcsine magnitude is the rig-specific relationship supplied for this
-    mechanism, with the vertical displacement divided by the beam length.
-    The returned value is negated because the measured positive
-    physical direction is opposite to the notebook/TF ``theta_p`` frame axis.
-    Keeping the conversion here lets that convention be tested without ROS.
-    """
-    if not math.isfinite(beam_radius_m) or beam_radius_m <= 0.0:
-        raise ValueError("Beam radius must be finite and greater than zero.")
-
-    leg_length_squared = (
-        hip_link_length_m**2
-        + calf_link_length_m**2
-        - 2.0
-        * hip_link_length_m
-        * calf_link_length_m
-        * math.cos(knee_joint)
-    )
-    # Floating point round-off can make an exact zero slightly negative.
-    if leg_length_squared < -1e-12:
-        raise ValueError("The knee geometry produced a negative squared length.")
-    leg_length = math.sqrt(max(0.0, leg_length_squared))
-
-    fixed_vertical_offset_m = 0.085
-    arcsin_argument = (
-        wheel_radius_mm / 1000.0
-        + fixed_vertical_offset_m
-        + leg_length
-        - h_b
-        - pivot_height_m
-    ) / beam_radius_m
-    if not -1.0 <= arcsin_argument <= 1.0:
-        raise ValueError(
-            "theta_p is undefined because its arcsin argument is outside "
-            f"[-1, 1]: {arcsin_argument}"
-        )
-    return -math.asin(arcsin_argument)
-
-
-def theta_p_from_config(knee_joint: float, config: KinematicsConfig) -> float:
-    """Calculate theta_p using the values loaded from an experiment file."""
-    return calculate_theta_p(
-        knee_joint=knee_joint,
-        wheel_radius_mm=config.wheel_radius_mm,
-        hip_link_length_m=config.hip_link_length_m,
-        calf_link_length_m=config.calf_link_length_m,
-        pivot_height_m=config.d1,
-        beam_radius_m=config.Beam_radius,
-        h_b=config.h_b,
-    )
 
 
 def individual_transformation_matrices(

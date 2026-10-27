@@ -18,6 +18,8 @@ from legwheel_dataset.processor import extract_features
 from legwheel_dataset.processor import isolate_packets
 from legwheel_dataset.processor import (
     _dataset_identifier,
+    _packet_imu_uncertainty_deg,
+    _recorded_encoder_motion,
     _select_midpoint_pair,
     validate_processing_configuration_with_preview,
 )
@@ -28,6 +30,8 @@ from legwheel_dataset.bag_reader import (
     TelemetrySeries,
 )
 from legwheel_kinematics.projection import CameraCalibration
+from legwheel_kinematics.config import KinematicsConfig
+from legwheel_kinematics.transforms import frame_coordinates
 from legwheel_dataset.synchronization import (
     ImagePair,
     pair_image_timestamps,
@@ -39,12 +43,52 @@ from legwheel_dataset.run_analysis import (
 
 
 class SynchronizationTest(unittest.TestCase):
+    def test_packet_uncertainty_uses_the_worst_exposure_and_preserves_unknowns(self):
+        self.assertAlmostEqual(_packet_imu_uncertainty_deg({
+            "theta_p_rgb_uncertainty_rad": math.radians(2.0),
+            "theta_p_depth_uncertainty_rad": math.radians(3.5),
+        }), 7.0)
+        self.assertEqual(_packet_imu_uncertainty_deg({"imu_uncertainty_deg": 9.0}), 9.0)
+        self.assertIsNone(_packet_imu_uncertainty_deg({}))
+        self.assertIsNone(_packet_imu_uncertainty_deg({"imu_uncertainty_deg": math.nan}))
+        self.assertIsNone(_packet_imu_uncertainty_deg({
+            "theta_p_rgb_uncertainty_rad": 0.1,
+            "theta_p_depth_uncertainty_rad": math.nan,
+        }))
+
     def test_dataset_identifier_changes_with_kinematics_model(self):
         with patch("legwheel_dataset.processor.KINEMATICS_MODEL_VERSION", 2):
             old_identifier = _dataset_identifier({}, {}, ProcessingConfig())
         with patch("legwheel_dataset.processor.KINEMATICS_MODEL_VERSION", 3):
             new_identifier = _dataset_identifier({}, {}, ProcessingConfig())
         self.assertNotEqual(old_identifier, new_identifier)
+
+    def test_dataset_identifier_changes_with_pitch_estimator(self):
+        with patch("legwheel_dataset.processor.PITCH_ESTIMATOR_VERSION", 1):
+            old_identifier = _dataset_identifier({}, {}, ProcessingConfig())
+        with patch("legwheel_dataset.processor.PITCH_ESTIMATOR_VERSION", 2):
+            new_identifier = _dataset_identifier({}, {}, ProcessingConfig())
+        self.assertNotEqual(old_identifier, new_identifier)
+
+    def test_dataset_identifier_changes_with_encoder_position_convention(self):
+        with patch("legwheel_dataset.processor.ENCODER_POSITION_VERSION", 0):
+            old_identifier = _dataset_identifier({}, {}, ProcessingConfig())
+        new_identifier = _dataset_identifier({}, {}, ProcessingConfig())
+        self.assertNotEqual(old_identifier, new_identifier)
+
+    def test_tick_conversion_uses_the_first_recorded_count_before_torque_selection(self):
+        ticks = TelemetrySeries(("rotation_encoder.ticks",))
+        for timestamp, count in [(10, 120), (20, 120), (30, 121), (40, 123)]:
+            ticks.append(timestamp, [count])
+        config = {"electronics_hardware": {"encoder_setup": {
+            "ticks_per_legwheel_revolution": 62.5,
+            "invert_direction": True,  # Already applied in the recorded count.
+        }}}
+        times, angles, origin = _recorded_encoder_motion(BagIndex(streams={"ticks": ticks}), config)
+        np.testing.assert_array_equal(times, [10, 20, 30, 40])
+        np.testing.assert_allclose(angles, np.array([0, 0, 1, 3]) * 2 * math.pi / 62.5)
+        self.assertEqual(origin["origin_ticks"], 120)
+        self.assertEqual(origin["origin_time_ns"], 10)
 
     def test_pairing_is_nearest_one_to_one_with_tolerance(self):
         rgb = np.array([100_000_000, 200_000_000, 300_000_000])
@@ -130,7 +174,14 @@ class SynchronizationTest(unittest.TestCase):
                 distortion_model="plumb_bob",
             )
             sample_times = np.arange(0, 401, dtype=np.int64) * 10_000_000
-            knee_joint = 1.0
+            # This knee position deliberately disagrees with the true pitch.
+            # Camera pose must follow inertial measurements rather than legs.
+            knee_joint = 0.0
+            true_pitch_rad = 0.12
+            geometry_config = KinematicsConfig.from_experiment_dict(
+                experiment_config
+            )
+            yaw_rate_rad_s = -10.0 * 2.0 * math.pi / 62.5
             leg = TelemetrySeries(tuple(
                 f"{name}.{field}"
                 for name in ("hip_joint", "knee_joint")
@@ -153,7 +204,24 @@ class SynchronizationTest(unittest.TestCase):
                 # but must not limit the 100 Hz motor/IMU packet grid.
                 if sample_index % 5 == 0:
                     ticks.append(timestamp_ns, [encoder_ticks])
-                imu.append(timestamp_ns, [0.0] * 6)
+                camera_pose = frame_coordinates(
+                    geometry_config, true_pitch_rad,
+                    theta_y=yaw_rate_rad_s * time_s,
+                )[-1]
+                camera_rotation = camera_pose[:3, :3]
+                camera_position = camera_pose[:3, 3]
+                circular_acceleration = -yaw_rate_rad_s**2 * np.array([
+                    camera_position[0], camera_position[1], 0.0,
+                ])
+                # Generate optical-frame measurements independently from the
+                # estimator, using gravity and the world-space circular path.
+                acceleration = camera_rotation.T @ (
+                    circular_acceleration + [0.0, 0.0, 9.80665]
+                )
+                angular_velocity = camera_rotation.T @ np.array([
+                    0.0, 0.0, yaw_rate_rad_s,
+                ])
+                imu.append(timestamp_ns, [*angular_velocity, *acceleration])
             for timestamp_ns, torque in (
                 (0, 0.0),
                 (500_000_000, -0.95),
@@ -300,11 +368,16 @@ class SynchronizationTest(unittest.TestCase):
             self.assertEqual(len(metadata["telemetry_channel_names"]), 15)
             self.assertAlmostEqual(
                 metadata["theta_p_rgb_rad"],
-                -math.asin((
-                    0.05 + 0.085 + math.sqrt(
-                        0.2**2 + 0.2**2 - 2.0 * 0.2 * 0.2 * math.cos(knee_joint)
-                    ) - 0.0661 - 0.353
-                ) / 0.83),
+                true_pitch_rad,
+                delta=math.radians(0.5),
+            )
+            self.assertEqual(metadata["theta_p_source"], "camera_imu")
+            self.assertLessEqual(
+                2.0 * metadata["theta_p_rgb_uncertainty_rad"],
+                math.radians(1.0),
+            )
+            self.assertTrue(
+                (output_directory / "packets" / "run_pitch_estimation.npz").is_file()
             )
             with np.load(packet / "geometry.npz", allow_pickle=False) as geometry:
                 for key, radius in (
@@ -344,6 +417,77 @@ class SynchronizationTest(unittest.TestCase):
             self.assertEqual(
                 analysis["resampled_telemetry_channel_count"], 15
             )
+
+            # Missing knee position may degrade its own ML channel, but it
+            # must not suppress an otherwise supported camera pose or preview.
+            missing_knee = TelemetrySeries(leg.channel_names)
+            for timestamp_ns, row in zip(leg.times_ns, leg.rows):
+                diagnostic_row = row.copy()
+                diagnostic_row[3] = float("nan")
+                missing_knee.append(timestamp_ns, diagnostic_row)
+            without_knee = BagIndex(
+                rgb_images=bag_index.rgb_images,
+                depth_images=bag_index.depth_images,
+                rgb_calibrations=timeline,
+                depth_calibrations=timeline,
+                streams={**bag_index.streams, "leg": missing_knee},
+            )
+            with patch(
+                "legwheel_dataset.processor.index_bag", return_value=without_knee
+            ):
+                no_knee_report, no_knee_preview = (
+                    validate_processing_configuration_with_preview(
+                        run_directory, ProcessingConfig(),
+                        experiment_config_path=experiment_path,
+                    )
+                )
+            self.assertTrue(no_knee_report["configuration_valid"])
+            self.assertIsNone(no_knee_preview.rgb.knee_joint_rad)
+            self.assertAlmostEqual(
+                no_knee_preview.rgb.theta_p_rad, metadata["theta_p_rgb_rad"]
+            )
+
+            # A coincident impact makes gravity untrustworthy, but gyro pitch
+            # still exists. Keep the packet and its uncertainty instead of
+            # rejecting it because of an accelerometer reliability flag.
+            impact_imu = TelemetrySeries(imu.channel_names)
+            for timestamp_ns, row in zip(imu.times_ns, imu.rows):
+                impact_row = row.copy()
+                if 1_400_000_000 <= timestamp_ns <= 1_700_000_000:
+                    impact_row[3:] = [0.0, 0.0, 0.0]
+                impact_imu.append(timestamp_ns, impact_row)
+            during_impact = BagIndex(
+                rgb_images=bag_index.rgb_images,
+                depth_images=bag_index.depth_images,
+                rgb_calibrations=timeline,
+                depth_calibrations=timeline,
+                streams={**bag_index.streams, "imu": impact_imu},
+            )
+            impact_output = run_directory / "derived_impact"
+            with (
+                patch("legwheel_dataset.processor.index_bag", return_value=during_impact),
+                patch(
+                    "legwheel_dataset.processor.extract_selected_images",
+                    side_effect=provide_images,
+                ),
+            ):
+                isolate_packets(
+                    run_directory, ProcessingConfig(),
+                    experiment_config_path=experiment_path,
+                    output_directory=impact_output,
+                )
+            impact_manifest = json.loads((impact_output / "manifest.jsonl").read_text())
+            impact_metadata = json.loads((
+                impact_output / impact_manifest["packet_path"] / "metadata.json"
+            ).read_text())
+            self.assertIsInstance(impact_metadata["imu_uncertainty_deg"], float)
+            impact_report = json.loads(
+                (impact_output / "packets" / "analysis_report.json").read_text()
+            )
+            self.assertFalse(any(
+                "IMU pitch is unreliable" in reason
+                for reason in impact_report["rejection_counts"]
+            ))
 
             reverse_ticks = TelemetrySeries(("rotation_encoder.ticks",))
             for timestamp_ns, row in zip(ticks.times_ns, ticks.rows):
@@ -535,6 +679,7 @@ class FeatureTest(unittest.TestCase):
                     "patch_centre_kinematic_angle_rad": 0.0,
                     "travel_direction_kinematic": 1.0,
                     "telemetry_channel_names": ["synthetic"],
+                    "imu_uncertainty_deg": 7.25,
                 }),
                 encoding="utf-8",
             )
@@ -562,8 +707,33 @@ class FeatureTest(unittest.TestCase):
                 (packet / "stage2" / "features.json").read_text(encoding="utf-8")
             )
             self.assertTrue(features["valid"])
+            self.assertEqual(features["IMU uncertainty"], 7.25)
+            aggregate_features = json.loads((dataset / "features.jsonl").read_text())
+            self.assertEqual(aggregate_features["IMU uncertainty"], 7.25)
+            with np.load(packet / "stage2" / "features.npz") as arrays:
+                self.assertEqual(float(arrays["imu_uncertainty_deg"]), 7.25)
             self.assertAlmostEqual(features["along_slope_deg"], 0.0, places=6)
             self.assertTrue((packet / "stage2" / "point_map.npz").is_file())
+
+    def test_imu_uncertainty_remains_available_when_an_unrelated_feature_fails(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            dataset = Path(temporary_directory)
+            packet = dataset / "packets" / "packet_0"
+            packet.mkdir(parents=True)
+            (dataset / "provenance.json").write_text(json.dumps({
+                "processing_config": ProcessingConfig().to_dict(),
+            }))
+            (dataset / "manifest.jsonl").write_text(json.dumps({
+                "packet_path": "packets/packet_0",
+            }) + "\n")
+            (packet / "metadata.json").write_text(json.dumps({
+                "packet_id": "packet_0", "imu_uncertainty_deg": 12.0,
+            }))
+            # Missing image files are unrelated to the IMU confidence feature.
+            extract_features(dataset)
+            features = json.loads((packet / "stage2" / "features.json").read_text())
+            self.assertFalse(features["valid"])
+            self.assertEqual(features["IMU uncertainty"], 12.0)
 
 
 if __name__ == "__main__":

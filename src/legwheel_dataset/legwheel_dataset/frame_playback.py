@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
+from legwheel_encoder.config import ENCODER_POSITION_VERSION, TICKS_TOPIC
+
 
 @dataclass(frozen=True)
 class FramePose:
@@ -11,6 +13,44 @@ class FramePose:
     timestamp_ns: int
     theta_y_rad: float
     theta_p_rad: float
+
+
+def require_imu_pitch_dataset(provenance: dict, metadata: dict | None = None) -> None:
+    """Refuse saved knee-derived poses instead of displaying outdated geometry.
+
+    Saved overlays, camera transforms and terrain features all depend on the
+    original packet pose. Replacing only a displayed angle would leave those
+    outputs inconsistent, so old packets must be regenerated from their IMU.
+    """
+    version = provenance.get("pitch_estimator_version")
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or version < 1
+        or (metadata is not None and metadata.get("theta_p_source") != "camera_imu")
+    ):
+        raise ValueError(
+            "This dataset does not contain verified IMU-derived pitch. "
+            "Regenerate its derived packets from the recorded camera IMU "
+            "before visualizing them."
+        )
+
+
+def require_encoder_position_dataset(provenance: dict) -> None:
+    """Saved overlays need regeneration when their yaw reference is outdated."""
+    position = provenance.get("encoder_position")
+    version = provenance.get("encoder_position_version")
+    if (
+        type(version) is not int
+        or version != ENCODER_POSITION_VERSION
+        or not isinstance(position, dict)
+        or position.get("topic") != TICKS_TOPIC
+        or position.get("origin") != "first_recorded_tick"
+    ):
+        raise ValueError(
+            "This dataset predates the shared recording origin from encoder ticks. "
+            "Regenerate its derived packets using the corrected experiment snapshot."
+        )
 
 
 def interpolate_frame_pose(

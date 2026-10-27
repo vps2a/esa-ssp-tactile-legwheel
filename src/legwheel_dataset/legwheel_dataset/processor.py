@@ -11,6 +11,12 @@ from typing import Any
 
 import numpy as np
 
+from legwheel_encoder.config import (
+    ENCODER_POSITION_VERSION,
+    TICKS_TOPIC,
+    EncoderCalibration,
+)
+
 from legwheel_dataset.bag_reader import (
     DEPTH_IMAGE_TOPIC,
     RGB_IMAGE_TOPIC,
@@ -30,6 +36,11 @@ from legwheel_dataset.images import (
     depth_point_map_in_base,
     masked_crop,
     polygon_mask,
+)
+from legwheel_kinematics.imu_pitch import (
+    PITCH_ESTIMATOR_VERSION,
+    PitchTrajectory,
+    estimate_pitch,
 )
 from legwheel_dataset.patch_geometry import (
     PatchProjection,
@@ -51,7 +62,6 @@ from legwheel_dataset.synchronization import (
 )
 from legwheel_kinematics.config import KINEMATICS_MODEL_VERSION, KinematicsConfig
 from legwheel_kinematics.projection import CameraCalibration
-from legwheel_kinematics.transforms import theta_p_from_config
 
 
 # Only measurements acquired near 100 Hz belong on the common ML telemetry
@@ -71,7 +81,7 @@ class ValidationCameraView:
     calibration: CameraCalibration
     theta_y_motion_rad: float
     theta_y_kinematic_rad: float
-    knee_joint_rad: float
+    knee_joint_rad: float | None
     theta_p_rad: float
     patch: PatchProjection
     inner_track_pixels: np.ndarray
@@ -154,6 +164,8 @@ def _dataset_identifier(
     payload = json.dumps(
         {
             "kinematics_model_version": KINEMATICS_MODEL_VERSION,
+            "pitch_estimator_version": PITCH_ESTIMATOR_VERSION,
+            "encoder_position_version": ENCODER_POSITION_VERSION,
             "experiment": experiment_config,
             "run": run_config,
             "processing": processing_config.to_dict(),
@@ -172,6 +184,87 @@ def _finite_column(
 ) -> tuple[np.ndarray, np.ndarray]:
     finite = np.isfinite(values[:, column])
     return times[finite], values[finite, column]
+
+
+def _estimate_run_pitch(
+    bag_index: BagIndex,
+    experiment_config: dict[str, Any],
+    geometry: KinematicsConfig,
+    processing_config: ProcessingConfig,
+) -> PitchTrajectory:
+    """Estimate beam pitch once, using the complete recorded IMU timeline.
+
+    The stationary samples before/after wheel motion are useful for gyro bias
+    estimation, so this must run before any steady-torque or packet filtering.
+    Encoder ticks supply circular acceleration compensation; knee geometry is
+    deliberately absent from the pitch estimator's inputs.
+    """
+    if any(
+        frame_id and not frame_id.endswith("optical_frame")
+        for frame_id in bag_index.imu_frame_ids
+    ):
+        raise ValueError(
+            "Camera IMU pitch requires Gemini optical-axis measurements; "
+            f"recorded frames: {sorted(bag_index.imu_frame_ids)}"
+        )
+    imu_times, imu_values = bag_index.streams["imu"].arrays()
+    encoder_times, encoder_motion_angles, _ = _recorded_encoder_motion(
+        bag_index, experiment_config
+    )
+    # Tick direction belongs to the hardware/motion convention. Compensation
+    # needs the signed yaw used by the transform chain, including its -1 map.
+    encoder_angles = encoder_motion_angles * geometry.theta_y_kinematic_sign
+    pitch = estimate_pitch(
+        imu_times,
+        imu_values[:, :3],
+        imu_values[:, 3:6],
+        encoder_times,
+        encoder_angles,
+        geometry,
+        maximum_gap_s=processing_config.maximum_interpolation_gap_ms / 1000.0,
+        maximum_uncertainty_deg=processing_config.maximum_pitch_uncertainty_deg,
+    )
+    pitch.report["recorded_imu_frame_ids"] = sorted(bag_index.imu_frame_ids)
+    return pitch
+
+
+def _optional_knee_angle(
+    times_ns: np.ndarray,
+    values_rad: np.ndarray,
+    timestamp_ns: int,
+) -> float | None:
+    """Keep knee angle as diagnostic metadata without using it as a pose input."""
+    if (
+        times_ns.size < 2
+        or timestamp_ns < times_ns[0]
+        or timestamp_ns > times_ns[-1]
+    ):
+        return None
+    return interpolate_scalar(times_ns, values_rad, timestamp_ns)
+
+
+def _packet_imu_uncertainty_deg(metadata: dict[str, Any]) -> float | None:
+    """Return the packet's worst exposure-time two-sigma pitch bound in degrees.
+
+    Older IMU packets already saved separate one-sigma RGB/depth values. Those
+    are enough to populate the new feature without treating unknown uncertainty
+    as zero. This value is descriptive and never controls packet acceptance.
+    """
+    try:
+        uncertainty = metadata.get("imu_uncertainty_deg")
+        if uncertainty is None:
+            exposure_uncertainties = (
+                float(metadata["theta_p_rgb_uncertainty_rad"]),
+                float(metadata["theta_p_depth_uncertainty_rad"]),
+            )
+            if any(not math.isfinite(value) or value < 0.0
+                   for value in exposure_uncertainties):
+                return None
+            uncertainty = math.degrees(2.0 * max(exposure_uncertainties))
+        uncertainty = float(uncertainty)
+    except (KeyError, TypeError, ValueError):
+        return None
+    return uncertainty if math.isfinite(uncertainty) and uncertainty >= 0.0 else None
 
 
 def _resample_all_streams(
@@ -318,6 +411,24 @@ def _packet_identifier(
     )
 
 
+def _recorded_encoder_motion(bag_index, experiment_config):
+    """Use the first finite count in the whole recording as the shared zero."""
+    calibration = EncoderCalibration.from_experiment_dict(experiment_config)
+    times, values = bag_index.streams["ticks"].arrays()
+    times, ticks = _finite_column(times, values, 0)
+    if times.size < 2:
+        raise ValueError("too_few_rotation_encoder_samples")
+    origin = {
+        "topic": TICKS_TOPIC,
+        "timestamp_source": "bag_receipt_time",
+        "origin": "first_recorded_tick",
+        "origin_time_ns": int(times[0]),
+        "origin_ticks": float(ticks[0]),
+        "ticks_per_legwheel_revolution": calibration.ticks_per_legwheel_revolution,
+    }
+    return times, calibration.motion_angle(ticks, ticks[0]), origin
+
+
 def _run_motion_analysis(
     bag_index: BagIndex,
     experiment_config: dict[str, Any],
@@ -341,26 +452,9 @@ def _run_motion_analysis(
         processing_config.minimum_target_torque_fraction,
     )
 
-    try:
-        ticks_per_revolution = float(
-            experiment_config["electronics_hardware"]["encoder_setup"]
-            ["ticks_per_legwheel_revolution"]
-        )
-    except (KeyError, TypeError, ValueError) as error:
-        raise ValueError(
-            "experiment_config_missing_ticks_per_legwheel_revolution"
-        ) from error
-    if ticks_per_revolution <= 0.0:
-        raise ValueError("ticks_per_legwheel_revolution_must_be_positive")
-    encoder_times, encoder_tick_values = bag_index.streams["ticks"].arrays()
-    encoder_times, encoder_ticks = _finite_column(
-        encoder_times,
-        encoder_tick_values,
-        0,
+    encoder_times, encoder_angles, encoder_origin = _recorded_encoder_motion(
+        bag_index, experiment_config
     )
-    # /rotation_encoder/ticks already includes the driver's configured direction.
-    # Converting the actual count difference also preserves multi-tick updates.
-    encoder_angles = encoder_ticks * (2.0 * math.pi / ticks_per_revolution)
     wheel_times, wheel_values = bag_index.streams["wheel"].arrays()
     wheel_velocity_column = bag_index.streams["wheel"].channel_names.index(
         "wheel_joint.velocity"
@@ -384,6 +478,8 @@ def _run_motion_analysis(
         processing_config.maximum_interpolation_gap_ms,
     )
     theta_y_end_motion_rad = float(trajectory.theta_y_at_ticks_rad[-1])
+    theta_y_start_motion_rad = float(trajectory.theta_y_at_ticks_rad[0])
+    angular_displacement_rad = theta_y_end_motion_rad - theta_y_start_motion_rad
     theta_y_end_kinematic_rad = kinematics_config.theta_y_to_kinematic(
         theta_y_end_motion_rad
     )
@@ -402,9 +498,7 @@ def _run_motion_analysis(
         trajectory.maximum_gap_ns,
     )
     duration_s = (trajectory.end_time_ns - trajectory.start_time_ns) * 1e-9
-    average_rig_angular_speed_rad_s = abs(
-        theta_y_end_motion_rad / duration_s
-    )
+    average_rig_angular_speed_rad_s = abs(angular_displacement_rad / duration_s)
     if average_rig_angular_speed_rad_s <= 0.0:
         raise ValueError("average_corrected_rig_speed_is_zero")
     local_window_ms = (
@@ -436,6 +530,8 @@ def _run_motion_analysis(
     ]
     report = {
         "status": "analysed",
+        "encoder_position_version": ENCODER_POSITION_VERSION,
+        "encoder_position": encoder_origin,
         "torque_period": {
             "threshold_start_time_ns": torque_period.start_time_ns,
             "threshold_end_time_ns": torque_period.end_time_ns,
@@ -456,6 +552,8 @@ def _run_motion_analysis(
             # Explicit fields prevent motion timing from being confused with
             # the opposite-handed notebook/base geometry.
             "theta_y_end_rad": theta_y_end_motion_rad,
+            "theta_y_start_motion_rad": theta_y_start_motion_rad,
+            "angular_displacement_motion_rad": angular_displacement_rad,
             "theta_y_end_motion_rad": theta_y_end_motion_rad,
             "theta_y_end_kinematic_rad": theta_y_end_kinematic_rad,
             "travel_direction": trajectory.travel_direction,
@@ -579,7 +677,8 @@ def _camera_validation_view(
     calibration: CameraCalibration,
     kinematics_config: KinematicsConfig,
     theta_y_motion_rad: float,
-    knee_joint_rad: float,
+    knee_joint_rad: float | None,
+    theta_p_rad: float,
     patch_centre_motion_angle_rad: float,
     processing_config: ProcessingConfig,
 ) -> ValidationCameraView:
@@ -592,7 +691,6 @@ def _camera_validation_view(
             patch_centre_motion_angle_rad
         )
     )
-    theta_p_rad = theta_p_from_config(knee_joint_rad, kinematics_config)
     patch = project_track_patch(
         kinematics_config,
         theta_y_kinematic_rad,
@@ -637,6 +735,7 @@ def _build_validation_preview(
     pairs: list[ImagePair],
     bag_index: BagIndex,
     trajectory: CorrectedThetaTrajectory,
+    pitch_trajectory: PitchTrajectory,
     knee_times: np.ndarray,
     knee_values: np.ndarray,
     kinematics_config: KinematicsConfig,
@@ -683,7 +782,8 @@ def _build_validation_preview(
             rgb_calibration,
             kinematics_config,
             trajectory.theta_y_at(pair.rgb_time_ns),
-            interpolate_scalar(knee_times, knee_values, pair.rgb_time_ns),
+            _optional_knee_angle(knee_times, knee_values, pair.rgb_time_ns),
+            pitch_trajectory.sample(pair.rgb_time_ns),
             patch_centre_motion_angle_rad,
             processing_config,
         )
@@ -694,7 +794,8 @@ def _build_validation_preview(
             depth_calibration,
             kinematics_config,
             trajectory.theta_y_at(pair.depth_time_ns),
-            interpolate_scalar(knee_times, knee_values, pair.depth_time_ns),
+            _optional_knee_angle(knee_times, knee_values, pair.depth_time_ns),
+            pitch_trajectory.sample(pair.depth_time_ns),
             patch_centre_motion_angle_rad,
             processing_config,
         )
@@ -823,6 +924,10 @@ def _analyse_processing_configuration(
         kinematics_config,
         processing_config,
     )
+    pitch_trajectory = _estimate_run_pitch(
+        bag_index, experiment_config, kinematics_config, processing_config
+    )
+    report["pitch_estimation"] = pitch_trajectory.report
 
     spectral_sample_count = max(
         2,
@@ -871,6 +976,7 @@ def _analyse_processing_configuration(
             pairs,
             bag_index,
             trajectory,
+            pitch_trajectory,
             knee_times,
             knee_values,
             kinematics_config,
@@ -908,15 +1014,12 @@ def _analyse_processing_configuration(
                 bag_index.depth_calibrations,
                 pair.depth_time_ns,
             )
-            knee_joint = interpolate_scalar(
-                knee_times, knee_values, pair.depth_time_ns
-            )
             projection = project_track_patch(
                 kinematics_config,
                 kinematics_config.theta_y_to_kinematic(
                     theta_y_depth_motion_rad
                 ),
-                theta_p_from_config(knee_joint, kinematics_config),
+                pitch_trajectory.sample(pair.depth_time_ns),
                 kinematics_config.theta_y_to_kinematic(
                     patch_centre_motion_angle_rad
                 ),
@@ -1059,6 +1162,30 @@ def isolate_packets(
             f"{local_window_ms:.3f} ms. See {analysis_report_path}"
         )
 
+    try:
+        pitch_trajectory = _estimate_run_pitch(
+            bag_index, experiment_config, kinematics_config, processing_config
+        )
+    except ValueError as error:
+        analysis_report["status"] = "failed_pitch_estimation"
+        analysis_report["pitch_estimation_error"] = str(error)
+        _write_json(analysis_report_path, analysis_report)
+        raise
+    analysis_report["pitch_estimation"] = pitch_trajectory.report
+    _write_json(analysis_report_path, analysis_report)
+
+    # Keep the full estimate for inspection, including rejected impact samples.
+    # Packet metadata below stores only the image-time estimates actually used.
+    np.savez_compressed(
+        packets_directory / "run_pitch_estimation.npz",
+        times_ns=pitch_trajectory.times_ns,
+        theta_p_rad=pitch_trajectory.theta_p_rad,
+        uncertainty_rad=pitch_trajectory.uncertainty_rad,
+        available=pitch_trajectory.available,
+        valid=pitch_trajectory.valid,
+        acceleration_rejected=pitch_trajectory.acceleration_rejected,
+    )
+
     np.savez_compressed(
         packets_directory / "run_motion_analysis.npz",
         tick_times_ns=trajectory.tick_times_ns,
@@ -1096,8 +1223,6 @@ def isolate_packets(
         leg_values,
         knee_column,
     )
-    if knee_times_ns.size < 2:
-        raise ValueError("bag_contains_too_few_valid_knee_joint_samples")
 
     manifest_records = []
     image_requests = {}
@@ -1196,15 +1321,23 @@ def isolate_packets(
                 bag_index.depth_calibrations,
                 pair.depth_time_ns,
             )
-            knee_joint_rgb = interpolate_scalar(
+            knee_joint_rgb = _optional_knee_angle(
                 knee_times_ns, knee_values, pair.rgb_time_ns
             )
-            knee_joint_depth = interpolate_scalar(
+            knee_joint_depth = _optional_knee_angle(
                 knee_times_ns, knee_values, pair.depth_time_ns
             )
-            theta_p_rgb = theta_p_from_config(knee_joint_rgb, kinematics_config)
-            theta_p_depth = theta_p_from_config(
-                knee_joint_depth, kinematics_config
+            # The two exposures need their own acquisition-time pose. Sampling
+            # still checks actual coverage, but retains gyro-supported estimates
+            # during impacts or low confidence. Save their uncertainty instead
+            # of rejecting these packets. No pose is invented across a gap.
+            theta_p_rgb = pitch_trajectory.sample(pair.rgb_time_ns)
+            theta_p_depth = pitch_trajectory.sample(pair.depth_time_ns)
+            theta_p_rgb_uncertainty_rad = pitch_trajectory.uncertainty_at(
+                pair.rgb_time_ns
+            )
+            theta_p_depth_uncertainty_rad = pitch_trajectory.uncertainty_at(
+                pair.depth_time_ns
             )
 
             rgb_projection = project_track_patch(
@@ -1362,6 +1495,13 @@ def isolate_packets(
             "knee_joint_depth_rad": knee_joint_depth,
             "theta_p_rgb_rad": theta_p_rgb,
             "theta_p_depth_rad": theta_p_depth,
+            "theta_p_source": "camera_imu",
+            "pitch_estimator_version": PITCH_ESTIMATOR_VERSION,
+            "theta_p_rgb_uncertainty_rad": theta_p_rgb_uncertainty_rad,
+            "theta_p_depth_uncertainty_rad": theta_p_depth_uncertainty_rad,
+            "imu_uncertainty_deg": math.degrees(2.0 * max(
+                theta_p_rgb_uncertainty_rad, theta_p_depth_uncertainty_rad,
+            )),
             "rgb_calibration": rgb_calibration.to_dict(),
             "depth_calibration": depth_calibration.to_dict(),
             "rgb_frame_id": rgb_metadata.frame_id,
@@ -1449,6 +1589,10 @@ def isolate_packets(
         "dataset_identifier": dataset_identifier,
         "run_directory": str(run_directory),
         "kinematics_model_version": KINEMATICS_MODEL_VERSION,
+        "pitch_estimator_version": PITCH_ESTIMATOR_VERSION,
+        "encoder_position_version": ENCODER_POSITION_VERSION,
+        "encoder_position": analysis_report["encoder_position"],
+        "pitch_estimation": pitch_trajectory.report,
         "bag_directory": str(bag_directory),
         "experiment_config_source": str(experiment_config_path),
         "experiment_config": experiment_config,
@@ -1517,7 +1661,14 @@ def extract_features(
         metadata = json.loads(
             (packet_directory / "metadata.json").read_text(encoding="utf-8")
         )
-        feature_record = {"packet_id": metadata["packet_id"], "valid": False}
+        imu_uncertainty_deg = _packet_imu_uncertainty_deg(metadata)
+        # Include this feature even when an unrelated plane/spectrum extraction
+        # fails. A high value does not invalidate a packet or its other features.
+        feature_record = {
+            "packet_id": metadata["packet_id"],
+            "valid": False,
+            "IMU uncertainty": imu_uncertainty_deg,
+        }
         try:
             rgb = np.load(packet_directory / "rgb.npy", allow_pickle=False)
             depth = np.load(packet_directory / "depth.npy", allow_pickle=False)
@@ -1591,6 +1742,9 @@ def extract_features(
                 spectral_power=power,
                 dominant_frequency_hz=dominant_frequency_hz,
                 dominant_power=dominant_power,
+                imu_uncertainty_deg=(
+                    imu_uncertainty_deg if imu_uncertainty_deg is not None else np.nan
+                ),
             )
             feature_record.update(
                 {

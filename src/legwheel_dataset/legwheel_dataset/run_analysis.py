@@ -230,7 +230,9 @@ def _encoder_change_events(
     """Extract monotonic encoder changes and reject isolated reverse changes."""
     finite = np.isfinite(angles_rad)
     times_ns = np.asarray(times_ns, dtype=np.int64)[finite]
-    angles_rad = np.unwrap(np.asarray(angles_rad, dtype=float)[finite])
+    # Count-derived angles already retain full turns. Shortest-path unwrapping
+    # would discard known revolutions across a recording gap.
+    angles_rad = np.asarray(angles_rad, dtype=float)[finite]
     if times_ns.size < 2:
         raise ValueError("too_few_rotation_encoder_samples")
 
@@ -317,7 +319,9 @@ def build_corrected_theta_trajectory(
         predicted_deltas.append(predicted_delta)
         correction_factors.append(float(encoder_delta / predicted_delta))
 
-    theta_y_at_ticks = raw_tick_angles - raw_tick_angles[0]
+    # The caller supplies angles relative to the complete recording's origin.
+    # Selecting steady motion must not move that origin to its first change.
+    theta_y_at_ticks = raw_tick_angles.copy()
     return CorrectedThetaTrajectory(
         tick_times_ns=tick_times,
         raw_encoder_angles_rad=raw_tick_angles,

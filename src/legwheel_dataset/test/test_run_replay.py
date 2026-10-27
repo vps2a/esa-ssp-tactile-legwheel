@@ -1,6 +1,7 @@
 """Exercise raw-run compatibility, actual cloud geometry and seek semantics."""
 
 from copy import deepcopy
+import math
 from pathlib import Path
 from types import SimpleNamespace
 import struct
@@ -12,6 +13,7 @@ from unittest.mock import patch
 import numpy as np
 import yaml
 
+from legwheel_dataset.bag_reader import message_stamp_ns
 from legwheel_dataset.run_replay import (
     CloudFrame,
     CloudReplay,
@@ -23,8 +25,9 @@ from legwheel_dataset.run_replay import (
     TOPIC_CANDIDATES,
     VoxelCloud,
     load_geometry,
-    sample_angle,
 )
+from legwheel_kinematics.config import KinematicsConfig
+from legwheel_kinematics.transforms import frame_coordinates
 
 
 def header(stamp_ns):
@@ -46,7 +49,7 @@ def image(array, stamp_ns, encoding):
     )
 
 
-def camera_info(stamp_ns, width=2, height=2, focal=10.0):
+def camera_info(stamp_ns, width=4, height=4, focal=10.0):
     return SimpleNamespace(
         header=header(stamp_ns),
         width=width,
@@ -63,7 +66,11 @@ def experiment():
         "leg_config": {"hip_link_length_m": 0.2, "calf_link_length_m": 0.2},
         "wheel_config": {"wheel_radius_mm": 90.0, "wheel_width_mm": 100.0},
         "electronics_hardware": {
-            "encoder_setup": {"theta_y_kinematic_sign": -1},
+            "encoder_setup": {
+                "theta_y_kinematic_sign": -1,
+                # One tick per 0.01 rad makes the synthetic 100 Hz turn exact.
+                "ticks_per_legwheel_revolution": 200.0 * math.pi,
+            },
             "camera": {
                 "camera_config": {
                     "camera_height_m": 0.029,
@@ -77,7 +84,9 @@ def experiment():
 
 
 class FakeSource:
-    def __init__(self, legacy=False):
+    def __init__(
+        self, legacy=False, *, pitch=0.12, camera_angle_deg=40.0, encoder_sign=-1
+    ):
         self.topics = {
             role: names[-1] if legacy else names[0]
             for role, names in TOPIC_CANDIDATES.items()
@@ -85,33 +94,75 @@ class FakeSource:
         self.types = dict.fromkeys(self.topics.values(), "unused")
         self.rows = []
         self.image_reads = []
-        for index in range(21):
-            stamp_ns = 10**10 + index * 10**8
-            for role, name, angle in (
-                ("leg", "knee_joint", 0.8 + index / 100),
-                ("encoder", "rotation_joint", index / 10),
-            ):
-                self.rows.append(
-                    (
-                        self.topics[role],
-                        SimpleNamespace(
-                            header=header(stamp_ns),
-                            name=[name],
-                            position=[angle],
-                        ),
-                        stamp_ns + 1_000_000,
-                    )
+        geometry_values = experiment()
+        geometry_values["electronics_hardware"]["encoder_setup"][
+            "theta_y_kinematic_sign"
+        ] = encoder_sign
+        geometry_values["electronics_hardware"]["camera"]["camera_config"][
+            "camera_front_angle_deg"
+        ] = camera_angle_deg
+        geometry = KinematicsConfig.from_experiment_dict(geometry_values)
+        # Simulate real camera specific force during a constant-speed turn.
+        # Nonzero gravity and centripetal acceleration make these fixtures check
+        # the sensor convention, encoder sign and camera mounting compensation.
+        for index in range(201):
+            elapsed_s = index / 100
+            stamp_ns = 10**10 + index * 10**7
+            self.rows.append(
+                (
+                    self.topics["wheel"],
+                    SimpleNamespace(
+                        header=header(stamp_ns),
+                        name=["wheel_joint"],
+                        velocity=[-2.0],
+                    ),
+                    stamp_ns + 1_500_000,
                 )
+            )
+            self.rows.append(
+                (
+                    self.topics["encoder"],
+                    SimpleNamespace(
+                        data=120 + index,
+                    ),
+                    stamp_ns,
+                )
+            )
+            camera_pose = frame_coordinates(
+                geometry, pitch, theta_y=encoder_sign * elapsed_s
+            )[-1]
+            rotation = camera_pose[:3, :3]
+            position = camera_pose[:3, 3]
+            acceleration = np.array([-position[0], -position[1], 0.0])
+            specific_force = rotation.T @ (acceleration + [0.0, 0.0, 9.80665])
+            angular_velocity = rotation.T @ [0.0, 0.0, encoder_sign]
+            self.rows.append(
+                (
+                    self.topics["imu"],
+                    SimpleNamespace(
+                        header=header(stamp_ns),
+                        angular_velocity=SimpleNamespace(
+                            **dict(zip(("x", "y", "z"), angular_velocity))
+                        ),
+                        linear_acceleration=SimpleNamespace(
+                            **dict(zip(("x", "y", "z"), specific_force))
+                        ),
+                    ),
+                    stamp_ns + 2_000_000,
+                )
+            )
         self.rows.extend(
             [
                 (self.topics["depth_info"], camera_info(10**10), 10**10),
                 (self.topics["rgb_info"], camera_info(10**10), 10**10),
             ]
         )
-        depth = np.array([[1000, 0], [2000, 4000]], dtype=np.uint16)
-        rgb = np.array(
-            [[[255, 0, 0], [0, 255, 0]], [[0, 0, 255], [255, 255, 0]]], dtype=np.uint8
-        )
+        # Use interior pixels so tiny round-off from pose inversion cannot put
+        # a theoretically on-border projection just outside the image bounds.
+        depth = np.zeros((4, 4), dtype=np.uint16)
+        depth[1, 1], depth[3, 1], depth[2, 2] = 1000, 2000, 4000
+        rgb = np.zeros((4, 4, 3), dtype=np.uint8)
+        rgb[:2], rgb[2:] = [255, 0, 0], [0, 0, 255]
         for stamp_ns in (10_500_000_000, 11_500_000_000):
             self.rows.append(
                 (
@@ -165,14 +216,12 @@ class RecordedRunTest(unittest.TestCase):
             camera["sensor_front_offset_m"],
         )
         camera.update(sensor_height_mm=29, sensor_front_offset_mm=43)
-        del legacy["electronics_hardware"]["encoder_setup"]["theta_y_kinematic_sign"]
         original = yaml.safe_dump(legacy)
         self.config_path.write_text(original)
         run = self.load(FakeSource(legacy=True))
         self.assertEqual(run.geometry, current)
         self.assertEqual(self.config_path.read_text(), original)
         self.assertEqual(run.topics["depth"], "/camera/rgbd/depth/image_raw")
-        self.assertTrue(any("sign defaults" in note for note in run.notes))
         self.assertTrue(any("0.054 m" in note for note in run.notes))
 
     def test_old_signed_x_offset_migrates_without_changing_snapshot(self):
@@ -233,21 +282,168 @@ class RecordedRunTest(unittest.TestCase):
         frame = run.frames[0]
         points, colours = run.cloud(frame)
         T_camera = run.frames_at(frame.depth.stamp_ns)[-1]
-        expected_camera = np.array([[0, 0, 1, 1], [0, 0.2, 2, 1]])
+        expected_camera = np.array([[0.1, 0.1, 1, 1], [0.2, 0.6, 2, 1]])
         np.testing.assert_allclose(points, (T_camera @ expected_camera.T).T[:, :3])
         np.testing.assert_array_equal(colours, [[255, 0, 0], [0, 0, 255]])
         yaw, _ = run.angles_at(frame.depth.stamp_ns)
         self.assertAlmostEqual(yaw, -0.5)
 
+    def test_pitch_uses_imu_without_leg_topic_and_compensates_camera_mount_angle(self):
+        for pitch, camera_angle, encoder_sign in (
+            (0.12, 40.0, -1),
+            (-0.10, -25.0, -1),
+            (0.0, 65.0, 1),
+        ):
+            with self.subTest(pitch=pitch, camera_angle=camera_angle):
+                values = experiment()
+                values["electronics_hardware"]["encoder_setup"][
+                    "theta_y_kinematic_sign"
+                ] = encoder_sign
+                values["electronics_hardware"]["camera"]["camera_config"][
+                    "camera_front_angle_deg"
+                ] = camera_angle
+                self.config_path.write_text(yaml.safe_dump(values))
+                run = self.load(
+                    FakeSource(
+                        pitch=pitch,
+                        camera_angle_deg=camera_angle,
+                        encoder_sign=encoder_sign,
+                    )
+                )
+                self.assertNotIn("leg", run.topics)
+                for frame in run.frames:
+                    self.assertAlmostEqual(
+                        run.angles_at(frame.depth.stamp_ns)[1],
+                        pitch,
+                        delta=math.radians(0.1),
+                    )
+                    self.assertAlmostEqual(
+                        run.angles_at(frame.depth.stamp_ns)[0],
+                        encoder_sign * (frame.depth.stamp_ns / 1e9 - 10.0),
+                    )
+                self.assertTrue(
+                    any("camera_front_angle_deg" in note for note in run.notes)
+                )
+
+    def test_missing_imu_requires_a_recorded_camera_stream(self):
+        source = FakeSource()
+        del source.types[source.topics["imu"]]
+        with self.assertRaisesRegex(ValueError, "Record the camera IMU"):
+            self.load(source)
+
+    def test_missing_wheel_topic_requires_recorded_odometry(self):
+        source = FakeSource()
+        del source.types[source.topics["wheel"]]
+        with self.assertRaisesRegex(ValueError, "Missing wheel topic"):
+            self.load(source)
+
+    def test_joint_state_angles_cannot_replace_missing_recorded_ticks(self):
+        source = FakeSource()
+        del source.types[source.topics["encoder"]]
+        source.types["/rotation_encoder/joint_state"] = "sensor_msgs/msg/JointState"
+        with self.assertRaisesRegex(ValueError, "Missing encoder topic"):
+            self.load(source)
+
+    def test_reconstruction_uses_tick_calibration_and_original_bag_timestamps(self):
+        source = FakeSource()
+        # A misleading header must not replace a tick's recorded receipt time.
+        for topic, message, _ in source.rows:
+            if topic == source.topics["encoder"]:
+                message.header = header(1)
+        values = experiment()
+        values["electronics_hardware"]["encoder_setup"]["ticks_per_legwheel_revolution"] *= 2
+        self.config_path.write_text(yaml.safe_dump(values))
+        run = self.load(source)
+        self.assertEqual(int(run.encoder[0][0]), 10**10)
+        self.assertAlmostEqual(run.angles_at(10_500_000_000)[0], -0.25)
+
+    def test_yaw_uses_wheel_refinement_between_recorded_tick_changes(self):
+        source = FakeSource()
+        for topic, message, log_ns in source.rows:
+            elapsed = (message_stamp_ns(message, log_ns) - 10**10) * 1e-9
+            if topic == source.topics["encoder"]:
+                message.data = 400 + 100 * math.floor(elapsed)
+            elif topic == source.topics["wheel"]:
+                message.velocity = [-2.0 * (1.0 + elapsed)]
+        run = self.load(source)
+        # In the first second, integral(0, .5) / integral(0, 1) = .625/1.5.
+        # The configured sign is -1 and the initial encoder count is the origin.
+        expected = -0.625 / 1.5
+        self.assertAlmostEqual(run.angles_at(10_500_000_000)[0], expected)
+        self.assertAlmostEqual(run.angles_at(11_000_000_000)[0], -1.0)
+        np.testing.assert_allclose(
+            run.frames_at(10_500_000_000),
+            frame_coordinates(run.geometry, run.pitch.sample(10_500_000_000), expected),
+        )
+
+    def test_wheel_gap_keeps_encoder_poses_and_does_not_reject_clouds(self):
+        source = FakeSource()
+        for topic, message, log_ns in source.rows:
+            elapsed = (message_stamp_ns(message, log_ns) - 10**10) * 1e-9
+            if topic == source.topics["encoder"]:
+                message.data = 100 * math.floor(elapsed)
+        source.rows = [
+            row
+            for row in source.rows
+            if row[0] != source.topics["wheel"]
+            or not 10_400_000_000 < message_stamp_ns(row[1], row[2]) < 10_600_000_000
+        ]
+        run = self.load(source)
+        self.assertEqual(run.angles_at(10_500_000_000)[0], 0.0)
+        # Wheel refinement resumes on the following fully supported interval.
+        self.assertAlmostEqual(run.angles_at(11_500_000_000)[0], -1.5)
+        replay = CloudReplay(run)
+        replay.advance(run.frames[-1].depth.log_time_ns)
+        self.assertEqual(replay.failures, {})
+        self.assertGreater(len(replay.cloud.points), 0)
+
+    def test_low_confidence_pitch_does_not_freeze_frames_or_reject_clouds(self):
+        run = self.load()
+        run.pitch.valid[:] = False
+        run.pitch.uncertainty_rad[:] = math.radians(8.0)
+        for frame in run.frames:
+            yaw, pitch = run.angles_at(frame.depth.stamp_ns)
+            self.assertTrue(math.isfinite(yaw) and math.isfinite(pitch))
+            self.assertTrue(np.isfinite(run.frames_at(frame.depth.stamp_ns)).all())
+        replay = CloudReplay(run)
+        replay.advance(run.frames[-1].depth.log_time_ns)
+        self.assertEqual(replay.failures, {})
+        self.assertGreater(len(replay.cloud.points), 0)
+
+    def test_imu_declared_in_a_body_frame_is_rejected(self):
+        source = FakeSource()
+        for topic, message, _ in source.rows:
+            if topic == source.topics["imu"]:
+                message.header.frame_id = "camera_imu_frame"
+                break
+        with self.assertRaisesRegex(ValueError, "camera optical axes"):
+            self.load(source)
+
+    def test_imu_gap_rejects_frame_instead_of_falling_back_to_joint_geometry(self):
+        source = FakeSource()
+        source.rows = [
+            row
+            for row in source.rows
+            if row[0] != source.topics["imu"]
+            or not 10_440_000_000 < message_stamp_ns(row[1], row[2]) < 10_560_000_000
+        ]
+        run = self.load(source)
+        with self.assertRaisesRegex(ValueError, "gap|coverage|outside"):
+            run.angles_at(run.frames[0].depth.stamp_ns)
+        replay = CloudReplay(run)
+        replay.advance(run.frames[-1].depth.log_time_ns)
+        self.assertIn(0, replay.failures)
+        self.assertNotIn(1, replay.failures)
+
     def test_rgb_is_reprojected_instead_of_assuming_equal_intrinsics(self):
         source = FakeSource()
         for index, (topic, message, log_ns) in enumerate(source.rows):
             if topic == source.topics["rgb_info"]:
-                source.rows[index] = (topic, camera_info(10**10, 4, 4, 20.0), log_ns)
+                source.rows[index] = (topic, camera_info(10**10, 8, 8, 20.0), log_ns)
             elif topic == source.topics["rgb"]:
-                rgb = np.zeros((4, 4, 3), dtype=np.uint8)
-                rgb[0, 0] = [255, 0, 0]
-                rgb[2, 0] = [0, 255, 0]
+                rgb = np.zeros((8, 8, 3), dtype=np.uint8)
+                rgb[:4] = [255, 0, 0]
+                rgb[4:] = [0, 255, 0]
                 source.rows[index] = (topic, image(rgb, 10_500_000_000, "rgb8"), log_ns)
         run = self.load(source)
         _, colours = run.cloud(run.frames[0])
@@ -257,7 +453,7 @@ class RecordedRunTest(unittest.TestCase):
         source = FakeSource()
         for index, (topic, message, log_ns) in enumerate(source.rows):
             if topic == source.topics["rgb"]:
-                array = np.full((2, 2, 3), [10, 20, 30], dtype=np.uint8)
+                array = np.full((4, 4, 3), [10, 20, 30], dtype=np.uint8)
                 source.rows[index] = (
                     topic,
                     image(array, 10_500_000_000, "bgr8"),
@@ -300,14 +496,6 @@ class AccumulationTest(unittest.TestCase):
         cloud.clear()
         self.assertEqual(cloud.packed().tobytes(), b"")
         self.assertFalse(cloud.limit_reached)
-
-    def test_interpolation_holds_endpoints_but_rejects_interior_gaps(self):
-        series = (np.array([100, 200]), np.array([0.0, 2.0]))
-        self.assertEqual(sample_angle(series, 150, 100), 1.0)
-        self.assertEqual(sample_angle(series, 50, 10), 0.0)
-        self.assertEqual(sample_angle(series, 250, 10), 2.0)
-        with self.assertRaisesRegex(ValueError, "gap"):
-            sample_angle(series, 150, 99)
 
     def test_forward_backward_pause_and_loop_never_keep_future_points(self):
         frames = [
@@ -365,6 +553,8 @@ class AccumulationTest(unittest.TestCase):
             {"cloud_rate_hz": float("nan")},
             {"minimum_depth_m": 4},
             {"rgb_max_delta_ms": -1},
+            {"maximum_imu_gap_s": 0},
+            {"maximum_pitch_uncertainty_deg": float("nan")},
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 ReplaySettings(**kwargs)

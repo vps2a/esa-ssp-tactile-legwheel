@@ -16,7 +16,12 @@ from std_msgs.msg import ColorRGBA, String
 from tf2_ros import TransformBroadcaster
 from visualization_msgs.msg import ImageMarker, Marker, MarkerArray
 
-from legwheel_dataset.frame_playback import FramePose, interpolate_frame_pose
+from legwheel_dataset.frame_playback import (
+    FramePose,
+    interpolate_frame_pose,
+    require_imu_pitch_dataset,
+    require_encoder_position_dataset,
+)
 from legwheel_kinematics.config import KinematicsConfig
 from legwheel_kinematics.track import generate_track_points
 from legwheel_kinematics.transforms import (
@@ -73,6 +78,8 @@ class PacketVisualizationNode(Node):
                 encoding="utf-8"
             )
         )
+        require_imu_pitch_dataset(provenance)
+        require_encoder_position_dataset(provenance)
         self._kinematics_config = KinematicsConfig.from_experiment_dict(
             provenance["experiment_config"]
         )
@@ -102,6 +109,7 @@ class PacketVisualizationNode(Node):
             metadata = json.loads(
                 (packet_directory / "metadata.json").read_text(encoding="utf-8")
             )
+            require_imu_pitch_dataset(provenance, metadata)
             self._frame_poses.append(
                 FramePose(
                     timestamp_ns=int(metadata["image_time_ns"]),

@@ -36,6 +36,10 @@ FIELD_HELP = {
         "Largest source-data gap that interpolation may bridge.",
         "Larger values retain more samples but may conceal telemetry dropouts.",
     ),
+    "maximum_pitch_uncertainty_deg": (
+        "Diagnostic two-sigma uncertainty threshold for an IMU pitch estimate.",
+        "It marks confidence only; uncertain frames and packets are still retained.",
+    ),
     "maximum_packet_saving_frequency_hz": (
         "Maximum rate at which synchronized packets may be saved.",
         "It limits near-duplicate packets; rejected candidates do not use a slot.",
