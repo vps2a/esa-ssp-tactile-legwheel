@@ -123,7 +123,7 @@ Review these files before the first real run:
 | --- | --- |
 | `src/legwheel_can/config/motor_ids.yaml` | MD80 CAN IDs for hip, knee, and wheel. |
 | `src/legwheel_can/config/motor_limits.yaml` | Software leg position/velocity/torque limits and wheel torque limit. |
-| `src/legwheel_can/config/motor_config.json` | Initial leg gains/zero values, wheel torque ramp time, and default wheel torque. |
+| `src/legwheel_can/config/motor_config.json` | Initial leg gains/zero values, wheel torque ramp time, default wheel torque, and provisional governor P/I defaults. |
 | Experiment YAML: `electronics_hardware.encoder_setup` | All encoder settings: serial port, baud rate, polling rate, calibration, direction, and startup zeroing. |
 | `src/legwheel_rgbd/config/gemini_336.yaml` | Orbbec stream selection, resolution/FPS, alignment, IMU, and filters. |
 | `src/legwheel_experiments/legwheel_experiments/camera_topics.py` | Raw camera topics consumed by preflight, the retained runtime-watchdog implementation, and rosbag. |
@@ -290,8 +290,11 @@ the experiment workflow.
    Releasing the key ramps torque to zero. The C++ hardware node independently
    clamps torque to `wheel_torque_max_nm`.
 
-The current wheel implementation uses `RAW_TORQUE`, not speed control. Wheel
-speed depends on torque, load, supply voltage, and MD80 firmware limits.
+The wheel remains in MD80 `RAW_TORQUE` mode. Recorded runs can optionally use
+a C++ PI governor that reduces driving torque to regulate wheel rotation near
+a per-run speed cap. Pure torque mode adds no software speed cap. The governor
+never commands active braking: overspeed recovery depends on rolling resistance
+and other external loads, and short excursions above the selected speed are possible.
 
 ## Running a recorded experiment
 
@@ -361,7 +364,26 @@ encoder increases during forward motion, while the notebook/DH base frame uses
 the opposite positive rotation. The experiment validator accepts only `-1` or
 `1`; changing it mirrors camera projections, 3D points and signed slopes.
 The runner validates the YAML structure and asks interactively for run length,
-knee stiffness/zero/damping, wheel torque, and wheel-ramp duration.
+knee stiffness/zero/damping, wheel torque, and wheel-ramp duration. It then asks
+for pure raw torque or raw torque with a speed cap. Capped runs require a wheel
+rotation speed in rad/s, greater than zero and at most **4.5 rad/s**. This is
+wheel-shaft speed, not rotation of the rig about the pivot.
+
+For capped runs the operator can accept or override P/I defaults from the installed
+`legwheel_can/config/motor_config.json`. The provisional defaults are P = 0.5 Nm s/rad
+and I = 0.1 Nm/rad; they require tuning on the rig. I = 0 selects P-only control.
+Every new `run_config.yaml` saves `control_mode`, `max_wheel_speed_rad_s` (null
+for pure torque), `velocity_governor_kp`, and `velocity_governor_ki` alongside
+the original torque/ramp settings. Pure mode saves the inactive default gains.
+Editing JSON later cannot change the values already selected for that run.
+
+The runner applies all wheel settings atomically to `/legwheel_can`, checks
+readback and fresh `/wheel/governor_state` reports, and only then permits arming.
+Wheel settings cannot change while motors are enabled. Missing velocity feedback
+suppresses capped-mode drive immediately; a sustained loss or control fault
+stops the run. Overspeed alone does not abort it. The wheel firmware mode is
+`RAW_TORQUE` in both cases. An explicit zero-torque command always clears
+governor history and wins over torque ramps.
 
 Start it from the repository root:
 
@@ -393,6 +415,13 @@ requires RGB, depth, and IMU timestamps to advance before arming.
 
 Use `Ctrl-C` to abort. The runner sends zero wheel torque, disables motors, and
 attempts to finalise the rosbag in its cleanup path.
+
+Recordings preserve `/wheel/requested_torque` (the experiment's request),
+`/wheel/commanded_torque` (the final target successfully sent to the drive),
+and `/wheel/governor_state` (settings, integral contribution, limiting and fault
+status). Motor-estimated torque remains in `/wheel/wheel_state` effort. These
+quantities are distinct; capped-mode torque need not remain constant during
+the requested-torque plateau used by offline processing to select the run interval.
 
 ### Camera recording path
 

@@ -36,7 +36,7 @@ class RunConfig:
 
     run_length_loops: float
     leg_parameters: dict[str, float]
-    wheel_parameters: dict[str, float]
+    wheel_parameters: dict[str, Any]
     notes: str = ""
 
 
@@ -320,3 +320,20 @@ def validate_run_config(config: RunConfig) -> None:
         minimum=0.05,
         maximum=5.0,
     )
+    wheel = config.wheel_parameters
+    # Missing mode identifies historical pure-torque callers and recordings.
+    mode = wheel.get("control_mode", "raw_torque")
+    if not isinstance(mode, str) or mode not in {"raw_torque", "raw_torque_velocity_capped"}:
+        raise ValueError("wheel_parameters.control_mode is not recognized.")
+    if mode == "raw_torque_velocity_capped":
+        cap = require_positive_number(
+            wheel.get("max_wheel_speed_rad_s"), "wheel_parameters.max_wheel_speed_rad_s"
+        )
+        if cap > 4.5:
+            raise ValueError("Maximum selectable wheel speed is 4.5 rad/s.")
+    elif wheel.get("max_wheel_speed_rad_s") is not None:
+        raise ValueError("Pure raw torque requires a null wheel speed cap.")
+    # New runs always resolve and save both gains, including inactive defaults.
+    if "control_mode" in wheel:
+        require_positive_number(wheel.get("velocity_governor_kp"), "wheel governor P")
+        require_number(wheel.get("velocity_governor_ki"), "wheel governor I", minimum=0.0)

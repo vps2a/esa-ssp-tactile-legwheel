@@ -12,6 +12,10 @@ from legwheel_experiments.schemas import RunConfig, load_experiment_config, make
 from legwheel_experiments.state_machine import ExperimentStateMachine, ExperimentState
 from legwheel_experiments.data_recorder import RunRecorder
 from legwheel_experiments.rosbag_recorder import RosbagRecorder
+from legwheel_experiments.wheel_control import (
+    WheelControlDefaults, ask_float, collect_wheel_control_settings,
+    load_wheel_control_defaults,
+)
 from legwheel_experiments.experiment_runner_node import (
     ExperimentAbortedError,
     ExperimentRunnerNode,
@@ -34,28 +38,6 @@ def parse_arguments() -> argparse.Namespace:
 
     return parser.parse_args()
 
-#A better way of handling numering inputs than 'input' - won't crash
-def ask_float(prompt: str, minimum: float | None = None, maximum: float | None = None) -> float:
-    while True:
-        raw_value = input(prompt)
-
-        try:
-            value = float(raw_value)
-        except ValueError:
-            print("Invalid input. Please enter a valid number.")
-            continue
-
-        if minimum is not None and value < minimum:
-            print(f"Value must be at least {minimum}. Please try again.")
-            continue
-
-        if maximum is not None and value > maximum:
-            print(f"Value must be at most {maximum}. Please try again.")
-            continue
-
-        return value
-
-
 def ask_run_notes() -> str:
     """Optionally collect free-text notes to save with this run's configuration."""
     while True:
@@ -69,7 +51,9 @@ def ask_run_notes() -> str:
         print("Invalid input. Please enter 'y' or 'n'.")
 
 
-def collect_run_configuration() -> dict[str, Any]:
+
+def collect_run_configuration(defaults: WheelControlDefaults | None = None) -> dict[str, Any]:
+    defaults = defaults or load_wheel_control_defaults()
     print("\n=== Run Configuration ===")
     print("Please provide the following parameters for the experiment run:")
 
@@ -83,6 +67,7 @@ def collect_run_configuration() -> dict[str, Any]:
 
     commanded_wheel_torque_nm = ask_float("Commanded wheel torque (in Nm): ", minimum=0, maximum=8)
     wheel_torque_ramp_time_sec = ask_float("Wheel ramp time (in seconds): ", minimum=0.05, maximum=5)
+    wheel_control_settings = collect_wheel_control_settings(defaults)
 
     notes = ask_run_notes()
 
@@ -102,7 +87,8 @@ def collect_run_configuration() -> dict[str, Any]:
         },
         "wheel_parameters": {
             "commanded_wheel_torque_nm": commanded_wheel_torque_nm,
-            "wheel_torque_ramp_time_sec": wheel_torque_ramp_time_sec
+            "wheel_torque_ramp_time_sec": wheel_torque_ramp_time_sec,
+            **wheel_control_settings,
         },
         "notes": notes,
         # "data_acquisition_rates": {
@@ -273,7 +259,12 @@ def main():
     
     print(f"Loaded experiment : {experiment_config.experiment_id}")
 
-    raw_run_config = collect_run_configuration()
+    try:
+        wheel_defaults = load_wheel_control_defaults()
+        raw_run_config = collect_run_configuration(wheel_defaults)
+    except (OSError, ValueError, LookupError) as error:
+        print(f"Could not load wheel control defaults: {error}")
+        return
 
     # Validate the operator input before showing confirmation or creating files.
     try:
@@ -290,7 +281,17 @@ def main():
 
     #Now creating the run recorder
 
-    recorder = RunRecorder(experiment_directory)
+    recorder = RunRecorder(
+        experiment_directory,
+        motor_config_path=wheel_defaults.motor_config_path,
+        motor_limits_path=wheel_defaults.motor_limits_path,
+        config_snapshot_contents={
+            name: contents for name, contents in (
+                ("motor_config", wheel_defaults.motor_config_contents),
+                ("motor_limits", wheel_defaults.motor_limits_contents),
+            ) if contents is not None
+        },
+    )
     run_number, overwrite_existing = choose_run_number(recorder)
 
     run_directory = recorder.start_run(
@@ -311,6 +312,7 @@ def main():
     # Creating rosbag variables
     bag_recorder = None
     experiment_completed = False
+    failure_reason = None
 
     try:
         rclpy.init()
@@ -330,6 +332,10 @@ def main():
         )
 
         executor_thread.start()
+
+        # Configure while disabled. This call waits on the executor thread and
+        # verifies readback before any preflight/ARM gate can pass.
+        node.configure_wheel_control(run_config)
 
         # == Waiting for preflight checks ==
         print("\nWaiting for preflight checks...")
@@ -447,6 +453,10 @@ def main():
 
     except ExperimentAbortedError as error:
         print(f"\nExperiment aborted by runtime safety guard: {error}")
+        failure_reason = str(error)
+    except RuntimeError as error:
+        print(f"\nExperiment failed: {error}")
+        failure_reason = str(error)
     except KeyboardInterrupt:
         print("\nExperiment runner interrupted by user.")
     
@@ -467,7 +477,7 @@ def main():
             recorder.mark_complete()
         elif recorder.has_active_run():
             abort_reason = None if node is None else node.abort_reason()
-            recorder.mark_aborted(abort_reason or "Experiment did not complete")
+            recorder.mark_aborted(abort_reason or failure_reason or "Experiment did not complete")
 
         if executor is not None:
             executor.shutdown()

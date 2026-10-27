@@ -26,9 +26,25 @@ ADDITIONAL_CONFIG_SNAPSHOTS = (
 class RunRecorder:
     """Create a run directory and preserve the validated configuration inputs."""
 
-    def __init__(self, experiment_directory: Path) -> None:
+    def __init__(
+        self, experiment_directory: Path, *,
+        motor_config_path: Path | None = None,
+        motor_limits_path: Path | None = None,
+        config_snapshot_contents: dict[str, str] | None = None,
+    ) -> None:
         self.experiment_directory = experiment_directory
         self.run_directory: Path | None = None
+        self.config_snapshot_contents = dict(config_snapshot_contents or {})
+        # Snapshot the same installed files the CLI read, not a potentially
+        # different source-tree copy. Legacy callers retain the old paths.
+        self.additional_config_snapshots = tuple(
+            (
+                motor_config_path if name == "motor_config" and motor_config_path else
+                motor_limits_path if name == "motor_limits" and motor_limits_path else source,
+                name,
+            )
+            for source, name in ADDITIONAL_CONFIG_SNAPSHOTS
+        )
 
     def start_run(
         self,
@@ -179,7 +195,7 @@ class RunRecorder:
                 "Camera driver config file does not exist: "
                 f"{camera_driver_config_path}"
             )
-        for source_path, _ in ADDITIONAL_CONFIG_SNAPSHOTS:
+        for source_path, _ in self.additional_config_snapshots:
             if not source_path.is_file():
                 raise FileNotFoundError(
                     f"Configuration snapshot source does not exist: {source_path}"
@@ -229,11 +245,18 @@ class RunRecorder:
                 camera_driver_config_path,
                 camera_driver_config_destination,
             )
-        for source_path, snapshot_name in ADDITIONAL_CONFIG_SNAPSHOTS:
+        for source_path, snapshot_name in self.additional_config_snapshots:
             destination = self.run_directory / (
                 f"{snapshot_name}_run_{run_number}_snapshot{source_path.suffix}"
             )
-            shutil.copy2(source_path, destination)
+            if snapshot_name in self.config_snapshot_contents:
+                # Preserve the contents read before prompting the operator, even
+                # if somebody edits the defaults during run configuration.
+                destination.write_text(
+                    self.config_snapshot_contents[snapshot_name], encoding="utf-8"
+                )
+            else:
+                shutil.copy2(source_path, destination)
 
         #TODO: Full metadata needs to be created
         #Writing experiment metadata

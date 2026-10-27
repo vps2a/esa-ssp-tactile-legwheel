@@ -2,9 +2,11 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -21,6 +23,10 @@
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float64.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
+#include "std_msgs/msg/string.hpp"
+#include "rcl_interfaces/msg/set_parameters_result.hpp"
+#include "rcl_interfaces/msg/parameter_descriptor.hpp"
+#include "legwheel_can/wheel_velocity_governor.hpp"
 
 #include "MD.hpp"
 #include "candle.hpp"
@@ -70,13 +76,20 @@ public:
     declare_parameters();
     load_parameters();
     validate_limits();
+    initialize_wheel_control_parameters();
 
     joint_state_pub_ = create_publisher<sensor_msgs::msg::JointState>(
       "/legwheel/joint_states", rclcpp::SensorDataQoS());
     wheel_state_pub_ = create_publisher<sensor_msgs::msg::JointState>(
       "/wheel/wheel_state", rclcpp::SensorDataQoS());
+    wheel_commanded_torque_pub_ = create_publisher<std_msgs::msg::Float64>(
+      "/wheel/commanded_torque", 10);
+    governor_state_pub_ = create_publisher<std_msgs::msg::String>(
+      "/wheel/governor_state", rclcpp::QoS(1).reliable().transient_local());
 
-    status_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    // Parameter services, the update timer, and arming share a mutually exclusive
+    // group. No ARM callback can slip between parameter validation and commit.
+    status_callback_group_ = get_node_base_interface()->get_default_callback_group();
     command_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
 
     rclcpp::SubscriptionOptions status_options;
@@ -176,7 +189,115 @@ private:
     double last_position_rad{0.0};
     double last_velocity_rad_s{0.0};
     double last_effort_nm{0.0};
+    bool velocity_read_valid{false};
+    std::optional<std::chrono::steady_clock::time_point> velocity_received_at;
   };
+
+  struct WheelControlSettings
+  {
+    std::string mode{"raw_torque"};
+    double speed_cap_rad_s{0.0};  // Zero is the wire representation of an inactive cap.
+    double kp{0.5};
+    double ki{0.1};
+    std::string session_id;
+    bool operator==(const WheelControlSettings &) const = default;
+  };
+
+  WheelControlSettings candidate_wheel_settings(
+    const std::vector<rclcpp::Parameter> & parameters) const
+  {
+    auto candidate = wheel_control_settings_;
+    for (const auto & parameter : parameters) {
+      const auto & name = parameter.get_name();
+      if (name == "wheel_control_mode") {candidate.mode = parameter.as_string();}
+      if (name == "wheel_speed_cap_rad_s") {candidate.speed_cap_rad_s = parameter.as_double();}
+      if (name == "wheel_governor_kp") {candidate.kp = parameter.as_double();}
+      if (name == "wheel_governor_ki") {candidate.ki = parameter.as_double();}
+      if (name == "wheel_control_session_id") {candidate.session_id = parameter.as_string();}
+    }
+    return candidate;
+  }
+
+  void validate_wheel_settings(const WheelControlSettings & settings) const
+  {
+    if (settings.mode != "raw_torque" && settings.mode != "raw_torque_velocity_capped") {
+      throw std::invalid_argument("Unrecognized wheel control mode");
+    }
+    if (!is_finite(settings.kp) || settings.kp <= 0.0 ||
+      !is_finite(settings.ki) || settings.ki < 0.0 || !is_finite(settings.speed_cap_rad_s))
+    {
+      throw std::invalid_argument("Wheel control requires finite P > 0, I >= 0 and cap");
+    }
+    if (settings.mode == "raw_torque_velocity_capped") {
+      if (settings.speed_cap_rad_s <= 0.0 || settings.speed_cap_rad_s > governor_max_speed_rad_s_) {
+        throw std::invalid_argument("Wheel speed cap is outside the selectable range");
+      }
+    } else if (settings.speed_cap_rad_s != 0.0) {
+      throw std::invalid_argument("Pure torque mode requires an inactive (zero) cap");
+    }
+    if (settings.session_id.size() > 128 ||
+      !std::all_of(settings.session_id.begin(), settings.session_id.end(), [](unsigned char c) {
+        return std::isalnum(c) || c == '-' || c == '_';
+      }))
+    {
+      throw std::invalid_argument("Invalid wheel control session identifier");
+    }
+  }
+
+  void initialize_wheel_control_parameters()
+  {
+    wheel_control_settings_ = WheelControlSettings{
+      declare_parameter<std::string>("wheel_control_mode", "raw_torque"),
+      declare_parameter<double>("wheel_speed_cap_rad_s", 0.0),
+      declare_parameter<double>("wheel_governor_kp", governor_default_kp_),
+      declare_parameter<double>("wheel_governor_ki", governor_default_ki_),
+      declare_parameter<std::string>("wheel_control_session_id", "")};
+    validate_wheel_settings(wheel_control_settings_);
+    apply_wheel_settings(wheel_control_settings_);
+
+    wheel_settings_validator_ = add_on_set_parameters_callback(
+      [this](const std::vector<rclcpp::Parameter> & parameters) {
+        rcl_interfaces::msg::SetParametersResult result;
+        result.successful = false;
+        try {
+          const auto candidate = candidate_wheel_settings(parameters);
+          validate_wheel_settings(candidate);
+          std::lock_guard<std::mutex> lock(md_mutex_);
+          const bool motors_active = motor_status_allows_enable_.load() ||
+            std::any_of(joints_.begin(), joints_.end(), [](const auto & joint) {return joint.enabled;});
+          // Idempotent read/assert operations are harmless, even during manual operation.
+          if (motors_active && candidate != wheel_control_settings_) {
+            throw std::invalid_argument("Disable motors before changing wheel control settings");
+          }
+          result.successful = true;
+        } catch (const std::exception & error) {
+          result.reason = error.what();
+        }
+        return result;
+      });
+    wheel_settings_committer_ = add_post_set_parameters_callback(
+      [this](const std::vector<rclcpp::Parameter> & parameters) {
+        std::lock_guard<std::mutex> lock(md_mutex_);
+        const auto candidate = candidate_wheel_settings(parameters);
+        if (candidate != wheel_control_settings_) {
+          apply_wheel_settings(candidate);
+        }
+      });
+  }
+
+  void apply_wheel_settings(const WheelControlSettings & settings)
+  {
+    wheel_control_settings_ = settings;
+    if (settings.mode == "raw_torque_velocity_capped") {
+      wheel_governor_.configure(settings.speed_cap_rad_s, settings.kp, settings.ki);
+    } else {
+      wheel_governor_.reset();
+    }
+    wheel_requested_torque_nm_ = 0.0;
+    wheel_commanded_torque_nm_ = 0.0;
+    wheel_control_fault_.clear();
+    governor_feedback_missing_since_.reset();
+  }
 
   void declare_parameters()
   {
@@ -194,6 +315,9 @@ private:
     declare_parameter<double>("knee_velocity_max_rad_s", 1.0);
     declare_parameter<double>("knee_torque_max_nm", 2.0);
     declare_parameter<double>("wheel_torque_max_nm", 8.0);
+    rcl_interfaces::msg::ParameterDescriptor fixed_limit;
+    fixed_limit.read_only = true;
+    declare_parameter<double>("wheel_velocity_governor_max_rad_s", 4.5, fixed_limit);
 
     declare_parameter<double>("max_spring_constant", 50.0);
     declare_parameter<double>("max_damping_constant", 5.0);
@@ -234,6 +358,12 @@ private:
     joints_[kWheelIndex].id = get_parameter("wheel_motor_id").as_int();
     joints_[kWheelIndex].has_position_limits = false;
     joints_[kWheelIndex].limits.torque_max_nm = get_parameter("wheel_torque_max_nm").as_double();
+    governor_max_speed_rad_s_ = get_parameter("wheel_velocity_governor_max_rad_s").as_double();
+    if (!is_finite(governor_max_speed_rad_s_) || governor_max_speed_rad_s_ <= 0.0 ||
+      governor_max_speed_rad_s_ > 4.5)
+    {
+      throw std::runtime_error("Governor selectable upper bound must be in (0, 4.5] rad/s.");
+    }
 
     limits_provided_ = get_parameter("limits_provided").as_bool();
     enable_control_requested_ = get_parameter("enable_control").as_bool();
@@ -294,6 +424,11 @@ private:
     wheel_default_max_torque_nm_ = require_json_number(
       contents,
       "default_max_torque");
+    governor_default_kp_ = require_json_number(contents, "wheel_velocity_governor_default_kp");
+    governor_default_ki_ = require_json_number(contents, "wheel_velocity_governor_default_ki");
+    if (governor_default_kp_ <= 0.0 || governor_default_ki_ < 0.0) {
+      throw std::runtime_error("Governor defaults require P > 0 and I >= 0.");
+    }
 
     joints_[kHipIndex].spring_zero_rad = require_json_number(
       contents,
@@ -660,26 +795,28 @@ private:
     publish_wheel_state();
 
     if (!control_may_run()) {
+      publish_governor_state();
       return;
     }
 
     command_fixed_one_dof();
     command_wheel_torque(dt);
+    publish_governor_state();
   }
 
   double update_dt_seconds()
   {
-    const auto current_time = now();
+    const auto current_time = std::chrono::steady_clock::now();
     double dt = 1.0 / publish_rate_hz_;
     if (last_update_time_.has_value()) {
-      dt = (current_time - last_update_time_.value()).seconds();
+      dt = std::chrono::duration<double>(current_time - last_update_time_.value()).count();
     }
     last_update_time_ = current_time;
 
     if (!is_finite(dt) || dt <= 0.0) {
       return 1.0 / publish_rate_hz_;
     }
-    return std::clamp(dt, 0.0, 0.1);
+    return dt;
   }
 
   void read_connected_motors()
@@ -703,7 +840,10 @@ private:
       }
 
       const auto velocity = joint.md->getVelocity();
-      if (velocity.second == mab::MD::Error_t::OK) {
+      joint.velocity_read_valid = velocity.second == mab::MD::Error_t::OK &&
+        is_finite(static_cast<double>(velocity.first));
+      if (joint.velocity_read_valid) {
+        joint.velocity_received_at = std::chrono::steady_clock::now();
         if (joint.has_position_limits) {
           joint.last_velocity_rad_s = std::clamp(
             static_cast<double>(velocity.first),
@@ -941,6 +1081,7 @@ private:
       return;
     }
     if (!wheel.control_mode_configured) {
+      wheel_control_fault_ = "wheel RAW_TORQUE mode is not configured";
       RCLCPP_ERROR_THROTTLE(
         get_logger(),
         *get_clock(),
@@ -957,13 +1098,48 @@ private:
 
     // Rate limit the command inside the hardware node as a final guard against
     // abrupt keyboard/controller messages causing torque jumps.
-    const double max_delta =
-      (wheel.limits.torque_max_nm / wheel_torque_rampup_time_s_) * dt;
+    const double rise_rate_nm_s = wheel.limits.torque_max_nm / wheel_torque_rampup_time_s_;
+    const double max_delta = rise_rate_nm_s * std::clamp(dt, 0.0, 0.1);
     const double delta = std::clamp(
       target_torque - wheel_commanded_torque_nm_,
       -max_delta,
       max_delta);
     wheel_commanded_torque_nm_ += delta;
+    if (!wheel_control_fault_.empty()) {
+      wheel_commanded_torque_nm_ = 0.0;
+    }
+
+    if (target_torque == 0.0) {
+      // An explicit stop always wins over residual slew/integral state.
+      wheel_commanded_torque_nm_ = 0.0;
+      wheel_governor_.reset();
+    }
+    if (wheel_control_settings_.mode == "raw_torque_velocity_capped") {
+      const auto current_time = std::chrono::steady_clock::now();
+      const bool fresh_velocity = wheel.velocity_read_valid && wheel.velocity_received_at &&
+        std::chrono::duration<double>(current_time - *wheel.velocity_received_at).count() <= 0.1;
+      if (!fresh_velocity) {
+        if (!governor_feedback_missing_since_) {governor_feedback_missing_since_ = current_time;}
+        if (std::chrono::duration<double>(current_time - *governor_feedback_missing_since_).count() >= 0.1) {
+          wheel_control_fault_ = "wheel velocity feedback unavailable for 0.1 seconds";
+        }
+        wheel_governor_.reset();
+        wheel_commanded_torque_nm_ = 0.0;
+      } else {
+        governor_feedback_missing_since_.reset();
+        if ((!is_finite(dt) || dt <= 0.0 || dt > 0.1) &&
+          (target_torque != 0.0 || wheel.enabled))
+        {
+          wheel_control_fault_ = "wheel control update interval exceeded 0.1 seconds";
+        }
+        wheel_commanded_torque_nm_ = wheel_governor_.update(
+          wheel_commanded_torque_nm_, wheel.last_velocity_rad_s, dt, rise_rate_nm_s);
+      }
+      if (!wheel_control_fault_.empty()) {
+        wheel_governor_.reset();
+        wheel_commanded_torque_nm_ = 0.0;
+      }
+    }
 
     if (std::abs(target_torque) < kWheelStopDeadbandNm &&
       std::abs(wheel_commanded_torque_nm_) < kWheelStopDeadbandNm)
@@ -976,12 +1152,14 @@ private:
         return;
       }
       if (!check_md(wheel, wheel.md->setTargetTorque(0.0f), "set initial wheel torque")) {
+        wheel_control_fault_ = "failed to clear wheel torque before enable";
         return;
       }
       if (!motor_status_allows_enable_.load()) {
         return;
       }
       if (!check_md(wheel, wheel.md->enable(), "enable")) {
+        wheel_control_fault_ = "wheel enable failed";
         return;
       }
       wheel.enabled = true;
@@ -994,10 +1172,44 @@ private:
     if (!motor_status_allows_enable_.load()) {
       return;
     }
-    check_md(
+    const bool command_sent = check_md(
       wheel,
       wheel.md->setTargetTorque(static_cast<float>(wheel_commanded_torque_nm_)),
       "set wheel target torque");
+    if (command_sent) {
+      std_msgs::msg::Float64 message;
+      message.data = wheel_commanded_torque_nm_;
+      wheel_commanded_torque_pub_->publish(message);
+    } else {
+      wheel_control_fault_ = "wheel torque command transfer failed";
+    }
+  }
+
+  void publish_governor_state()
+  {
+    const auto & settings = wheel_control_settings_;
+    const auto & wheel = joints_[kWheelIndex];
+    // JSON follows the encoder driver's existing configuration/status convention.
+    // All numbers are validated before storage; strings are escaped explicitly.
+    std::ostringstream json;
+    json << std::setprecision(17)
+         << "{\"control_mode\":" << std::quoted(settings.mode)
+         << ",\"max_wheel_speed_rad_s\":" << settings.speed_cap_rad_s
+         << ",\"velocity_governor_kp\":" << settings.kp
+         << ",\"velocity_governor_ki\":" << settings.ki
+         << ",\"session_id\":" << std::quoted(settings.session_id)
+         << ",\"integral_torque_nm\":" << wheel_governor_.integral_torque_nm()
+         << ",\"commanded_torque_nm\":" << wheel_commanded_torque_nm_
+         << ",\"velocity_valid\":" << (wheel.velocity_read_valid ? "true" : "false")
+         << ",\"limiting_active\":"
+         << (settings.mode == "raw_torque_velocity_capped" &&
+             std::abs(wheel_commanded_torque_nm_) + 1e-9 < std::abs(wheel_requested_torque_nm_) ?
+             "true" : "false")
+         << ",\"active_braking_enabled\":false,\"fault\":" << std::quoted(wheel_control_fault_)
+         << "}";
+    std_msgs::msg::String message;
+    message.data = json.str();
+    governor_state_pub_->publish(message);
   }
 
   bool check_md(const Joint & joint, const mab::MD::Error_t result, const std::string & action)
@@ -1070,6 +1282,9 @@ private:
         motor_status_allows_enable_.store(false);
         return;
       }
+      // Mode setup is deliberately performed while disabled and can take longer
+      // than a control tick. It must not look like a missed running-control tick.
+      last_update_time_.reset();
     }
 
     motor_status_allows_enable_.store(true);
@@ -1084,6 +1299,8 @@ private:
     std::lock_guard<std::mutex> lock(md_mutex_);
     wheel_requested_torque_nm_ = 0.0;
     wheel_commanded_torque_nm_ = 0.0;
+    wheel_governor_.reset();
+    governor_feedback_missing_since_.reset();
   }
 
   void report_shutdown_position_save_blocked()
@@ -1254,6 +1471,13 @@ private:
     }
 
     wheel_requested_torque_nm_ = clamped_torque;
+    if (clamped_torque == 0.0 ||
+      (wheel_control_settings_.mode == "raw_torque_velocity_capped" &&
+       wheel_commanded_torque_nm_ * clamped_torque < 0.0))
+    {
+      wheel_commanded_torque_nm_ = 0.0;
+      wheel_governor_.reset();
+    }
   }
 
   bool validate_array_size(
@@ -1410,6 +1634,13 @@ private:
       if (!joint.connected) {
         continue;
       }
+      if (joint.label == "wheel" && check_md(
+          joint, joint.md->setTargetTorque(0.0f), "clear wheel torque before disable"))
+      {
+        std_msgs::msg::Float64 message;
+        message.data = 0.0;
+        wheel_commanded_torque_pub_->publish(message);
+      }
       const auto result = joint.md->disable();
       if (result != mab::MD::Error_t::OK) {
         RCLCPP_ERROR(
@@ -1474,7 +1705,16 @@ private:
   double wheel_requested_torque_nm_{0.0};
   double wheel_commanded_torque_nm_{0.0};
   std::array<double, kTotalJointCount> motor_position_on_shutdown_{0.0, 0.0, 0.0};
-  std::optional<rclcpp::Time> last_update_time_;
+  std::optional<std::chrono::steady_clock::time_point> last_update_time_;
+  WheelControlSettings wheel_control_settings_;
+  legwheel_can::WheelVelocityGovernor wheel_governor_;
+  double governor_max_speed_rad_s_{4.5};
+  double governor_default_kp_{0.5};
+  double governor_default_ki_{0.1};
+  std::string wheel_control_fault_;
+  std::optional<std::chrono::steady_clock::time_point> governor_feedback_missing_since_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr wheel_settings_validator_;
+  rclcpp::node_interfaces::PostSetParametersCallbackHandle::SharedPtr wheel_settings_committer_;
 
   mutable std::mutex md_mutex_;
 
@@ -1482,6 +1722,8 @@ private:
   rclcpp::CallbackGroup::SharedPtr command_callback_group_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr wheel_state_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr wheel_commanded_torque_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr governor_state_pub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr motor_status_sub_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr spring_zero_sub_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr spring_constant_sub_;

@@ -8,6 +8,9 @@
   <license>TODO: License declaration</license>
 
   <depend>rclpy</depend>
+  <depend>rcl_interfaces</depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>legwheel_can</exec_depend>
   <depend>legwheel_encoder</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>

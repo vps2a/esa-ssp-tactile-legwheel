@@ -18,3 +18,5 @@ legwheel_can:
 
     # Wheel actuation is commanded as raw torque.
     wheel_torque_max_nm: 8.0
+    # Highest selectable per-run cap; pure RAW_TORQUE does not use this governor.
+    wheel_velocity_governor_max_rad_s: 4.5

@@ -102,3 +102,27 @@ def test_recording_saves_validated_values_and_needs_no_separate_encoder_file(tmp
     snapshot = yaml.safe_load((directory / "experiment_config_run_1_snapshot.yaml").read_text())
     assert snapshot == asdict(config)
     assert not list(directory.glob("rotation_encoder_config*"))
+
+
+def test_recording_snapshots_the_installed_defaults_as_loaded_before_prompting(tmp_path):
+    config = experiment_config()
+    source = tmp_path / "experiment.yaml"
+    source.write_text(yaml.safe_dump(asdict(config)))
+    installed_motor_config = tmp_path / "motor_config.json"
+    installed_motor_config.write_text('{"wheel_velocity_governor_default_kp": 99}')
+    selected_defaults = '{"wheel_velocity_governor_default_kp": 0.5}'
+    run = RunConfig(1.0, {
+        "knee_stiffness_nm_per_rad": 10.0, "knee_spring_zeroposition_rad": 0.5,
+        "knee_damping_nms_per_rad": 1.0,
+    }, {
+        "commanded_wheel_torque_nm": 2.0, "wheel_torque_ramp_time_sec": 1.0,
+        "control_mode": "raw_torque_velocity_capped", "max_wheel_speed_rad_s": 3.0,
+        "velocity_governor_kp": 0.5, "velocity_governor_ki": 0.1,
+    })
+    recorder = RunRecorder(
+        tmp_path, motor_config_path=installed_motor_config,
+        config_snapshot_contents={"motor_config": selected_defaults},
+    )
+    directory = recorder.start_run(run, config, source, 1)
+    assert (directory / "motor_config_run_1_snapshot.json").read_text() == selected_defaults
+    assert yaml.safe_load((directory / "run_config.yaml").read_text()) == asdict(run)
