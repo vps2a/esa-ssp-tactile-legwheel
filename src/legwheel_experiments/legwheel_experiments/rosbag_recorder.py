@@ -13,6 +13,7 @@ ROSBAG_TOPICS = (
     "/wheel/wheel_state",
     "/rotation_encoder/joint_state",
     "/rotation_encoder/ticks",
+    "/rotation_encoder/config",
     *CAMERA_RECORDING_TOPICS,
     "/legwheel/motor_status",
     "/legwheel/spring_zero_position",

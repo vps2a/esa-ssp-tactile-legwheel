@@ -63,6 +63,36 @@ def _measurements(seconds, pitch, yaw, geometry, bias_rad_s=0.0):
 
 
 class ImuPitchBufferTest(unittest.TestCase):
+    def test_wheel_refinement_keeps_origin_after_window_eviction_and_rebuilds_cache(
+        self,
+    ):
+        buffer = ImuPitchBuffer(_geometry(), window_s=2.0)
+        # A nonzero initial count must disappear only from retained history,
+        # never from the definition of zero yaw for this playback epoch.
+        for index in [0, 2, 1, *range(3, 401)]:
+            timestamp = index * 10_000_000
+            seconds = index * 0.01
+            buffer.add_encoder(timestamp, 8.0 + (index // 100) * 0.2)
+            buffer.add_wheel(timestamp, -(1.0 + seconds))
+            buffer.add_imu(timestamp, [0.0] * 3, [0.0] * 3)
+        expected = -0.6 - 0.2 * (4.0 * 0.5 + 0.5 * 0.5**2) / 4.5
+        self.assertAlmostEqual(buffer.yaw_at(3_500_000_000), expected)
+        self.assertEqual(buffer.encoder_times_ns[0], 2_000_000_000)
+        self.assertEqual(buffer.latest_time_ns, 4_000_000_000)
+        # A corrected duplicate must invalidate cached integration, without
+        # adding a second wheel sample at the same acquisition timestamp.
+        buffer.add_wheel(3_250_000_000, -20.0)
+        self.assertNotAlmostEqual(buffer.yaw_at(3_500_000_000), expected)
+        # Losing wheel updates must not freeze newer measured encoder/IMU poses.
+        buffer.add_encoder(4_100_000_000, 8.8)
+        buffer.add_imu(4_100_000_000, [0.0] * 3, [0.0] * 3)
+        self.assertEqual(buffer.latest_time_ns, 4_100_000_000)
+        self.assertAlmostEqual(buffer.yaw_at(4_050_000_000), -0.8)
+        buffer.clear()
+        self.assertIsNone(buffer.latest_time_ns)
+        with self.assertRaises(ValueError):
+            buffer.yaw_at(3_500_000_000)
+
     def test_same_estimator_camera_angle_and_yaw_sign_with_reordered_duplicates(self):
         geometry = _geometry()
         seconds = np.arange(0.0, 2.01, 0.01)
@@ -82,6 +112,7 @@ class ImuPitchBufferTest(unittest.TestCase):
             buffer.add_encoder(
                 timestamps[index], 1.2 + yaw[index] / geometry.theta_y_kinematic_sign
             )
+            buffer.add_wheel(timestamps[index], -2.0)
         # Repeated stamps replace their values rather than growing history.
         buffer.add_imu(timestamps[20], gyro[20], acceleration[20])
         buffer.add_encoder(timestamps[20], 1.2 + yaw[20] / -1.0)
@@ -108,6 +139,7 @@ class ImuPitchBufferTest(unittest.TestCase):
         buffer = ImuPitchBuffer(geometry, window_s=2.0)
         for index, timestamp in enumerate(timestamps):
             buffer.add_encoder(timestamp, 2.0 - yaw[index])
+            buffer.add_wheel(timestamp, -2.0)
             buffer.add_imu(timestamp, gyro[index], acceleration[index])
         self.assertEqual(len(buffer.imu_times_ns), 201)
         self.assertEqual(len(buffer.encoder_times_ns), 201)
@@ -127,6 +159,7 @@ class ImuPitchBufferTest(unittest.TestCase):
         for index in range(801):
             motion_angle = 1.2 * index * 0.01
             buffer.add_encoder(index * 10_000_000, motion_angle)
+            buffer.add_wheel(index * 10_000_000, -2.0)
         self.assertAlmostEqual(buffer.yaw_at(7_500_000_000), -9.0)
         self.assertEqual(buffer.encoder_times_ns[0], 6_000_000_000)
 
@@ -142,6 +175,7 @@ class ImuPitchBufferTest(unittest.TestCase):
             (5_020_000_000, 18.2),
         ):
             buffer.add_encoder(timestamp, angle)
+            buffer.add_wheel(timestamp, -2.0)
         self.assertAlmostEqual(buffer.yaw_at(5_000_000_000), -16.0)
         with self.assertRaisesRegex(ValueError, "gap"):
             buffer.yaw_at(2_000_000_000)
@@ -159,6 +193,8 @@ class ImuPitchBufferTest(unittest.TestCase):
         self.assertEqual(buffer.encoder_times_ns, ())
         buffer.add_encoder(0, 2.0)
         buffer.add_encoder(10_000_000, 2.1)
+        buffer.add_wheel(0, -2.0)
+        buffer.add_wheel(10_000_000, -2.0)
         self.assertAlmostEqual(buffer.yaw_at(10_000_000), -0.1)
 
     def test_gaps_nonfinite_measurements_and_unknown_frames_are_not_hidden(self):
@@ -171,6 +207,7 @@ class ImuPitchBufferTest(unittest.TestCase):
         buffer = ImuPitchBuffer(geometry)
         for index, timestamp in enumerate(timestamps):
             buffer.add_encoder(timestamp, 0.0)
+            buffer.add_wheel(timestamp, 0.0)
             buffer.add_imu(timestamp, gyro[index], acceleration[index])
         with self.assertRaisesRegex(ValueError, "gap"):
             buffer.yaw_at(1_200_000_000)
@@ -217,6 +254,7 @@ class ImuPitchBufferTest(unittest.TestCase):
         after_eviction = []
         for index, timestamp in enumerate(timestamps):
             buffer.add_encoder(timestamp, -yaw[index])
+            buffer.add_wheel(timestamp, -2.0)
             buffer.add_imu(timestamp, gyro[index], acceleration[index])
             # A timer, not each sensor callback, runs the shared batch smoother.
             if index < 100 or index % 50:

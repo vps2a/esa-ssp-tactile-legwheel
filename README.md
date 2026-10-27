@@ -16,7 +16,7 @@ experiment runner that records MCAP rosbags.
 | Package | Purpose | Main command |
 | --- | --- | --- |
 | `legwheel_can` | Connects to MD80s through a CANdle USB-to-CAN adapter; provides passive zeroing, safety-gated leg control, wheel torque control, and terminal controllers. | `ros2 launch legwheel_can md80_legwheel_control.launch.py` |
-| `legwheel_encoder` | Reads the central rotation encoder from a serial port and publishes ticks, angle, and velocity. | `ros2 launch legwheel_encoder rotation_encoder.launch.py` |
+| `legwheel_encoder` | Reads the central rotation encoder from a serial port and publishes ticks, angle, and velocity. | `ros2 launch legwheel_encoder rotation_encoder.launch.py experiment_config:=<file>` |
 | `legwheel_rgbd` | Launches and configures the Orbbec driver. Experiments consume its raw RGB, depth, calibration, and IMU topics directly without an image relay. | `ros2 launch legwheel_rgbd gemini_336.launch.py` |
 | `legwheel_experiments` | Validates an experiment, performs telemetry preflight, runs the leg/wheel sequence, and records an MCAP rosbag. | `ros2 run legwheel_experiments run_experiment --experiment-config <file>` |
 | `legwheel_description` | Publishes the kinematic frame tree from the experiment geometry and derived `theta_p`. | `ros2 launch legwheel_description description.launch.py experiment_config:=<file>` |
@@ -124,7 +124,7 @@ Review these files before the first real run:
 | `src/legwheel_can/config/motor_ids.yaml` | MD80 CAN IDs for hip, knee, and wheel. |
 | `src/legwheel_can/config/motor_limits.yaml` | Software leg position/velocity/torque limits and wheel torque limit. |
 | `src/legwheel_can/config/motor_config.json` | Initial leg gains/zero values, wheel torque ramp time, and default wheel torque. |
-| `src/legwheel_encoder/config/rotation_encoder.yaml` | Encoder serial port, baud rate, tick calibration, and direction. |
+| Experiment YAML: `electronics_hardware.encoder_setup` | All encoder settings: serial port, baud rate, polling rate, calibration, direction, and startup zeroing. |
 | `src/legwheel_rgbd/config/gemini_336.yaml` | Orbbec stream selection, resolution/FPS, alignment, IMU, and filters. |
 | `src/legwheel_experiments/legwheel_experiments/camera_topics.py` | Raw camera topics consumed by preflight, the retained runtime-watchdog implementation, and rosbag. |
 
@@ -138,9 +138,11 @@ workspace, or pass the modified YAML file explicitly as a launch argument.
 
 ### Rotation-encoder calibration note
 
-The node and shipped YAML both use `ticks_per_revolution`. Set the shipped
-`83.3` value to the measured calibration before relying on angle, distance, or
-camera-to-contact timing results.
+The experiment YAML is the only encoder configuration source. Use
+`ticks_per_legwheel_revolution: 62.5` for this rig. The encoder launch requires
+`experiment_config:=<file>` and has no separate calibration default. Restart the
+encoder after changing its settings. The experiment runner checks the driver's
+reported settings against its validated experiment config before allowing a run.
 
 ## Bring-up and verification
 
@@ -201,10 +203,11 @@ motor moved too far while disabled.
 ### 3. Central rotation encoder
 
 Check the serial device name with `ls /dev/ttyUSB* /dev/ttyACM*`, update
-`rotation_encoder.yaml` if necessary, then launch:
+the experiment YAML's `electronics_hardware.encoder_setup` section, then launch:
 
 ```bash
-ros2 launch legwheel_encoder rotation_encoder.launch.py
+ros2 launch legwheel_encoder rotation_encoder.launch.py \
+  experiment_config:=/path/to/experiment.yaml
 ros2 topic echo /rotation_encoder/joint_state
 ros2 topic echo /rotation_encoder/ticks
 ```
@@ -319,7 +322,12 @@ leg_config:
   calf_link_length_m: 0.20
 electronics_hardware:
   encoder_setup:
-    ticks_per_legwheel_revolution: 83.3
+    port: "/dev/ttyUSB0"
+    baudrate: 9600
+    ticks_per_legwheel_revolution: 62.5
+    publish_rate_hz: 100.0  # Serial polling limit; firmware controls sample rate.
+    invert_direction: false
+    zero_on_start: true
     # Keep -1 for this LegWheel geometry. The central encoder increases during
     # forward travel, while positive notebook/DH theta_y rotates the opposite
     # way. Changing this mirrors every camera projection and 3D slope direction.
@@ -336,6 +344,14 @@ wheel_config:
 environment:
   environment_description: "Describe the test surface and conditions."
 ```
+
+`zero_on_start: true` subtracts the first accepted Arduino count when the
+encoder driver starts. `false` preserves the Arduino count. Direction inversion
+is applied afterwards. This is a software offset, not a hardware reset.
+Offline analysis independently subtracts the first recorded tick of each run,
+so driver startup and recording startup can occur at different times without
+changing the common recording origin. All encoder settings are required for
+new recordings; older experiment files need these fields added manually.
 
 Replace the dimensional and hardware values with the measured, physically safe
 values for the rig.
@@ -470,9 +486,15 @@ for confidence limits and recording recommendations.
 The standalone 3D view, image overlays and URDF share
 `/legwheel/kinematic_joint_states`, produced by `kinematic_joint_state_node`.
 Each launch starts this shared publisher by default. It requires the combined
-camera IMU and `/rotation_encoder/joint_state`; the central encoder supplies yaw
-and circular-acceleration correction. Use `imu_topic:=/camera/imu` for legacy
-recordings. The source uses a bounded ten-second window and preserves detected
+camera IMU, `/rotation_encoder/ticks` and `/wheel/wheel_state`. Yaw converts
+ticks using experiment calibration and is refined by integrating measured wheel
+velocity between encoder changes. Each interval is scaled to match its encoder endpoints,
+using the same slip-correction calculation as dataset generation. All visualizers
+share this implementation, retain both travel directions and use the first
+recorded tick as zero, including dataset processing after steady-motion selection.
+The encoder also supplies circular-acceleration correction for IMU pitch. Use
+`wheel_topic:=...` to override the wheel topic and `imu_topic:=/camera/imu` for
+legacy recordings. The source uses a bounded ten-second window and preserves detected
 rest calibration as that window advances. A steady-clock timer runs at 5 Hz;
 native IMU poses are published with their original timestamps and a 0.6-second
 lookahead delay. No estimate is extrapolated into the unavailable end of a
@@ -484,8 +506,17 @@ URDF already publishes the frame tree, also set `publish_tf:=false` on the 3D
 marker launch. Image overlays hold only a bounded queue of image headers while
 waiting for an available acquisition-time pose. Missing estimates are explicit
 barriers; finite estimates during impacts are retained. Bag seeks
-reset the streaming histories and their calibration. Old derived datasets
-without IMU pitch provenance must be regenerated before `visualise_stream`.
+reset the streaming histories and their pitch calibration while preserving the
+recording's encoder origin. Derived datasets made before this shared tick origin,
+or without IMU pitch provenance, must be regenerated before `visualise_stream`.
+
+During bag playback, the shared publisher reads `/rotation_encoder/ticks`
+directly from the bag because these `Int64` messages have no header timestamp.
+It preserves each original bag receipt timestamp; `/clock` only selects which
+samples have become available. The bag defaults to `rosbag/` beside the
+experiment snapshot. Supply `encoder_bag:=/path/to/run/rosbag` when using an
+experiment override elsewhere. A missing ticks topic or calibration is an
+error; recorded joint-state angles are never a position fallback.
 
 After a kinematics change, regenerate derived packets before inspecting dataset
 overlays: those overlays contain saved pixel coordinates. The kinematics model
@@ -559,11 +590,11 @@ before starting. The run path is an argument, not hard-coded into the viewer.
 ```bash
 cd /path/to/esa-ssp-tactile-legwheel
 source /opt/ros/jazzy/setup.bash
-rosdep install --from-paths src/legwheel_kinematics src/legwheel_dataset \
+rosdep install --from-paths src/legwheel_encoder src/legwheel_kinematics src/legwheel_dataset \
   --ignore-src -r -y
 sudo apt install ros-jazzy-foxglove-bridge
 colcon build --symlink-install \
-  --packages-select legwheel_kinematics legwheel_dataset
+  --packages-up-to legwheel_dataset
 source install/setup.bash
 ```
 
@@ -715,24 +746,35 @@ surfaces caused by a calibration error.
 - Both the current `/legwheel_rgbd/...` image topics and legacy
   `/camera/rgbd/...` topics are detected automatically. A matching pair of
   `CameraInfo` topics, `/legwheel_rgbd/gyro_accel/sample` (or legacy
-  `/camera/imu`), and `/rotation_encoder/joint_state` with `rotation_joint`
-  are required.
+  `/camera/imu`), `/rotation_encoder/ticks`, and `/wheel/wheel_state`
+  are required. The experiment snapshot must contain a positive
+  `ticks_per_legwheel_revolution`; this rig uses `62.5`.
 - Older camera fields are converted locally: `sensor_height_mm / 1000` becomes
   `camera_height_m`. When `sensor_front_offset_m` is absent, the former signed
   `camera_beam_offset_m` is negated into `sensor_front_offset_m`; the oldest
   snapshots instead use `sensor_front_offset_mm / 1000`. Both old layouts use
   the former fixed `0.054 m` as the perpendicular `camera_beam_offset_m`.
-  Supplying **both new offset fields** overrides this migration. A missing
-  `theta_y_kinematic_sign` defaults to `-1` for this rig. Every assumption is
-  logged; use `--experiment-config` with a corrected full copy if an older
+  Supplying **both new offset fields** overrides this migration.
+  `theta_y_kinematic_sign` must be supplied explicitly (`-1` for this rig).
+  Every camera migration is logged; use `--experiment-config` with a corrected full copy if an older
   installation used different measurements. Recordings are left untouched.
 - Geometry uses the current shared model: inner radius `beam_radius_m -
   wheel_width_m`, outer radius `beam_radius_m`, and IMU-derived beam pitch.
-  The first recorded encoder angle defines zero yaw. Poses outside recorded
-  coverage or across gaps with no IMU pitch estimate reject affected clouds.
+  The first recorded tick defines zero yaw, preserved across playback seeks.
+  Poses outside recorded coverage or across gaps with no IMU pitch estimate reject affected clouds.
   Finite pitch estimates remain displayed even when confidence is low.
+- Yaw uses calibrated central-encoder ticks with wheel-odometry refinement, matching
+  the dataset's interval correction without its steady-torque selection. Pauses,
+  acceleration and reverse motion remain visible. Wheel velocity is integrated
+  between encoder changes and scaled to match both endpoint angles, preventing
+  accumulated wheel-slip drift. If wheel coverage has gaps beyond
+  `--maximum-wheel-gap-s` (default `0.05`), or its integral cannot be normalized,
+  the affected intervals retain measured central-encoder yaw without refinement.
+  Wheel gaps alone do not reject otherwise available poses. The existing wheel
+  refinement and dataset-selection settings are unchanged; dataset position now
+  uses the same recording origin as the viewers.
 - Depth is reconstructed using its calibration at acquisition time, then moved
-  into `replay_base` using estimated IMU pitch and interpolated encoder yaw. RGB is projected
+  into `replay_base` using estimated IMU pitch and wheel-refined encoder yaw. RGB is projected
   separately using its own calibration and acquisition pose. It is not assumed
   that aligned RGB and depth have identical distortion coefficients.
 - The cloud covers the valid camera image, rather than only an ML patch. Raw
@@ -901,7 +943,8 @@ separately in `packets/analysis_report.json`.
 | `/legwheel/joint_states` | `sensor_msgs/msg/JointState` | CAN node | Hip and knee state. |
 | `/wheel/wheel_state` | `sensor_msgs/msg/JointState` | CAN node | Wheel position, velocity, and torque estimate. |
 | `/rotation_encoder/joint_state` | `sensor_msgs/msg/JointState` | Encoder node | Central rig rotation angle and velocity. |
-| `/rotation_encoder/ticks` | `std_msgs/msg/Int64` | Encoder node | Relative raw encoder ticks. |
+| `/rotation_encoder/ticks` | `std_msgs/msg/Int64` | Encoder node | Signed ticks after configured startup zeroing and direction inversion. Offline position reference, timed by bag receipt. |
+| `/rotation_encoder/config` | `std_msgs/msg/String` | Encoder node | Retained JSON of effective encoder settings, checked by recording preflight. |
 | `/legwheel_rgbd/color/image_raw` | `sensor_msgs/msg/Image` | Orbbec driver | Raw RGB image stream. |
 | `/legwheel_rgbd/color/camera_info` | `sensor_msgs/msg/CameraInfo` | Orbbec driver | Raw RGB calibration. |
 | `/legwheel_rgbd/depth/image_raw` | `sensor_msgs/msg/Image` | Orbbec driver | Raw depth image stream. |

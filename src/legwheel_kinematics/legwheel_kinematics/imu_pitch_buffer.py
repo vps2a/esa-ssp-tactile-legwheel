@@ -1,4 +1,4 @@
-"""A small, bounded recording window for the shared IMU pitch estimator.
+"""A bounded visualization window for IMU pitch and wheel-refined encoder yaw.
 
 ROS callbacks only collect measurements here. A slower visualization timer can
 then call ``estimate`` to run the same filter and offline smoother used for a
@@ -14,11 +14,12 @@ from typing import Any
 import numpy as np
 
 from legwheel_kinematics.config import KinematicsConfig
+from legwheel_kinematics.encoder_yaw import EncoderYawTrajectory
 from legwheel_kinematics.imu_pitch import PitchTrajectory, estimate_pitch
 
 
 class ImuPitchBuffer:
-    """Keep recent IMU/encoder samples and a genuine stationary calibration.
+    """Keep recent IMU/encoder/wheel samples and stationary pitch calibration.
 
     Small source timestamp reorderings are sorted instead of mistaken for a
     playback seek. The ROS adapter must call ``clear`` on a backwards /clock
@@ -32,11 +33,14 @@ class ImuPitchBuffer:
         window_s: float = 10.0,
         maximum_gap_s: float = 0.05,
         maximum_uncertainty_deg: float = 1.0,
+        maximum_wheel_gap_s: float = 0.05,
+        encoder_origin_motion_rad: float | None = None,
     ) -> None:
         for name, value in (
             ("window_s", window_s),
             ("maximum_gap_s", maximum_gap_s),
             ("maximum_uncertainty_deg", maximum_uncertainty_deg),
+            ("maximum_wheel_gap_s", maximum_wheel_gap_s),
         ):
             if not math.isfinite(value) or value <= 0.0:
                 raise ValueError(f"{name} must be finite and positive.")
@@ -46,17 +50,28 @@ class ImuPitchBuffer:
         self.window_s = float(window_s)
         self.maximum_gap_s = float(maximum_gap_s)
         self.maximum_uncertainty_deg = float(maximum_uncertainty_deg)
+        self.maximum_wheel_gap_s = float(maximum_wheel_gap_s)
+        # Playback supplies angles relative to the complete recording's origin.
+        # Retain that origin when a seek clears the bounded sensor history.
+        if encoder_origin_motion_rad is not None and not math.isfinite(
+            encoder_origin_motion_rad
+        ):
+            raise ValueError("encoder_origin_motion_rad must be finite.")
+        self._fixed_encoder_origin = encoder_origin_motion_rad
         self.clear()
 
     def clear(self) -> None:
-        """Start a new playback epoch, including a new encoder yaw origin."""
+        """Clear sensor history while preserving an explicit recording origin."""
         self._imu_times: list[int] = []
         self._imu_rows: list[tuple[np.ndarray, np.ndarray]] = []
         self._encoder_times: list[int] = []
         self._encoder_angles: list[float] = []
+        self._wheel_times: list[int] = []
+        self._wheel_velocities: list[float] = []
+        self._yaw_trajectory: EncoderYawTrajectory | None = None
         self._newest_time: int | None = None
         self._yaw_origin_time: int | None = None
-        self._yaw_origin_motion_angle: float | None = None
+        self._yaw_origin_motion_angle: float | None = self._fixed_encoder_origin
         # Only actual stationary calibration is cached. Reusing a fitted moving
         # posterior on every overlapping window would count the same data twice.
         self._stationary_bias: tuple[float, float, int, float] | None = None
@@ -73,8 +88,13 @@ class ImuPitchBuffer:
 
     @property
     def latest_time_ns(self) -> int | None:
-        """Latest common coverage; this is a cutoff, not a reliable pose claim."""
-        if not self._imu_times or not self._encoder_times:
+        """Latest pose coverage once all three telemetry streams have arrived.
+
+        Wheel gaps disable refinement rather than freezing central-encoder yaw.
+        The publication delay normally lets wheel measurements catch up; an
+        actual outage must not prevent newer encoder/IMU poses being displayed.
+        """
+        if not self._imu_times or not self._encoder_times or not self._wheel_times:
             return None
         return min(self._imu_times[-1], self._encoder_times[-1])
 
@@ -96,19 +116,22 @@ class ImuPitchBuffer:
         )
 
     def _prune(self, timestamp_ns: int) -> None:
-        """A fast stream also expires stale samples from the other sensor."""
+        """A fast stream also expires stale samples from the other sensors."""
         self._newest_time = (
             timestamp_ns
             if self._newest_time is None
             else max(self._newest_time, timestamp_ns)
         )
         oldest_time = self._newest_time - round(self.window_s * 1e9)
-        first_imu = bisect_left(self._imu_times, oldest_time)
-        del self._imu_times[:first_imu]
-        del self._imu_rows[:first_imu]
-        first_encoder = bisect_left(self._encoder_times, oldest_time)
-        del self._encoder_times[:first_encoder]
-        del self._encoder_angles[:first_encoder]
+        for times, values in (
+            (self._imu_times, self._imu_rows),
+            (self._encoder_times, self._encoder_angles),
+            (self._wheel_times, self._wheel_velocities),
+        ):
+            first_retained = bisect_left(times, oldest_time)
+            del times[:first_retained]
+            del values[:first_retained]
+        self._yaw_trajectory = None
 
     def add_imu(
         self,
@@ -150,6 +173,24 @@ class ImuPitchBuffer:
             self._imu_rows.insert(index, row)
         self._prune(timestamp)
 
+    def add_wheel(self, timestamp_ns: int, velocity_rad_s: float) -> None:
+        """Collect signed wheel angular velocity, using its acquisition time.
+
+        The yaw estimator normalizes the integrated velocity between encoder
+        anchors. Motor sign and the effective rolling radius cancel there, so
+        no extra wheel sign convention or geometry correction belongs here.
+        """
+        timestamp = self._timestamp(timestamp_ns)
+        if self._too_old(timestamp):
+            return
+        index = bisect_left(self._wheel_times, timestamp)
+        if index < len(self._wheel_times) and self._wheel_times[index] == timestamp:
+            self._wheel_velocities[index] = float(velocity_rad_s)
+        else:
+            self._wheel_times.insert(index, timestamp)
+            self._wheel_velocities.insert(index, float(velocity_rad_s))
+        self._prune(timestamp)
+
     def add_encoder(self, timestamp_ns: int, angle_motion_rad: float) -> None:
         """Collect a central-encoder angle, before the configured yaw sign.
 
@@ -168,7 +209,7 @@ class ImuPitchBuffer:
         else:
             self._encoder_times.insert(index, timestamp)
             self._encoder_angles.insert(index, angle)
-        if math.isfinite(angle) and (
+        if self._fixed_encoder_origin is None and math.isfinite(angle) and (
             self._yaw_origin_time is None or timestamp <= self._yaw_origin_time
         ):
             self._yaw_origin_time = timestamp
@@ -184,26 +225,20 @@ class ImuPitchBuffer:
         )
 
     def yaw_at(self, timestamp_ns: int) -> float:
-        """Interpolate yaw only within contiguous recorded encoder coverage."""
+        """Use the same encoder-anchored wheel refinement as full-run replay."""
         timestamp = self._timestamp(timestamp_ns)
-        upper = bisect_left(self._encoder_times, timestamp)
-        angles = self._yaw_angles()
-        if upper < len(self._encoder_times) and self._encoder_times[upper] == timestamp:
-            if not math.isfinite(float(angles[upper])):
-                raise ValueError(
-                    "Encoder yaw is unavailable at a nonfinite measurement."
-                )
-            return float(angles[upper])
-        if upper == 0 or upper == len(self._encoder_times):
-            raise ValueError("Encoder yaw is unavailable outside recorded coverage.")
-        lower = upper - 1
-        period_s = float(np.median(np.diff(self._encoder_times))) * 1e-9
-        maximum_gap_ns = round(max(0.25, 5.0 * period_s) * 1e9)
-        gap_ns = self._encoder_times[upper] - self._encoder_times[lower]
-        if gap_ns > maximum_gap_ns or not np.isfinite(angles[[lower, upper]]).all():
-            raise ValueError("Encoder yaw is unavailable across a data gap.")
-        fraction = (timestamp - self._encoder_times[lower]) / gap_ns
-        return float(angles[lower] + fraction * (angles[upper] - angles[lower]))
+        if self._yaw_trajectory is None:
+            # Build once per sensor batch, rather than reintegrating the wheel
+            # history separately for every IMU pose published by the timer.
+            self._yaw_trajectory = EncoderYawTrajectory(
+                self._encoder_times,
+                self._yaw_angles(),
+                self._wheel_times,
+                self._wheel_velocities,
+                maximum_encoder_gap_s=0.25,
+                maximum_wheel_gap_s=self.maximum_wheel_gap_s,
+            )
+        return self._yaw_trajectory.sample(timestamp)
 
     def estimate(self) -> PitchTrajectory | None:
         """Run the shared estimator at visualization cadence, after collecting.

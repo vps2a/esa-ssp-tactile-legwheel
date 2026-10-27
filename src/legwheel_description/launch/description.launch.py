@@ -47,6 +47,8 @@ def _launch_nodes(context):
                     "encoder_topic": LaunchConfiguration("encoder_topic").perform(
                         context
                     ),
+                    "wheel_topic": LaunchConfiguration("wheel_topic").perform(context),
+                    "encoder_bag": LaunchConfiguration("encoder_bag").perform(context),
                 }
             ],
         ),
@@ -88,9 +90,19 @@ def generate_launch_description():
                 description="Combined camera IMU; use /camera/imu for legacy recordings.",
             ),
             DeclareLaunchArgument(
+                "wheel_topic",
+                default_value="/wheel/wheel_state",
+                description="Measured wheel velocity for encoder yaw refinement.",
+            ),
+            DeclareLaunchArgument(
                 "encoder_topic",
-                default_value="/rotation_encoder/joint_state",
-                description="Central encoder JointState used for yaw and acceleration correction.",
+                default_value="/rotation_encoder/ticks",
+                description="Central encoder Int64 ticks used for yaw and acceleration correction.",
+            ),
+            DeclareLaunchArgument(
+                "encoder_bag",
+                default_value="",
+                description="Playback bag directory; defaults to rosbag beside the experiment snapshot.",
             ),
             OpaqueFunction(function=_launch_nodes),
         ]

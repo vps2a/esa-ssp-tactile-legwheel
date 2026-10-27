@@ -20,6 +20,7 @@ from legwheel_dataset.frame_playback import (
     FramePose,
     interpolate_frame_pose,
     require_imu_pitch_dataset,
+    require_encoder_position_dataset,
 )
 from legwheel_kinematics.config import KinematicsConfig
 from legwheel_kinematics.track import generate_track_points
@@ -78,6 +79,7 @@ class PacketVisualizationNode(Node):
             )
         )
         require_imu_pitch_dataset(provenance)
+        require_encoder_position_dataset(provenance)
         self._kinematics_config = KinematicsConfig.from_experiment_dict(
             provenance["experiment_config"]
         )

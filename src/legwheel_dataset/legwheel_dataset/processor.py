@@ -11,6 +11,12 @@ from typing import Any
 
 import numpy as np
 
+from legwheel_encoder.config import (
+    ENCODER_POSITION_VERSION,
+    TICKS_TOPIC,
+    EncoderCalibration,
+)
+
 from legwheel_dataset.bag_reader import (
     DEPTH_IMAGE_TOPIC,
     RGB_IMAGE_TOPIC,
@@ -159,6 +165,7 @@ def _dataset_identifier(
         {
             "kinematics_model_version": KINEMATICS_MODEL_VERSION,
             "pitch_estimator_version": PITCH_ESTIMATOR_VERSION,
+            "encoder_position_version": ENCODER_POSITION_VERSION,
             "experiment": experiment_config,
             "run": run_config,
             "processing": processing_config.to_dict(),
@@ -201,18 +208,12 @@ def _estimate_run_pitch(
             f"recorded frames: {sorted(bag_index.imu_frame_ids)}"
         )
     imu_times, imu_values = bag_index.streams["imu"].arrays()
-    encoder_times, encoder_values = bag_index.streams["ticks"].arrays()
-    ticks_per_revolution = float(
-        experiment_config["electronics_hardware"]["encoder_setup"]
-        ["ticks_per_legwheel_revolution"]
+    encoder_times, encoder_motion_angles, _ = _recorded_encoder_motion(
+        bag_index, experiment_config
     )
     # Tick direction belongs to the hardware/motion convention. Compensation
     # needs the signed yaw used by the transform chain, including its -1 map.
-    encoder_angles = (
-        encoder_values[:, 0]
-        * (2.0 * math.pi / ticks_per_revolution)
-        * geometry.theta_y_kinematic_sign
-    )
+    encoder_angles = encoder_motion_angles * geometry.theta_y_kinematic_sign
     pitch = estimate_pitch(
         imu_times,
         imu_values[:, :3],
@@ -410,6 +411,24 @@ def _packet_identifier(
     )
 
 
+def _recorded_encoder_motion(bag_index, experiment_config):
+    """Use the first finite count in the whole recording as the shared zero."""
+    calibration = EncoderCalibration.from_experiment_dict(experiment_config)
+    times, values = bag_index.streams["ticks"].arrays()
+    times, ticks = _finite_column(times, values, 0)
+    if times.size < 2:
+        raise ValueError("too_few_rotation_encoder_samples")
+    origin = {
+        "topic": TICKS_TOPIC,
+        "timestamp_source": "bag_receipt_time",
+        "origin": "first_recorded_tick",
+        "origin_time_ns": int(times[0]),
+        "origin_ticks": float(ticks[0]),
+        "ticks_per_legwheel_revolution": calibration.ticks_per_legwheel_revolution,
+    }
+    return times, calibration.motion_angle(ticks, ticks[0]), origin
+
+
 def _run_motion_analysis(
     bag_index: BagIndex,
     experiment_config: dict[str, Any],
@@ -433,26 +452,9 @@ def _run_motion_analysis(
         processing_config.minimum_target_torque_fraction,
     )
 
-    try:
-        ticks_per_revolution = float(
-            experiment_config["electronics_hardware"]["encoder_setup"]
-            ["ticks_per_legwheel_revolution"]
-        )
-    except (KeyError, TypeError, ValueError) as error:
-        raise ValueError(
-            "experiment_config_missing_ticks_per_legwheel_revolution"
-        ) from error
-    if ticks_per_revolution <= 0.0:
-        raise ValueError("ticks_per_legwheel_revolution_must_be_positive")
-    encoder_times, encoder_tick_values = bag_index.streams["ticks"].arrays()
-    encoder_times, encoder_ticks = _finite_column(
-        encoder_times,
-        encoder_tick_values,
-        0,
+    encoder_times, encoder_angles, encoder_origin = _recorded_encoder_motion(
+        bag_index, experiment_config
     )
-    # /rotation_encoder/ticks already includes the driver's configured direction.
-    # Converting the actual count difference also preserves multi-tick updates.
-    encoder_angles = encoder_ticks * (2.0 * math.pi / ticks_per_revolution)
     wheel_times, wheel_values = bag_index.streams["wheel"].arrays()
     wheel_velocity_column = bag_index.streams["wheel"].channel_names.index(
         "wheel_joint.velocity"
@@ -476,6 +478,8 @@ def _run_motion_analysis(
         processing_config.maximum_interpolation_gap_ms,
     )
     theta_y_end_motion_rad = float(trajectory.theta_y_at_ticks_rad[-1])
+    theta_y_start_motion_rad = float(trajectory.theta_y_at_ticks_rad[0])
+    angular_displacement_rad = theta_y_end_motion_rad - theta_y_start_motion_rad
     theta_y_end_kinematic_rad = kinematics_config.theta_y_to_kinematic(
         theta_y_end_motion_rad
     )
@@ -494,9 +498,7 @@ def _run_motion_analysis(
         trajectory.maximum_gap_ns,
     )
     duration_s = (trajectory.end_time_ns - trajectory.start_time_ns) * 1e-9
-    average_rig_angular_speed_rad_s = abs(
-        theta_y_end_motion_rad / duration_s
-    )
+    average_rig_angular_speed_rad_s = abs(angular_displacement_rad / duration_s)
     if average_rig_angular_speed_rad_s <= 0.0:
         raise ValueError("average_corrected_rig_speed_is_zero")
     local_window_ms = (
@@ -528,6 +530,8 @@ def _run_motion_analysis(
     ]
     report = {
         "status": "analysed",
+        "encoder_position_version": ENCODER_POSITION_VERSION,
+        "encoder_position": encoder_origin,
         "torque_period": {
             "threshold_start_time_ns": torque_period.start_time_ns,
             "threshold_end_time_ns": torque_period.end_time_ns,
@@ -548,6 +552,8 @@ def _run_motion_analysis(
             # Explicit fields prevent motion timing from being confused with
             # the opposite-handed notebook/base geometry.
             "theta_y_end_rad": theta_y_end_motion_rad,
+            "theta_y_start_motion_rad": theta_y_start_motion_rad,
+            "angular_displacement_motion_rad": angular_displacement_rad,
             "theta_y_end_motion_rad": theta_y_end_motion_rad,
             "theta_y_end_kinematic_rad": theta_y_end_kinematic_rad,
             "travel_direction": trajectory.travel_direction,
@@ -1584,6 +1590,8 @@ def isolate_packets(
         "run_directory": str(run_directory),
         "kinematics_model_version": KINEMATICS_MODEL_VERSION,
         "pitch_estimator_version": PITCH_ESTIMATOR_VERSION,
+        "encoder_position_version": ENCODER_POSITION_VERSION,
+        "encoder_position": analysis_report["encoder_position"],
         "pitch_estimation": pitch_trajectory.report,
         "bag_directory": str(bag_directory),
         "experiment_config_source": str(experiment_config_path),

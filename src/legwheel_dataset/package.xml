@@ -8,6 +8,7 @@
   <license>TODO</license>
 
   <depend>legwheel_kinematics</depend>
+  <depend>legwheel_encoder</depend>
   <depend>rclpy</depend>
   <depend>rosbag2_py</depend>
   <depend>rosidl_runtime_py</depend>

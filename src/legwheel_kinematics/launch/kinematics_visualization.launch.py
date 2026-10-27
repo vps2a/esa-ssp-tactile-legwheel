@@ -45,9 +45,19 @@ def generate_launch_description():
                 description="Recorded camera IMU topic; use /camera/imu for legacy bags.",
             ),
             DeclareLaunchArgument(
+                "wheel_topic",
+                default_value="/wheel/wheel_state",
+                description="Measured wheel velocity for encoder yaw refinement.",
+            ),
+            DeclareLaunchArgument(
                 "encoder_topic",
-                default_value="/rotation_encoder/joint_state",
-                description="Recorded central rotation encoder topic.",
+                default_value="/rotation_encoder/ticks",
+                description="Central encoder Int64 ticks topic.",
+            ),
+            DeclareLaunchArgument(
+                "encoder_bag",
+                default_value="",
+                description="Playback bag directory; defaults to rosbag beside the experiment snapshot.",
             ),
             Node(
                 package="legwheel_kinematics",
@@ -61,6 +71,8 @@ def generate_launch_description():
                         "use_sim_time": ParameterValue(use_sim_time, value_type=bool),
                         "imu_topic": LaunchConfiguration("imu_topic"),
                         "encoder_topic": LaunchConfiguration("encoder_topic"),
+                        "encoder_bag": LaunchConfiguration("encoder_bag"),
+                        "wheel_topic": LaunchConfiguration("wheel_topic"),
                     }
                 ],
             ),

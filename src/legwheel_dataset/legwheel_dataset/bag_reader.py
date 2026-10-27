@@ -8,6 +8,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from legwheel_kinematics.projection import CameraCalibration
+from legwheel_encoder.config import TICKS_TOPIC
 
 
 RGB_IMAGE_TOPIC = "/legwheel_rgbd/color/image_raw"
@@ -17,7 +18,7 @@ DEPTH_INFO_TOPIC = "/legwheel_rgbd/depth/camera_info"
 IMU_TOPIC = "/legwheel_rgbd/gyro_accel/sample"
 LEG_STATE_TOPIC = "/legwheel/joint_states"
 WHEEL_STATE_TOPIC = "/wheel/wheel_state"
-ROTATION_TICKS_TOPIC = "/rotation_encoder/ticks"
+ROTATION_TICKS_TOPIC = TICKS_TOPIC
 REQUESTED_TORQUE_TOPIC = "/wheel/requested_torque"
 
 INDEX_TOPICS = {

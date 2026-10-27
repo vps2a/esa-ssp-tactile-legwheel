@@ -14,6 +14,8 @@ from pathlib import Path
 import numpy as np
 import yaml
 
+from legwheel_encoder.config import TICKS_TOPIC, EncoderCalibration
+
 from legwheel_dataset.bag_reader import (
     CalibrationTimeline,
     _deserialize,
@@ -24,6 +26,7 @@ from legwheel_dataset.bag_reader import (
 from legwheel_dataset.images import decode_image, depth_point_map_in_base
 from legwheel_kinematics.imu_pitch import PitchTrajectory, estimate_pitch
 from legwheel_kinematics.config import KinematicsConfig
+from legwheel_kinematics.encoder_yaw import EncoderYawTrajectory
 from legwheel_kinematics.projection import CameraCalibration, project_camera_points
 from legwheel_kinematics.transforms import frame_coordinates
 
@@ -37,7 +40,8 @@ TOPIC_CANDIDATES = {
     ),
     "rgb_info": ("/legwheel_rgbd/color/camera_info", "/camera/rgbd/rgb/camera_info"),
     "imu": ("/legwheel_rgbd/gyro_accel/sample", "/camera/imu"),
-    "encoder": ("/rotation_encoder/joint_state",),
+    "encoder": (TICKS_TOPIC,),
+    "wheel": ("/wheel/wheel_state",),
 }
 POINT_DTYPE = np.dtype(
     [
@@ -62,6 +66,7 @@ class ReplaySettings:
     rgb_max_delta_ms: float = 50.0
     maximum_pose_gap_s: float = 0.5
     maximum_imu_gap_s: float = 0.05
+    maximum_wheel_gap_s: float = 0.05
     maximum_pitch_uncertainty_deg: float = 1.0
     depth_scale_m: float = 0.001
 
@@ -77,6 +82,7 @@ class ReplaySettings:
             "maximum_depth_m",
             "maximum_pose_gap_s",
             "maximum_imu_gap_s",
+            "maximum_wheel_gap_s",
             "maximum_pitch_uncertainty_deg",
             "depth_scale_m",
         ):
@@ -151,17 +157,21 @@ def _yaml(path):
     return values
 
 
-def load_geometry(run_directory, experiment_config=None):
-    """Adapt legacy camera units/names, leaving recorded snapshots untouched."""
-    run_directory = Path(run_directory)
+def _experiment_path(run_directory, experiment_config=None):
+    """Resolve geometry and tick calibration from the very same snapshot."""
     if experiment_config is None:
-        paths = sorted(run_directory.glob("experiment_config_run_*_snapshot.yaml"))
+        paths = sorted(Path(run_directory).glob("experiment_config_run_*_snapshot.yaml"))
         if len(paths) != 1:
             raise ValueError(
                 "Run must contain one experiment snapshot, or supply --experiment-config."
             )
         experiment_config = paths[0]
-    values = deepcopy(_yaml(Path(experiment_config).expanduser()))
+    return Path(experiment_config).expanduser()
+
+
+def load_geometry(run_directory, experiment_config=None):
+    """Adapt legacy camera units/names, leaving recorded snapshots untouched."""
+    values = deepcopy(_yaml(_experiment_path(run_directory, experiment_config)))
     hardware = values["electronics_hardware"]
     camera = hardware["camera"]["camera_config"]
     notes = []
@@ -186,9 +196,6 @@ def load_geometry(run_directory, experiment_config=None):
                 "Legacy sensor_front_offset_mm converted to sensor_front_offset_m; "
                 "camera_beam_offset_m uses the legacy 0.054 m installation offset."
             )
-    if "theta_y_kinematic_sign" not in hardware["encoder_setup"]:
-        hardware["encoder_setup"]["theta_y_kinematic_sign"] = -1
-        notes.append("Legacy encoder sign defaults to -1 for the current rig.")
     return KinematicsConfig.from_experiment_dict(values), notes
 
 
@@ -224,27 +231,9 @@ def _series(rows, sensor_name):
     )
 
 
-def sample_angle(series, stamp_ns, maximum_gap_ns):
-    """Interpolate measured angles without extending them beyond the recording."""
-    times, values = series
-    if stamp_ns < times[0] or stamp_ns > times[-1]:
-        raise ValueError("Encoder pose is outside the recorded timestamp range.")
-    right = int(np.searchsorted(times, stamp_ns))
-    if times[right] == stamp_ns:
-        return float(values[right])
-    left = right - 1
-    gap = int(times[right]) - int(times[left])
-    if gap > maximum_gap_ns:
-        raise ValueError(
-            "Joint interpolation crosses a gap larger than maximum_pose_gap_s."
-        )
-    fraction = (stamp_ns - int(times[left])) / gap
-    return float(values[left] + fraction * (values[right] - values[left]))
-
-
 @dataclass
 class RecordedRun:
-    """Keep image metadata, calibration, encoder angles and one IMU pitch estimate."""
+    """Keep images, calibration, wheel-refined yaw and one IMU pitch estimate."""
 
     source: object
     geometry: KinematicsConfig
@@ -253,6 +242,7 @@ class RecordedRun:
     frames: list[CloudFrame]
     pitch: PitchTrajectory
     encoder: tuple
+    yaw: EncoderYawTrajectory
     depth_calibrations: CalibrationTimeline
     rgb_calibrations: CalibrationTimeline
     notes: list[str] = field(default_factory=list)
@@ -262,6 +252,9 @@ class RecordedRun:
         """Read both current and legacy raw runs, without ML packet filtering."""
         directory = Path(directory).expanduser().resolve()
         geometry, notes = load_geometry(directory, experiment_config)
+        calibration = EncoderCalibration.from_experiment_dict(
+            _yaml(_experiment_path(directory, experiment_config))
+        )
         require_registered_depth(directory)
         source = source if source is not None else RosbagSource(directory / "rosbag")
         topics = {}
@@ -279,7 +272,7 @@ class RecordedRun:
                 raise ValueError(f"Missing {role} topic; expected one of {candidates}.")
         images = {"depth": [], "rgb": []}
         calibration_rows = {"depth_info": [], "rgb_info": []}
-        imu, encoder = [], []
+        imu, encoder, wheel = [], [], []
         roles = {topic: role for role, topic in topics.items()}
         for topic, message, log_ns in source.messages(topics.values()):
             role = roles[topic]
@@ -327,25 +320,47 @@ class RecordedRun:
                         ),
                     )
                 )
-            else:
+            elif role == "wheel":
                 try:
-                    angle = float(
-                        message.position[list(message.name).index("rotation_joint")]
+                    velocity = float(
+                        message.velocity[list(message.name).index("wheel_joint")]
                     )
                 except (ValueError, IndexError):
                     continue
-                if math.isfinite(angle):
-                    encoder.append((stamp_ns, angle))
+                # Preserve nonfinite observations as gaps instead of silently
+                # integrating through invalid wheel telemetry.
+                wheel.append((stamp_ns, velocity))
+            elif role == "encoder":
+                # Int64 has no header. Its original bag receipt time is the
+                # reference used by dataset generation and streamed playback.
+                encoder.append((int(log_ns), int(message.data)))
         if not imu:
             raise ValueError("The recorded camera IMU topic contains no measurements.")
-        encoder_times, encoder_angles = _series(encoder, "central-encoder")
-        # The central encoder publishes continuous count-derived angles. Keep
-        # full turns even across a dropout; shortest-path unwrapping would lose
-        # real revolutions. Apply the configured sign once for both consumers.
-        encoder_angles = geometry.theta_y_kinematic_sign * (
-            encoder_angles - encoder_angles[0]
+        encoder_times, encoder_ticks = _series(encoder, "central-encoder ticks")
+        # Counts already include the driver's inversion. Keep the first count
+        # in the whole recording as zero, even when viewing a later interval.
+        encoder_angles = geometry.theta_y_kinematic_sign * calibration.motion_angle(
+            encoder_ticks, encoder_ticks[0]
         )
         encoder_series = encoder_times, encoder_angles
+        wheel_times, wheel_velocity = _series(wheel, "wheel odometry")
+        # This is the same shared estimator used by the standalone source node.
+        # Encoder ticks bound slip drift; integrated measured wheel velocity
+        # refines the motion between ticks, across the full run in either direction.
+        yaw = EncoderYawTrajectory(
+            encoder_times,
+            encoder_angles,
+            wheel_times,
+            wheel_velocity,
+            maximum_encoder_gap_s=settings.maximum_pose_gap_s,
+            maximum_wheel_gap_s=settings.maximum_wheel_gap_s,
+        )
+        notes.append(
+            "Yaw uses /rotation_encoder/ticks and experiment calibration, with wheel-velocity "
+            "integration normalized between encoder changes, as in dataset "
+            "generation. Visualization retains the full run and both directions; "
+            "intervals without usable wheel refinement keep measured encoder yaw."
+        )
         imu_times, imu_values = _series(imu, "camera IMU")
         # Use the full recording, including pauses before/after motion. Running
         # the smoother once also makes random access and backward seeks stable.
@@ -409,15 +424,15 @@ class RecordedRun:
             frames,
             pitch,
             encoder_series,
+            yaw,
             timelines["depth_info"],
             timelines["rgb_info"],
             notes,
         )
 
     def angles_at(self, stamp_ns):
-        """Sample measured yaw and available IMU beam pitch at acquisition time."""
-        maximum_gap_ns = int(self.settings.maximum_pose_gap_s * 1e9)
-        yaw = sample_angle(self.encoder, stamp_ns, maximum_gap_ns)
+        """Sample wheel-refined encoder yaw and IMU pitch at acquisition time."""
+        yaw = self.yaw.sample(stamp_ns)
         # Keep gyro-supported estimates through impacts or high uncertainty.
         # Only absent estimates (startup or genuine gaps) remain unavailable;
         # those must not be replaced with knee geometry or extrapolated poses.

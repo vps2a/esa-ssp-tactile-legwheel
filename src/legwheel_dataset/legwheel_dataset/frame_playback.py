@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
+from legwheel_encoder.config import ENCODER_POSITION_VERSION, TICKS_TOPIC
+
 
 @dataclass(frozen=True)
 class FramePose:
@@ -31,6 +33,23 @@ def require_imu_pitch_dataset(provenance: dict, metadata: dict | None = None) ->
             "This dataset does not contain verified IMU-derived pitch. "
             "Regenerate its derived packets from the recorded camera IMU "
             "before visualizing them."
+        )
+
+
+def require_encoder_position_dataset(provenance: dict) -> None:
+    """Saved overlays need regeneration when their yaw reference is outdated."""
+    position = provenance.get("encoder_position")
+    version = provenance.get("encoder_position_version")
+    if (
+        type(version) is not int
+        or version != ENCODER_POSITION_VERSION
+        or not isinstance(position, dict)
+        or position.get("topic") != TICKS_TOPIC
+        or position.get("origin") != "first_recorded_tick"
+    ):
+        raise ValueError(
+            "This dataset predates the shared recording origin from encoder ticks. "
+            "Regenerate its derived packets using the corrected experiment snapshot."
         )
 
 

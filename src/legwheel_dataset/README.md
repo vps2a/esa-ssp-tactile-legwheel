@@ -132,6 +132,12 @@ The bag must contain:
 - `/wheel/requested_torque`
 - `/rotation_encoder/ticks`
 
+Ticks use their original bag receipt timestamps because `std_msgs/msg/Int64`
+has no header. Raw-run replay and the clock-driven visualization adapter use
+the same timestamps and recording origin. Wheel-velocity refinement between
+ticks is unchanged. `/rotation_encoder/joint_state` is not used for offline
+position reconstruction.
+
 This implementation deliberately requires the snapshotted camera configuration
 to contain `depth_registration: true` and `align_target_stream: COLOR`.
 Unregistered depth is rejected instead of silently using the wrong RGB/depth
@@ -142,6 +148,7 @@ The experiment snapshot must also contain:
 ```yaml
 electronics_hardware:
   encoder_setup:
+    ticks_per_legwheel_revolution: 62.5
     # Keep -1 for this LegWheel geometry. Encoder-positive forward motion is
     # opposite to positive notebook/DH theta_y. Changing this mirrors all
     # camera projections, 3D points, and signed slope directions.
@@ -298,13 +305,22 @@ intermediate commands and may not publish the nominal endpoint exactly.
 ### 2. Define `t0` and reject reverse encoder changes
 
 Repeated central-encoder values are collapsed. `t0` is the first actual encoder
-count change after the torque threshold is reached. The raw encoder angle at
-that point is retained in `analysis_report.json`, while the processed angle is
-rebased:
+count change after the torque threshold is reached. This selects the analysis
+interval without changing the position origin. Every angle uses the first
+recorded tick in the complete run:
 
 ```text
-theta_y(t0) = 0
+theta_y_at_tick = (ticks - first_recorded_ticks) * 2*pi / ticks_per_legwheel_revolution
 ```
+
+The first count may be nonzero when the encoder was started before recording.
+The driver has already applied `invert_direction`; offline code must not apply
+it again. `theta_y_kinematic_sign` subsequently maps the motion angle into the
+geometry convention. Complete revolutions are preserved without wrapping.
+The recording origin, calibration and bag timestamp source are saved in
+`analysis_report.json` and dataset provenance. Regenerate previously derived
+datasets to adopt this common origin; new dataset identifiers include the
+encoder-position convention version.
 
 Actual encoder differences are used, including a change of more than one tick.
 Isolated changes opposite to the dominant run direction are treated as encoder

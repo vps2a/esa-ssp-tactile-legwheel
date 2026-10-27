@@ -17,10 +17,6 @@ from legwheel_experiments.state_machine import ExperimentState
 
 
 ADDITIONAL_CONFIG_SNAPSHOTS = (
-    (
-        Path("src/legwheel_encoder/config/rotation_encoder.yaml"),
-        "rotation_encoder_config",
-    ),
     (Path("src/legwheel_can/config/motor_config.json"), "motor_config"),
     (Path("src/legwheel_can/config/motor_ids.yaml"), "motor_ids"),
     (Path("src/legwheel_can/config/motor_limits.yaml"), "motor_limits"),
@@ -213,7 +209,10 @@ class RunRecorder:
         destination = (
             self.run_directory / f"experiment_config_run_{run_number}_snapshot.yaml"
         )
-        shutil.copy2(experiment_config_path, destination)
+        # Save the validated values held by the runner. The source file may
+        # have been edited since it was loaded at the start of the CLI.
+        with destination.open("w", encoding="utf-8") as file:
+            yaml.safe_dump(asdict(experiment_config), file, sort_keys=False)
 
         camera_topics_destination = (
             self.run_directory / f"camera_topics_run_{run_number}_snapshot.py"

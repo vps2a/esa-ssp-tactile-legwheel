@@ -8,6 +8,10 @@
   <license>TODO</license>
 
   <depend>rclpy</depend>
+  <depend>legwheel_encoder</depend>
+  <exec_depend>rosbag2_py</exec_depend>
+  <exec_depend>rosidl_runtime_py</exec_depend>
+  <exec_depend>rosbag2_storage_mcap</exec_depend>
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>rosgraph_msgs</depend>

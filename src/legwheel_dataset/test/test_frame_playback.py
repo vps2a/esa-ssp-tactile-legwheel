@@ -5,10 +5,19 @@ from legwheel_dataset.frame_playback import (
     FramePose,
     interpolate_frame_pose,
     require_imu_pitch_dataset,
+    require_encoder_position_dataset,
 )
 
 
 class TestFramePlayback(unittest.TestCase):
+    def test_old_dataset_origins_require_regeneration(self):
+        with self.assertRaisesRegex(ValueError, "Regenerate"):
+            require_encoder_position_dataset({"pitch_estimator_version": 2})
+        require_encoder_position_dataset({
+            "encoder_position_version": 1,
+            "encoder_position": {"topic": "/rotation_encoder/ticks", "origin": "first_recorded_tick"},
+        })
+
     def test_legacy_or_mixed_pose_sources_require_regeneration(self):
         for provenance, metadata in (
             ({}, None),

@@ -19,6 +19,7 @@ from legwheel_dataset.processor import isolate_packets
 from legwheel_dataset.processor import (
     _dataset_identifier,
     _packet_imu_uncertainty_deg,
+    _recorded_encoder_motion,
     _select_midpoint_pair,
     validate_processing_configuration_with_preview,
 )
@@ -68,6 +69,26 @@ class SynchronizationTest(unittest.TestCase):
         with patch("legwheel_dataset.processor.PITCH_ESTIMATOR_VERSION", 2):
             new_identifier = _dataset_identifier({}, {}, ProcessingConfig())
         self.assertNotEqual(old_identifier, new_identifier)
+
+    def test_dataset_identifier_changes_with_encoder_position_convention(self):
+        with patch("legwheel_dataset.processor.ENCODER_POSITION_VERSION", 0):
+            old_identifier = _dataset_identifier({}, {}, ProcessingConfig())
+        new_identifier = _dataset_identifier({}, {}, ProcessingConfig())
+        self.assertNotEqual(old_identifier, new_identifier)
+
+    def test_tick_conversion_uses_the_first_recorded_count_before_torque_selection(self):
+        ticks = TelemetrySeries(("rotation_encoder.ticks",))
+        for timestamp, count in [(10, 120), (20, 120), (30, 121), (40, 123)]:
+            ticks.append(timestamp, [count])
+        config = {"electronics_hardware": {"encoder_setup": {
+            "ticks_per_legwheel_revolution": 62.5,
+            "invert_direction": True,  # Already applied in the recorded count.
+        }}}
+        times, angles, origin = _recorded_encoder_motion(BagIndex(streams={"ticks": ticks}), config)
+        np.testing.assert_array_equal(times, [10, 20, 30, 40])
+        np.testing.assert_allclose(angles, np.array([0, 0, 1, 3]) * 2 * math.pi / 62.5)
+        self.assertEqual(origin["origin_ticks"], 120)
+        self.assertEqual(origin["origin_time_ns"], 10)
 
     def test_pairing_is_nearest_one_to_one_with_tolerance(self):
         rgb = np.array([100_000_000, 200_000_000, 300_000_000])
