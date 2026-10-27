@@ -460,8 +460,10 @@ centreline radius is `beam_radius_m - wheel_width_m / 2`.
 All visualizers and offline analysis estimate `theta_p` from the camera IMU,
 with gyro bias estimation, circular-acceleration compensation and smoothing.
 The full camera rotation compensates `camera_front_angle_deg` when interpreting
-IMU vectors. Unreliable image-time poses are rejected; knee angle remains
-telemetry and is never a pitch fallback. See the
+IMU vectors. Low-confidence poses remain available for packets and visualization;
+their uncertainty is saved as a feature. Only timestamps with no estimate
+(startup or genuine data gaps) are skipped. Knee angle remains telemetry and
+is never a pitch fallback. See the
 [offline IMU pitch documentation](src/legwheel_dataset/README.md#offline-beam-pitch-from-the-camera-imu)
 for confidence limits and recording recommendations.
 
@@ -480,8 +482,8 @@ When several standalone views run together, launch only one pose publisher:
 set `publish_kinematic_state:=false` on additional overlay/3D launches. If the
 URDF already publishes the frame tree, also set `publish_tf:=false` on the 3D
 marker launch. Image overlays hold only a bounded queue of image headers while
-waiting for a supported acquisition-time pose. Rejected samples are explicit
-barriers, so an annotation cannot interpolate through an impact. Bag seeks
+waiting for an available acquisition-time pose. Missing estimates are explicit
+barriers; finite estimates during impacts are retained. Bag seeks
 reset the streaming histories and their calibration. Old derived datasets
 without IMU pitch provenance must be regenerated before `visualise_stream`.
 
@@ -727,8 +729,8 @@ surfaces caused by a calibration error.
 - Geometry uses the current shared model: inner radius `beam_radius_m -
   wheel_width_m`, outer radius `beam_radius_m`, and IMU-derived beam pitch.
   The first recorded encoder angle defines zero yaw. Poses outside recorded
-  coverage, across excessive gaps, or with unreliable IMU pitch reject affected
-  clouds.
+  coverage or across gaps with no IMU pitch estimate reject affected clouds.
+  Finite pitch estimates remain displayed even when confidence is low.
 - Depth is reconstructed using its calibration at acquisition time, then moved
   into `replay_base` using estimated IMU pitch and interpolated encoder yaw. RGB is projected
   separately using its own calibration and acquisition pose. It is not assumed

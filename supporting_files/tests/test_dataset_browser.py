@@ -13,6 +13,7 @@ from legwheel_dataset_browser.model import (  # noqa: E402
     LegWheelDataset,
     crop_to_mask,
 )
+from legwheel_dataset_browser.formatting import metadata_rows  # noqa: E402
 from legwheel_dataset_browser.window import DatasetBrowserWindow  # noqa: E402
 from tests.synthetic_dataset import (  # noqa: E402
     CHANNEL_NAMES,
@@ -21,6 +22,21 @@ from tests.synthetic_dataset import (  # noqa: E402
 
 
 class DatasetModelTests(unittest.TestCase):
+    def test_imu_uncertainty_is_visible_for_stage1_and_stage2_packets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = create_synthetic_dataset(Path(temporary) / "abc123")
+            dataset = LegWheelDataset.open(root)
+            processed = dataset.load_packet(0)
+            processed.features["IMU uncertainty"] = 4.25
+            self.assertEqual(
+                dict(metadata_rows(processed))["IMU uncertainty"], "4.250 ° (2σ)"
+            )
+            stage1 = dataset.load_packet(1)
+            stage1.metadata["imu_uncertainty_deg"] = 8.0
+            self.assertEqual(
+                dict(metadata_rows(stage1))["IMU uncertainty"], "8.000 ° (2σ)"
+            )
+
     def test_loads_manifest_chronologically_and_restores_packet_data(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = create_synthetic_dataset(Path(temporary) / "abc123")

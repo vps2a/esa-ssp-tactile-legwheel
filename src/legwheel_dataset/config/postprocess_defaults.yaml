@@ -7,8 +7,8 @@ spectral_window_ms: 1000.0
 telemetry_resample_hz: 100.0
 # Largest source-data gap that interpolation may bridge.
 maximum_interpolation_gap_ms: 50.0
-# Maximum two-sigma model uncertainty for an image-time IMU pitch estimate.
-# Physical mounting and calibration errors must be validated separately.
+# Diagnostic two-sigma uncertainty threshold; exceeding it does not reject data.
+# Actual uncertainty is saved with each packet for later filtering/inspection.
 maximum_pitch_uncertainty_deg: 1.0
 # Maximum rate at which synchronized packets may be saved.
 maximum_packet_saving_frequency_hz: 10.0

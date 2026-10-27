@@ -1,9 +1,9 @@
-"""Match image acquisition times to the shared, reliable IMU pose stream.
+"""Match image acquisition times to the shared, available IMU pose stream.
 
 This small numerical helper has no ROS dependency. In particular, it never
 substitutes the latest pose for a missing pose at an older image timestamp.
-The shared publisher sends an empty JointState at rejected IMU timestamps;
-these explicit barriers prevent interpolation through even a short impact.
+The shared publisher retains finite low-confidence poses. An empty JointState
+marks only a timestamp with no estimate, so real missing data is not bridged.
 """
 
 from bisect import bisect_left
@@ -63,7 +63,7 @@ class PoseHistory:
         self._insert(timestamp_ns, (float(yaw), float(pitch)))
 
     def append_unavailable(self, timestamp_ns):
-        """Keep a rejected IMU sample as a barrier rather than bridging over it."""
+        """Keep an unavailable estimate as a barrier rather than bridging it."""
         self._insert(timestamp_ns, None)
 
     def _insert(self, timestamp_ns, angles):
@@ -86,19 +86,19 @@ class PoseHistory:
             or timestamp_ns > self._times_ns[-1]
         ):
             raise ValueError(
-                "Image timestamp is outside the reliable IMU pose history."
+                "Image timestamp is outside the available IMU pose history."
             )
         right = bisect_left(self._times_ns, timestamp_ns)
         if self._times_ns[right] == timestamp_ns:
             if self._angles[right] is None:
-                raise ValueError("IMU pose was rejected at the image timestamp.")
+                raise ValueError("IMU pose is unavailable at the image timestamp.")
             return self._angles[right]
         left = right - 1
         if self._angles[left] is None or self._angles[right] is None:
-            raise ValueError("Image timestamp crosses a rejected IMU pose interval.")
+            raise ValueError("Image timestamp crosses an unavailable IMU pose interval.")
         interval_ns = self._times_ns[right] - self._times_ns[left]
         if interval_ns > self.maximum_gap_ns:
-            raise ValueError("Image timestamp crosses a gap in reliable IMU poses.")
+            raise ValueError("Image timestamp crosses a gap in available IMU poses.")
         fraction = (timestamp_ns - self._times_ns[left]) / interval_ns
         return tuple(
             earlier + fraction * (later - earlier)

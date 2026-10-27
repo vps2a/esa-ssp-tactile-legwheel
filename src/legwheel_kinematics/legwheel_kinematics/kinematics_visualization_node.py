@@ -108,7 +108,7 @@ class KinematicsVisualizationNode(Node):
         if self._publish_tf:
             self._publish_static_transforms()
         self.get_logger().info(
-            "Replay visualization is waiting for reliable IMU poses on "
+            "Replay visualization is waiting for available IMU poses on "
             f"{KINEMATIC_STATE_TOPIC}. Start kinematic_joint_state_node when "
             "running this visualizer directly."
         )
@@ -147,7 +147,7 @@ class KinematicsVisualizationNode(Node):
             # A deep DDS queue can still contain poses from before a rewind.
             # Do not republish those future-epoch transforms after the seek.
             return
-        # Empty derived states mark rejected IMU samples. Do not turn them into
+        # Empty derived states mark missing estimates. Do not turn them into
         # either a knee-based pose or an invalid TF transform.
         if not message.name and not message.position:
             return

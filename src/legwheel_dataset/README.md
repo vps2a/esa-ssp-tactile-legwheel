@@ -194,17 +194,31 @@ A pitch-and-gyro-bias filter uses quiet samples to estimate bias, rejects
 acceleration disturbances, and applies an offline smoother within each
 continuous segment. Smoothed central encoder motion and the camera lever arm
 compensate for circular acceleration. Pitch is evaluated separately at each
-RGB and depth acquisition timestamp. Missing data and rejected impacts do not
-get replaced by knee geometry or extrapolated poses.
+RGB and depth acquisition timestamp. An impact can disable an accelerometer
+correction while the gyro still supplies a finite pitch estimate. Those
+low-confidence estimates are retained for packets, point clouds, frames and
+image overlays. Only timestamps with no estimate at all, such as startup or a
+genuine data gap, remain unavailable; no knee fallback or invented gap filling
+is used. All other packet checks, such as image visibility, still apply.
 
-`maximum_pitch_uncertainty_deg` defaults to `1.0` and limits the estimator's
-two-sigma model uncertainty for retained frames. This confidence bound does
-not include every possible calibration error. Inspect `pitch_estimation` in
-the validation/analysis report and `packets/run_pitch_estimation.npz` for
-confidence, accepted samples and acceleration rejection. Packet metadata
-records the source, estimator version and each exposure's one-sigma
-`theta_p_*_uncertainty_rad`. Estimator version and settings participate in the
-dataset identity; regenerate packets to apply the new poses to Stage 2.
+Every new packet saves `imu_uncertainty_deg` in its metadata. Stage 2 exposes
+the same scalar feature as **`"IMU uncertainty"`** in the packet's `features.json`
+and the dataset's `features.jsonl`, and as `imu_uncertainty_deg` in `features.npz`.
+It is the larger RGB/depth **two-sigma pitch uncertainty in degrees**. It is
+descriptive and never invalidates a packet or its other features. The browser
+shows it as **IMU uncertainty** with degree/2σ units, including Stage 1 metadata
+before feature extraction. Unknown uncertainty in older packets is shown as
+unavailable rather than zero.
+
+`maximum_pitch_uncertainty_deg` defaults to `1.0` and now controls only a
+diagnostic confidence flag; exceeding it does not skip packets or visualization
+updates. Inspect `pitch_estimation` and `packets/run_pitch_estimation.npz` for
+the separate `available` and diagnostic `valid` masks, uncertainty and
+acceleration rejection. Packet metadata also retains each exposure's one-sigma
+`theta_p_*_uncertainty_rad`. These are model confidence bounds and do not include
+every calibration error. Estimator version and settings participate in the
+dataset identity; regenerate packets to retain formerly rejected frames and
+populate the new feature.
 
 For new recordings, leave the mechanism genuinely still for 5–10 seconds after
 the recorder reports ready and before confirming `START`. A recorded quiet

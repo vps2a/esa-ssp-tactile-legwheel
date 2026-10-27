@@ -242,6 +242,30 @@ def _optional_knee_angle(
     return interpolate_scalar(times_ns, values_rad, timestamp_ns)
 
 
+def _packet_imu_uncertainty_deg(metadata: dict[str, Any]) -> float | None:
+    """Return the packet's worst exposure-time two-sigma pitch bound in degrees.
+
+    Older IMU packets already saved separate one-sigma RGB/depth values. Those
+    are enough to populate the new feature without treating unknown uncertainty
+    as zero. This value is descriptive and never controls packet acceptance.
+    """
+    try:
+        uncertainty = metadata.get("imu_uncertainty_deg")
+        if uncertainty is None:
+            exposure_uncertainties = (
+                float(metadata["theta_p_rgb_uncertainty_rad"]),
+                float(metadata["theta_p_depth_uncertainty_rad"]),
+            )
+            if any(not math.isfinite(value) or value < 0.0
+                   for value in exposure_uncertainties):
+                return None
+            uncertainty = math.degrees(2.0 * max(exposure_uncertainties))
+        uncertainty = float(uncertainty)
+    except (KeyError, TypeError, ValueError):
+        return None
+    return uncertainty if math.isfinite(uncertainty) and uncertainty >= 0.0 else None
+
+
 def _resample_all_streams(
     bag_index: BagIndex,
     centre_time_ns: int,
@@ -1151,6 +1175,7 @@ def isolate_packets(
         times_ns=pitch_trajectory.times_ns,
         theta_p_rad=pitch_trajectory.theta_p_rad,
         uncertainty_rad=pitch_trajectory.uncertainty_rad,
+        available=pitch_trajectory.available,
         valid=pitch_trajectory.valid,
         acceleration_rejected=pitch_trajectory.acceleration_rejected,
     )
@@ -1297,11 +1322,17 @@ def isolate_packets(
                 knee_times_ns, knee_values, pair.depth_time_ns
             )
             # The two exposures need their own acquisition-time pose. Sampling
-            # checks IMU gaps, rejected impacts and confidence before projection;
-            # an unusable pitch rejects this pair instead of falling back to a
-            # knee-derived angle or extrapolating a neighbouring good estimate.
+            # still checks actual coverage, but retains gyro-supported estimates
+            # during impacts or low confidence. Save their uncertainty instead
+            # of rejecting these packets. No pose is invented across a gap.
             theta_p_rgb = pitch_trajectory.sample(pair.rgb_time_ns)
             theta_p_depth = pitch_trajectory.sample(pair.depth_time_ns)
+            theta_p_rgb_uncertainty_rad = pitch_trajectory.uncertainty_at(
+                pair.rgb_time_ns
+            )
+            theta_p_depth_uncertainty_rad = pitch_trajectory.uncertainty_at(
+                pair.depth_time_ns
+            )
 
             rgb_projection = project_track_patch(
                 kinematics_config,
@@ -1460,12 +1491,11 @@ def isolate_packets(
             "theta_p_depth_rad": theta_p_depth,
             "theta_p_source": "camera_imu",
             "pitch_estimator_version": PITCH_ESTIMATOR_VERSION,
-            "theta_p_rgb_uncertainty_rad": pitch_trajectory.uncertainty_at(
-                pair.rgb_time_ns
-            ),
-            "theta_p_depth_uncertainty_rad": pitch_trajectory.uncertainty_at(
-                pair.depth_time_ns
-            ),
+            "theta_p_rgb_uncertainty_rad": theta_p_rgb_uncertainty_rad,
+            "theta_p_depth_uncertainty_rad": theta_p_depth_uncertainty_rad,
+            "imu_uncertainty_deg": math.degrees(2.0 * max(
+                theta_p_rgb_uncertainty_rad, theta_p_depth_uncertainty_rad,
+            )),
             "rgb_calibration": rgb_calibration.to_dict(),
             "depth_calibration": depth_calibration.to_dict(),
             "rgb_frame_id": rgb_metadata.frame_id,
@@ -1623,7 +1653,14 @@ def extract_features(
         metadata = json.loads(
             (packet_directory / "metadata.json").read_text(encoding="utf-8")
         )
-        feature_record = {"packet_id": metadata["packet_id"], "valid": False}
+        imu_uncertainty_deg = _packet_imu_uncertainty_deg(metadata)
+        # Include this feature even when an unrelated plane/spectrum extraction
+        # fails. A high value does not invalidate a packet or its other features.
+        feature_record = {
+            "packet_id": metadata["packet_id"],
+            "valid": False,
+            "IMU uncertainty": imu_uncertainty_deg,
+        }
         try:
             rgb = np.load(packet_directory / "rgb.npy", allow_pickle=False)
             depth = np.load(packet_directory / "depth.npy", allow_pickle=False)
@@ -1697,6 +1734,9 @@ def extract_features(
                 spectral_power=power,
                 dominant_frequency_hz=dominant_frequency_hz,
                 dominant_power=dominant_power,
+                imu_uncertainty_deg=(
+                    imu_uncertainty_deg if imu_uncertainty_deg is not None else np.nan
+                ),
             )
             feature_record.update(
                 {

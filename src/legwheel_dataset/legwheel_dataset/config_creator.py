@@ -37,8 +37,8 @@ FIELD_HELP = {
         "Larger values retain more samples but may conceal telemetry dropouts.",
     ),
     "maximum_pitch_uncertainty_deg": (
-        "Maximum two-sigma model uncertainty of an image-time IMU pitch estimate.",
-        "Smaller values reject more frames; this does not certify mounting accuracy.",
+        "Diagnostic two-sigma uncertainty threshold for an IMU pitch estimate.",
+        "It marks confidence only; uncertain frames and packets are still retained.",
     ),
     "maximum_packet_saving_frequency_hz": (
         "Maximum rate at which synchronized packets may be saved.",

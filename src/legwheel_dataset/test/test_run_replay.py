@@ -321,6 +321,19 @@ class RecordedRunTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Record the camera IMU"):
             self.load(source)
 
+    def test_low_confidence_pitch_does_not_freeze_frames_or_reject_clouds(self):
+        run = self.load()
+        run.pitch.valid[:] = False
+        run.pitch.uncertainty_rad[:] = math.radians(8.0)
+        for frame in run.frames:
+            yaw, pitch = run.angles_at(frame.depth.stamp_ns)
+            self.assertTrue(math.isfinite(yaw) and math.isfinite(pitch))
+            self.assertTrue(np.isfinite(run.frames_at(frame.depth.stamp_ns)).all())
+        replay = CloudReplay(run)
+        replay.advance(run.frames[-1].depth.log_time_ns)
+        self.assertEqual(replay.failures, {})
+        self.assertGreater(len(replay.cloud.points), 0)
+
     def test_imu_declared_in_a_body_frame_is_rejected(self):
         source = FakeSource()
         for topic, message, _ in source.rows:

@@ -415,12 +415,13 @@ class RecordedRun:
         )
 
     def angles_at(self, stamp_ns):
-        """Sample measured yaw and reliable IMU beam pitch at acquisition time."""
+        """Sample measured yaw and available IMU beam pitch at acquisition time."""
         maximum_gap_ns = int(self.settings.maximum_pose_gap_s * 1e9)
         yaw = sample_angle(self.encoder, stamp_ns, maximum_gap_ns)
-        # Reject uncertain or missing IMU estimates; knee geometry is never a
-        # fallback, and samples outside the recorded IMU span are never clamped.
-        return yaw, self.pitch.sample(stamp_ns, require_reliable=True)
+        # Keep gyro-supported estimates through impacts or high uncertainty.
+        # Only absent estimates (startup or genuine gaps) remain unavailable;
+        # those must not be replaced with knee geometry or extrapolated poses.
+        return yaw, self.pitch.sample(stamp_ns)
 
     def frames_at(self, stamp_ns):
         """Return the six measured kinematic poses in the stationary base."""

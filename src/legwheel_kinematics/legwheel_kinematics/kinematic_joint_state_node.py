@@ -195,13 +195,14 @@ class KinematicJointStateNode(Node):
         new_samples = trajectory.times_ns <= cutoff_ns
         if self._last_published_time_ns is not None:
             new_samples &= trajectory.times_ns > self._last_published_time_ns
+        available_samples = trajectory.available
         for index in np.flatnonzero(new_samples):
             timestamp_ns = int(trajectory.times_ns[index])
             output = JointState()
             output.header.stamp.sec = timestamp_ns // 1_000_000_000
             output.header.stamp.nanosec = timestamp_ns % 1_000_000_000
             output.header.frame_id = "legwheel_base"
-            if trajectory.valid[index]:
+            if available_samples[index]:
                 try:
                     yaw_rad = self._buffer.yaw_at(timestamp_ns)
                 except ValueError:
@@ -212,7 +213,8 @@ class KinematicJointStateNode(Node):
             # An empty JointState marks an unsupported timestamp. Custom
             # visualizers retain it as an interpolation barrier; the standard
             # robot_state_publisher has no joint update to turn into invalid TF.
-            # This prevents bridging even a very short, single-sample impact.
+            # Low-confidence estimates are ordinary poses here. Empty updates
+            # are reserved for timestamps where no estimate actually exists.
             self._publisher.publish(output)
             self._last_published_time_ns = timestamp_ns
 

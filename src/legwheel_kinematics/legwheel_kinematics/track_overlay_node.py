@@ -85,7 +85,7 @@ class TrackOverlayNode(Node):
             JointState,
             KINEMATIC_STATE_TOPIC,
             self._kinematic_state_callback,
-            # Rejected samples are explicit barriers. Reliable transport keeps
+            # Missing estimates are explicit barriers. Reliable transport keeps
             # a dropped barrier from looking like an ordinary short interval.
             QoSProfile(depth=200, reliability=ReliabilityPolicy.RELIABLE),
         )
@@ -120,7 +120,7 @@ class TrackOverlayNode(Node):
             qos_profile_sensor_data,
         )
         self.get_logger().info(
-            "Track overlay is waiting for reliable IMU poses on "
+            "Track overlay is waiting for available IMU poses on "
             f"{KINEMATIC_STATE_TOPIC}. Start kinematic_joint_state_node when "
             "running this overlay directly."
         )
@@ -155,9 +155,8 @@ class TrackOverlayNode(Node):
         try:
             yaw, pitch = joint_state_pose(message)
         except ValueError as error:
-            # Empty JointStates are the shared publisher's explicit invalid
-            # samples. Retaining them prevents interpolation through impacts,
-            # even when the surrounding valid samples are less than 50 ms apart.
+            # Empty JointStates mean there is no estimate. Keep those barriers;
+            # low-confidence finite poses arrive as ordinary joint updates.
             self._pose_history.append_unavailable(timestamp_ns)
             if message.name and not self._invalid_state_logged:
                 self.get_logger().warning(f"Cannot use IMU kinematic state: {error}")
@@ -221,7 +220,7 @@ class TrackOverlayNode(Node):
                 _, theta_p = self._pose_history.sample(image_stamp_ns)
             except ValueError:
                 # A pose after this image has already arrived. Missing older
-                # coverage or an impact barrier cannot be repaired by using the
+                # coverage or an unavailable pose cannot be repaired by using the
                 # latest angle, so this image deliberately has no annotation.
                 continue
             self._publish_marker(pending, theta_p)

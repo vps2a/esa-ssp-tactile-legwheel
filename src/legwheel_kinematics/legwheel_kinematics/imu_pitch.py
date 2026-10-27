@@ -21,7 +21,7 @@ from numpy.typing import NDArray
 from legwheel_kinematics.config import KinematicsConfig
 from legwheel_kinematics.transforms import transformation_matrices_from_config
 
-PITCH_ESTIMATOR_VERSION = 2
+PITCH_ESTIMATOR_VERSION = 3
 GRAVITY_M_S2 = 9.80665
 
 # These conservative defaults describe uncertainty, rather than claiming a
@@ -43,9 +43,9 @@ class PitchTrajectory:
     ``uncertainty_rad`` is one standard deviation, including the conservative
     mounting floor. ``valid`` requires a two-standard-deviation bound below the
     requested limit and a recovered, accepted accelerometer observation.  A
-    finite estimate during an impact can still be inspected with
-    ``sample(..., require_reliable=False)``; dataset frames should use the
-    default, which rejects it.
+    finite estimate during an impact remains available for packets and
+    visualization. Confidence describes that estimate; it does not decide
+    whether to keep it. Only genuinely unavailable intervals are omitted.
     """
 
     times_ns: NDArray[np.int64]
@@ -55,6 +55,16 @@ class PitchTrajectory:
     acceleration_rejected: NDArray[np.bool_]
     report: dict[str, Any]
     _segment_ids: NDArray[np.int64] = field(repr=False)
+
+    @property
+    def available(self) -> NDArray[np.bool_]:
+        """Distinguish an uncertain estimate from one that does not exist.
+
+        Gyro propagation can provide pitch through rejected accelerometer
+        observations. Startup, missing measurements and separate time segments
+        still have no supported estimate and must not be invented or bridged.
+        """
+        return (self._segment_ids >= 0) & np.isfinite(self.theta_p_rad)
 
     def _bracket(self, timestamp_ns: int) -> tuple[int, int, float]:
         """Find real bracketing measurements; never clamp or cross a gap."""
@@ -82,8 +92,13 @@ class PitchTrajectory:
             )
         return lower, upper, fraction
 
-    def sample(self, timestamp_ns: int, require_reliable: bool = True) -> float:
-        """Interpolate pitch only between supported, optionally reliable samples."""
+    def sample(self, timestamp_ns: int, require_reliable: bool = False) -> float:
+        """Sample an existing estimate regardless of its confidence by default.
+
+        Strict confidence gating remains an explicit diagnostic option. Packet
+        generation and visualizers retain uncertain estimates and record their
+        uncertainty instead; both modes still enforce actual data coverage.
+        """
         lower, upper, fraction = self._bracket(timestamp_ns)
         if require_reliable and not (self.valid[lower] and self.valid[upper]):
             raise ValueError(
@@ -629,7 +644,10 @@ def estimate_pitch(
         "uninitialized_or_missing_samples": int(np.count_nonzero(~np.isfinite(pitch))),
         "initialized_segments": initialized_segments,
         "reliable_samples": int(valid.sum()),
-        "status": "available" if valid.any() else "no_reliable_pitch",
+        "available_samples": int(np.count_nonzero(np.isfinite(pitch))),
+        "low_confidence_samples": int(np.count_nonzero(np.isfinite(pitch) & ~valid)),
+        "status": "available" if np.isfinite(pitch).any() else "no_pitch",
+        "uncertainty_rejects_packets": False,
         "acceleration_rejected_samples": int((rejected & usable).sum()),
         "stationary_calibration_samples": int(stationary.sum()),
         "stationary_calibration_end_time_ns": (

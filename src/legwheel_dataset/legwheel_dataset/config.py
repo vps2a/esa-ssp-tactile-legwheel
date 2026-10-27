@@ -19,8 +19,8 @@ class ProcessingConfig:
     spectral_window_ms: float = 1000.0
     telemetry_resample_hz: float = 100.0
     maximum_interpolation_gap_ms: float = 50.0
-    # Accept a frame only when the pitch estimator's two-sigma uncertainty
-    # bound fits this budget. This is model confidence, not a calibration test.
+    # Reference bound for the estimator's diagnostic confidence flag. Uncertain
+    # poses are retained; this threshold does not reject frames or packets.
     maximum_pitch_uncertainty_deg: float = 1.0
     maximum_packet_saving_frequency_hz: float = 10.0
     alpha_off_rad: float = 0.35

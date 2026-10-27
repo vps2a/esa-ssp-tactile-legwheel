@@ -167,6 +167,12 @@ class ImuPitchTest(unittest.TestCase):
         )
         self.assertFalse(trajectory.valid[impact].any())
         self.assertTrue(trajectory.acceleration_rejected[impact].all())
+        self.assertTrue(trajectory.available[impact].all())
+        self.assertAlmostEqual(
+            trajectory.sample(6_100_000_000), pitch[610], delta=math.radians(0.30)
+        )
+        with self.assertRaisesRegex(ValueError, "unreliable"):
+            trajectory.sample(6_100_000_000, require_reliable=True)
         self.assertAlmostEqual(
             trajectory.sample(6_500_000_000), pitch[650], delta=math.radians(0.30)
         )
@@ -440,11 +446,29 @@ class ImuPitchTest(unittest.TestCase):
             np.zeros(len(timestamps)),
             _geometry(),
         )
-        self.assertEqual(trajectory.report["status"], "no_reliable_pitch")
+        self.assertEqual(trajectory.report["status"], "no_pitch")
         self.assertFalse(trajectory.valid.any())
         self.assertTrue(np.isnan(trajectory.theta_p_rad).all())
         with self.assertRaisesRegex(ValueError, "initialization"):
             trajectory.sample(500_000_000, require_reliable=False)
+
+    def test_high_uncertainty_is_retained_without_inventing_missing_estimates(self):
+        seconds = np.arange(0.0, 2.01, 0.01)
+        yaw = np.zeros_like(seconds)
+        timestamps, gyro, acceleration = _simulate(seconds, 0.1, yaw, _geometry())
+        trajectory = estimate_pitch(
+            timestamps, gyro, acceleration, timestamps, yaw, _geometry(),
+            maximum_uncertainty_deg=0.1,
+        )
+        self.assertFalse(trajectory.valid.any())
+        self.assertTrue(trajectory.available.any())
+        self.assertEqual(trajectory.report["status"], "available")
+        self.assertAlmostEqual(trajectory.sample(1_000_000_000), 0.1)
+        self.assertGreater(trajectory.uncertainty_at(1_000_000_000), 0.0)
+        with self.assertRaisesRegex(ValueError, "unreliable"):
+            trajectory.sample(1_000_000_000, require_reliable=True)
+        with self.assertRaisesRegex(ValueError, "initialization"):
+            trajectory.sample(0)
 
 
 if __name__ == "__main__":

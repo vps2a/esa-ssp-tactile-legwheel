@@ -18,6 +18,7 @@ from legwheel_dataset.processor import extract_features
 from legwheel_dataset.processor import isolate_packets
 from legwheel_dataset.processor import (
     _dataset_identifier,
+    _packet_imu_uncertainty_deg,
     _select_midpoint_pair,
     validate_processing_configuration_with_preview,
 )
@@ -41,6 +42,19 @@ from legwheel_dataset.run_analysis import (
 
 
 class SynchronizationTest(unittest.TestCase):
+    def test_packet_uncertainty_uses_the_worst_exposure_and_preserves_unknowns(self):
+        self.assertAlmostEqual(_packet_imu_uncertainty_deg({
+            "theta_p_rgb_uncertainty_rad": math.radians(2.0),
+            "theta_p_depth_uncertainty_rad": math.radians(3.5),
+        }), 7.0)
+        self.assertEqual(_packet_imu_uncertainty_deg({"imu_uncertainty_deg": 9.0}), 9.0)
+        self.assertIsNone(_packet_imu_uncertainty_deg({}))
+        self.assertIsNone(_packet_imu_uncertainty_deg({"imu_uncertainty_deg": math.nan}))
+        self.assertIsNone(_packet_imu_uncertainty_deg({
+            "theta_p_rgb_uncertainty_rad": 0.1,
+            "theta_p_depth_uncertainty_rad": math.nan,
+        }))
+
     def test_dataset_identifier_changes_with_kinematics_model(self):
         with patch("legwheel_dataset.processor.KINEMATICS_MODEL_VERSION", 2):
             old_identifier = _dataset_identifier({}, {}, ProcessingConfig())
@@ -412,8 +426,9 @@ class SynchronizationTest(unittest.TestCase):
                 no_knee_preview.rgb.theta_p_rad, metadata["theta_p_rgb_rad"]
             )
 
-            # A coincident impact invalidates the image pair even though knee
-            # position, camera calibration and all timestamps remain available.
+            # A coincident impact makes gravity untrustworthy, but gyro pitch
+            # still exists. Keep the packet and its uncertainty instead of
+            # rejecting it because of an accelerometer reliability flag.
             impact_imu = TelemetrySeries(imu.channel_names)
             for timestamp_ns, row in zip(imu.times_ns, imu.rows):
                 impact_row = row.copy()
@@ -440,11 +455,15 @@ class SynchronizationTest(unittest.TestCase):
                     experiment_config_path=experiment_path,
                     output_directory=impact_output,
                 )
-            self.assertEqual((impact_output / "manifest.jsonl").read_text(), "")
+            impact_manifest = json.loads((impact_output / "manifest.jsonl").read_text())
+            impact_metadata = json.loads((
+                impact_output / impact_manifest["packet_path"] / "metadata.json"
+            ).read_text())
+            self.assertIsInstance(impact_metadata["imu_uncertainty_deg"], float)
             impact_report = json.loads(
                 (impact_output / "packets" / "analysis_report.json").read_text()
             )
-            self.assertTrue(any(
+            self.assertFalse(any(
                 "IMU pitch is unreliable" in reason
                 for reason in impact_report["rejection_counts"]
             ))
@@ -639,6 +658,7 @@ class FeatureTest(unittest.TestCase):
                     "patch_centre_kinematic_angle_rad": 0.0,
                     "travel_direction_kinematic": 1.0,
                     "telemetry_channel_names": ["synthetic"],
+                    "imu_uncertainty_deg": 7.25,
                 }),
                 encoding="utf-8",
             )
@@ -666,8 +686,33 @@ class FeatureTest(unittest.TestCase):
                 (packet / "stage2" / "features.json").read_text(encoding="utf-8")
             )
             self.assertTrue(features["valid"])
+            self.assertEqual(features["IMU uncertainty"], 7.25)
+            aggregate_features = json.loads((dataset / "features.jsonl").read_text())
+            self.assertEqual(aggregate_features["IMU uncertainty"], 7.25)
+            with np.load(packet / "stage2" / "features.npz") as arrays:
+                self.assertEqual(float(arrays["imu_uncertainty_deg"]), 7.25)
             self.assertAlmostEqual(features["along_slope_deg"], 0.0, places=6)
             self.assertTrue((packet / "stage2" / "point_map.npz").is_file())
+
+    def test_imu_uncertainty_remains_available_when_an_unrelated_feature_fails(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            dataset = Path(temporary_directory)
+            packet = dataset / "packets" / "packet_0"
+            packet.mkdir(parents=True)
+            (dataset / "provenance.json").write_text(json.dumps({
+                "processing_config": ProcessingConfig().to_dict(),
+            }))
+            (dataset / "manifest.jsonl").write_text(json.dumps({
+                "packet_path": "packets/packet_0",
+            }) + "\n")
+            (packet / "metadata.json").write_text(json.dumps({
+                "packet_id": "packet_0", "imu_uncertainty_deg": 12.0,
+            }))
+            # Missing image files are unrelated to the IMU confidence feature.
+            extract_features(dataset)
+            features = json.loads((packet / "stage2" / "features.json").read_text())
+            self.assertFalse(features["valid"])
+            self.assertEqual(features["IMU uncertainty"], 12.0)
 
 
 if __name__ == "__main__":

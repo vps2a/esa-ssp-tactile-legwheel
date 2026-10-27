@@ -1,4 +1,4 @@
-"""Check image-time association, impact barriers and bounded pose retention."""
+"""Check image-time association, missing-data barriers and bounded histories."""
 
 import math
 from types import SimpleNamespace
@@ -21,13 +21,13 @@ def test_image_time_is_interpolated_without_using_the_latest_pose():
             history.sample(timestamp_ns)
 
 
-def test_a_single_rejected_sample_prevents_interpolation_through_an_impact():
+def test_a_single_missing_estimate_prevents_interpolation_through_missing_data():
     history = PoseHistory(maximum_gap_s=0.05)
     history.append(1_000_000_000, 0.0, 0.0)
     history.append_unavailable(1_010_000_000)
     history.append(1_020_000_000, 0.0, 0.2)
     for timestamp_ns in (1_005_000_000, 1_010_000_000, 1_015_000_000):
-        with pytest.raises(ValueError, match="rejected"):
+        with pytest.raises(ValueError, match="unavailable"):
             history.sample(timestamp_ns)
     assert history.sample(1_020_000_000) == (0.0, 0.2)
 

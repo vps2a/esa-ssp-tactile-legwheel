@@ -53,8 +53,9 @@ def test_shared_publisher_preserves_stamps_and_rejection_barriers_without_revisi
     published = []
     trajectory = SimpleNamespace(
         times_ns=np.array([1_000_000_000, 1_010_000_000, 1_500_000_000]),
-        theta_p_rad=np.array([0.12, 0.15, 0.20]),
-        valid=np.array([True, False, True]),
+        theta_p_rad=np.array([0.12, 0.15, np.nan]),
+        valid=np.array([True, False, False]),
+        available=np.array([True, True, False]),
     )
     publisher._buffer = SimpleNamespace(
         latest_time_ns=2_000_000_000,
@@ -72,14 +73,16 @@ def test_shared_publisher_preserves_stamps_and_rejection_barriers_without_revisi
     ]
     assert published[0].name == ["theta_y_joint", "theta_p_joint"]
     assert list(published[0].position) == pytest.approx([-0.7, 0.12])
-    # Unreliable pitch is an empty update, never a knee pose or a NaN TF.
-    assert not published[1].name and not published[1].position
+    # The low-confidence second pose is retained. Only the unavailable third
+    # estimate will become an empty update, never a knee pose or a NaN TF.
+    assert list(published[1].position) == pytest.approx([-0.7, 0.15])
     publisher._publish_estimate()
     assert len(published) == 2
     publisher._buffer.latest_time_ns += 200_000_000
     publisher._publish_estimate()
     assert len(published) == 3
     assert stamp_ns(published[-1].header.stamp) == 1_500_000_000
+    assert not published[-1].name and not published[-1].position
 
 
 def test_shared_publisher_recovers_from_invalid_startup_encoder_data():
