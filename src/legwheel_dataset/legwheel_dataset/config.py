@@ -8,6 +8,8 @@ from pathlib import Path
 
 
 CONFIG_METADATA_FIELDS = frozenset({"created_utc"})
+# Accepted only when loading older YAML files; packet spacing is now angular.
+LEGACY_CONFIG_FIELDS = frozenset({"maximum_packet_saving_frequency_hz"})
 
 
 @dataclass(frozen=True)
@@ -22,7 +24,6 @@ class ProcessingConfig:
     # Reference bound for the estimator's diagnostic confidence flag. Uncertain
     # poses are retained; this threshold does not reject frames or packets.
     maximum_pitch_uncertainty_deg: float = 1.0
-    maximum_packet_saving_frequency_hz: float = 10.0
     alpha_off_rad: float = 0.35
     alpha_sp_rad: float = 0.10
     # TODO: Replace this manual radius correction with a grouser-geometry and
@@ -51,7 +52,8 @@ class ProcessingConfig:
                 raise ValueError("Processing configuration must be a mapping.")
             known_fields = set(cls.__dataclass_fields__)
             unknown_fields = (
-                set(values) - known_fields - CONFIG_METADATA_FIELDS
+                set(values) - known_fields
+                - CONFIG_METADATA_FIELDS - LEGACY_CONFIG_FIELDS
             )
             if unknown_fields:
                 raise ValueError(
@@ -89,9 +91,6 @@ class ProcessingConfig:
             "telemetry_resample_hz": self.telemetry_resample_hz,
             "maximum_interpolation_gap_ms": self.maximum_interpolation_gap_ms,
             "maximum_pitch_uncertainty_deg": self.maximum_pitch_uncertainty_deg,
-            "maximum_packet_saving_frequency_hz": (
-                self.maximum_packet_saving_frequency_hz
-            ),
             "alpha_off_rad": self.alpha_off_rad,
             "alpha_sp_rad": self.alpha_sp_rad,
             "depth_scale_m": self.depth_scale_m,

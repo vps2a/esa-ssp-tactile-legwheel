@@ -51,8 +51,8 @@ ros2 run legwheel_dataset validate_config \
   --show-visualization
 ```
 
-The validator reports the measured source rates, calculated local-window
-duration, spectral Nyquist frequency and bin spacing, and an estimate of the
+The validator reports the measured source rates, the patch-based local-window
+rule, spectral Nyquist frequency and bin spacing, and an estimate of the
 number of depth pixels in a fully visible patch. `--show-visualization` is
 optional; without it the command only prints JSON.
 
@@ -394,7 +394,7 @@ direction_kinematic = -1
 `isolate_packets` stops with `failed_reverse_recording` before extracting any
 images or creating packets.
 
-### 5. Calculate average speeds and the local window
+### 5. Report average speeds
 
 The reported wheel speed is the time-weighted mean absolute velocity:
 
@@ -404,18 +404,14 @@ omega_avg = integral(abs(wheel_velocity)) dt / run_duration
 
 Minimum, maximum, median and standard deviation are also reported.
 
-The local telemetry duration uses the corrected average rig angular speed, so
-it includes measured slip:
+The corrected average rig angular speed is also reported:
 
 ```text
 average_rig_speed = abs(theta_y(end) - theta_y(t0)) / run_duration
-local_window_ms = alpha_sp_rad / average_rig_speed * 1000
 ```
 
-This duration is constant within one run but can differ between runs. Local
-arrays consequently have variable lengths between runs. Their samples remain
-on a real-time grid at `telemetry_resample_hz`; downstream model preparation
-must pad or otherwise batch them deliberately.
+Average speeds are diagnostic. Local telemetry boundaries are calculated for
+each patch from the corrected trajectory, as described below.
 
 ### 6. Measure acquisition rates
 
@@ -445,14 +441,19 @@ timestamp within `rgb_depth_max_delta_ms`. The packet image time is the integer
 midpoint of the two sensor timestamps.
 
 Only images at or after `t0` and before the last complete encoder interval are
-eligible. The first eligible valid pair is kept. Later pairs must be separated
-from the last saved pair by at least:
+eligible. The first eligible valid pair is kept. Each later candidate must
+advance its patch centre by at least one full patch width in the motion
+direction:
 
 ```text
-1 / maximum_packet_saving_frequency_hz
+direction_motion * (candidate_patch_motion - last_saved_patch_motion)
+    >= alpha_sp_rad
 ```
 
-Rejected candidates do not consume this spacing.
+This prevents overlap between successive patches while allowing small gaps
+because images arrive at discrete times. Comparisons retain full revolutions
+and do not wrap angles at 2*pi. Rejected candidates do not advance the saved
+reference. There is no time-based saving limit.
 
 ### 2. Define the physical terrain patch
 
@@ -518,10 +519,30 @@ so no angular matching tolerance is required.
 
 ### 4. Attach telemetry
 
-Both telemetry arrays are centred on `contact_time`:
+The local telemetry window covers the wheel's complete passage through the
+patch. In motion coordinates, its entry and exit angles are:
 
-- `local_values`: calculated patch-traversal duration;
-- `spectral_values`: fixed `spectral_window_ms` duration.
+```text
+entry_motion = patch_motion - direction_motion * alpha_sp_rad / 2
+exit_motion  = patch_motion + direction_motion * alpha_sp_rad / 2
+```
+
+The same corrected `theta_y(t)` crossing search finds each boundary timestamp.
+`local_values` spans exactly from entry to exit, including interpolated endpoint
+samples. A patch whose complete passage lies outside the corrected run is
+rejected. Its duration and sample count can differ between packets in the same
+run; downstream model preparation must pad or otherwise batch them deliberately.
+
+Local times remain relative to `contact_time`, the crossing of the patch
+centre. Entry-to-centre and centre-to-exit need not take equal times, so the
+local window is not forced to be symmetric. Sampling uses a uniform time grid
+near `telemetry_resample_hz`, with its spacing adjusted to include both exact
+endpoints. Metadata saves `local_start_time_ns`, `local_end_time_ns`, and the
+per-packet `local_window_ms`.
+
+`spectral_values` retains the fixed `spectral_window_ms` duration centred on
+`contact_time`. It is independent of local traversal duration, may be shorter
+than a slow traversal, and may overlap other packets' spectral windows.
 
 All 15 columns use the same grid and order stored in packet metadata:
 
@@ -641,7 +662,6 @@ spectral_window_ms: 1000.0
 telemetry_resample_hz: 100.0
 maximum_interpolation_gap_ms: 50.0
 maximum_pitch_uncertainty_deg: 1.0
-maximum_packet_saving_frequency_hz: 10.0
 alpha_off_rad: 0.35
 alpha_sp_rad: 0.10
 grouser_effective_height_m: 0.0
@@ -658,6 +678,10 @@ minimum_spectral_valid_fraction: 0.8
 An interactively generated file additionally contains a quoted `created_utc`
 ISO 8601 timestamp. This is file metadata, not an algorithm input, and therefore
 does not change a derived dataset's configuration hash.
+
+Older YAML files and saved dataset configurations may still contain
+`maximum_packet_saving_frequency_hz`. It is accepted and ignored; patch width
+now determines the minimum angular spacing. New configurations omit it.
 
 `alpha_off_rad` and `alpha_sp_rad` are initial processing defaults, not measured
 rig constants. Validate them against the actual camera view and desired physical

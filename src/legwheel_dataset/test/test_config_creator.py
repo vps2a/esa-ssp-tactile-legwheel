@@ -15,6 +15,19 @@ from legwheel_dataset.config_creator import (
 
 
 class ConfigLoaderTest(unittest.TestCase):
+    def test_legacy_packet_frequency_is_accepted_but_not_an_algorithm_setting(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "postprocess.yaml"
+            path.write_text(
+                'schema_version: "2.0"\n'
+                "maximum_packet_saving_frequency_hz: 1.0\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(ProcessingConfig.from_yaml(path), ProcessingConfig())
+        self.assertNotIn(
+            "maximum_packet_saving_frequency_hz", ProcessingConfig().to_dict()
+        )
+
     def test_loader_accepts_creation_metadata_but_excludes_it_from_values(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "postprocess.yaml"

@@ -25,7 +25,7 @@ from legwheel_dataset.bag_reader import (
     extract_selected_images,
     index_bag,
 )
-from legwheel_dataset.config import ProcessingConfig
+from legwheel_dataset.config import LEGACY_CONFIG_FIELDS, ProcessingConfig
 from legwheel_dataset.features import (
     calculate_spectra,
     fit_plane_ransac,
@@ -270,7 +270,8 @@ def _packet_imu_uncertainty_deg(metadata: dict[str, Any]) -> float | None:
 def _resample_all_streams(
     bag_index: BagIndex,
     centre_time_ns: int,
-    window_ms: float,
+    start_time_ns: int,
+    end_time_ns: int,
     config: ProcessingConfig,
     valid_start_time_ns: int,
     valid_end_time_ns: int,
@@ -295,7 +296,8 @@ def _resample_all_streams(
             source_times_ns,
             source_values,
             centre_time_ns,
-            window_ms,
+            start_time_ns,
+            end_time_ns,
             config.telemetry_resample_hz,
             config.maximum_interpolation_gap_ms,
         )
@@ -324,10 +326,15 @@ def _window_has_complete_timestamp_coverage(
     start_time_ns: int,
     end_time_ns: int,
     maximum_gap_ns: int,
+    valid_start_time_ns: int,
+    valid_end_time_ns: int,
 ) -> bool:
     """Check local-window timestamp coverage before doing any interpolation."""
     for stream_name in RESAMPLED_TELEMETRY_STREAM_NAMES:
         times_ns, _ = bag_index.streams[stream_name].arrays()
+        times_ns = times_ns[
+            (times_ns >= valid_start_time_ns) & (times_ns <= valid_end_time_ns)
+        ]
         if (
             times_ns.size < 2
             or start_time_ns < times_ns[0]
@@ -435,8 +442,8 @@ def _run_motion_analysis(
     run_config: dict[str, Any],
     kinematics_config: KinematicsConfig,
     processing_config: ProcessingConfig,
-) -> tuple[CorrectedThetaTrajectory, float, dict[str, Any]]:
-    """Calculate the accepted run, corrected theta_y, local duration and rates."""
+) -> tuple[CorrectedThetaTrajectory, dict[str, Any]]:
+    """Calculate the accepted run, corrected theta_y and acquisition rates."""
     try:
         target_torque_nm = float(
             run_config["wheel_parameters"]["commanded_wheel_torque_nm"]
@@ -501,11 +508,6 @@ def _run_motion_analysis(
     average_rig_angular_speed_rad_s = abs(angular_displacement_rad / duration_s)
     if average_rig_angular_speed_rad_s <= 0.0:
         raise ValueError("average_corrected_rig_speed_is_zero")
-    local_window_ms = (
-        processing_config.alpha_sp_rad
-        / average_rig_angular_speed_rad_s
-        * 1000.0
-    )
 
     source_rates = {}
     rate_limit_violations = []
@@ -563,6 +565,7 @@ def _run_motion_analysis(
                 kinematics_config.theta_y_kinematic_sign
             ),
             "forward_recording": forward_recording,
+            "average_angular_speed_rad_s": average_rig_angular_speed_rad_s,
             "complete_encoder_interval_count": int(
                 trajectory.correction_factors.size
             ),
@@ -586,12 +589,8 @@ def _run_motion_analysis(
             "sample_count": int(steady_wheel.size),
         },
         "local_window": {
-            "derivation": "alpha_sp_rad / average_corrected_rig_angular_speed",
+            "derivation": "corrected_theta_y_patch_boundary_crossings",
             "alpha_sp_rad": processing_config.alpha_sp_rad,
-            "average_corrected_rig_angular_speed_rad_s": (
-                average_rig_angular_speed_rad_s
-            ),
-            "local_window_ms": local_window_ms,
         },
         "measured_effective_rates": source_rates,
         "motion_reference_effective_rate": {
@@ -622,7 +621,7 @@ def _run_motion_analysis(
             "electronics_hardware", {}
         ).get("encoder_setup", {}),
     }
-    return trajectory, local_window_ms, report
+    return trajectory, report
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -917,7 +916,7 @@ def _analyse_processing_configuration(
     _validate_registered_depth(run_directory)
     kinematics_config = KinematicsConfig.from_experiment_dict(experiment_config)
     bag_index = index_bag(run_directory / "rosbag")
-    trajectory, local_window_ms, report = _run_motion_analysis(
+    trajectory, report = _run_motion_analysis(
         bag_index,
         experiment_config,
         run_config,
@@ -945,9 +944,6 @@ def _analyse_processing_configuration(
             processing_config.telemetry_resample_hz / spectral_sample_count
         ),
     }
-    report["spectral_window_not_shorter_than_local_window"] = bool(
-        processing_config.spectral_window_ms >= local_window_ms
-    )
 
     rgb_times = np.asarray(
         [image.timestamp_ns for image in bag_index.rgb_images], dtype=np.int64
@@ -1050,7 +1046,6 @@ def _analyse_processing_configuration(
     report["configuration_valid"] = bool(
         forward_recording
         and not report["rate_limit_violations"]
-        and report["spectral_window_not_shorter_than_local_window"]
         and depth_pixel_counts
     )
     return report, preview
@@ -1120,7 +1115,7 @@ def isolate_packets(
     packets_directory.mkdir(parents=True)
 
     bag_index = index_bag(bag_directory)
-    trajectory, local_window_ms, analysis_report = _run_motion_analysis(
+    trajectory, analysis_report = _run_motion_analysis(
         bag_index,
         experiment_config,
         run_config,
@@ -1154,14 +1149,6 @@ def isolate_packets(
             "telemetry_resample_hz exceeds the measured effective source "
             f"rate (including tolerance) for: {names}. See {analysis_report_path}"
         )
-    if processing_config.spectral_window_ms < local_window_ms:
-        analysis_report["status"] = "failed_window_validation"
-        _write_json(analysis_report_path, analysis_report)
-        raise ValueError(
-            "spectral_window_ms is shorter than the calculated local window: "
-            f"{local_window_ms:.3f} ms. See {analysis_report_path}"
-        )
-
     try:
         pitch_trajectory = _estimate_run_pitch(
             bag_index, experiment_config, kinematics_config, processing_config
@@ -1226,9 +1213,10 @@ def isolate_packets(
 
     manifest_records = []
     image_requests = {}
-    last_saved_image_time_ns = None
-    minimum_packet_spacing_ns = int(round(
-        1_000_000_000.0 / processing_config.maximum_packet_saving_frequency_hz
+    last_saved_patch_centre_motion_rad = None
+    half_patch_spread_rad = processing_config.alpha_sp_rad / 2.0
+    half_spectral_window_ns = int(round(
+        processing_config.spectral_window_ms * 500_000.0
     ))
     maximum_gap_ns = int(round(
         processing_config.maximum_interpolation_gap_ms * 1_000_000.0
@@ -1255,25 +1243,27 @@ def isolate_packets(
         if pair.image_time_ns > trajectory.end_time_ns:
             reject(pair, "image_after_corrected_run_end")
             continue
-        if (
-            last_saved_image_time_ns is not None
-            and pair.image_time_ns - last_saved_image_time_ns
-            < minimum_packet_spacing_ns
-        ):
-            reject(pair, "maximum_packet_saving_frequency")
-            continue
-
         try:
             theta_y_image_motion_rad = trajectory.theta_y_at(
                 pair.image_time_ns
             )
-            theta_y_rgb_motion_rad = trajectory.theta_y_at(pair.rgb_time_ns)
-            theta_y_depth_motion_rad = trajectory.theta_y_at(
-                pair.depth_time_ns
-            )
             patch_centre_motion_angle_rad = (
                 theta_y_image_motion_rad
                 + trajectory.travel_direction * processing_config.alpha_off_rad
+            )
+            if (
+                last_saved_patch_centre_motion_rad is not None
+                and trajectory.travel_direction * (
+                    patch_centre_motion_angle_rad
+                    - last_saved_patch_centre_motion_rad
+                ) < processing_config.alpha_sp_rad
+            ):
+                reject(pair, "patch_overlaps_previous_packet")
+                continue
+
+            theta_y_rgb_motion_rad = trajectory.theta_y_at(pair.rgb_time_ns)
+            theta_y_depth_motion_rad = trajectory.theta_y_at(
+                pair.depth_time_ns
             )
             # Contact timing stays in the encoder-motion convention. Spatial
             # projection uses the opposite-handed notebook/base convention.
@@ -1308,6 +1298,15 @@ def isolate_packets(
                     processing_config.alpha_off_rad,
                 )
             )
+            local_start_ns, _ = trajectory.crossing_time(
+                patch_centre_motion_angle_rad
+                - trajectory.travel_direction * half_patch_spread_rad
+            )
+            local_end_ns, _ = trajectory.crossing_time(
+                patch_centre_motion_angle_rad
+                + trajectory.travel_direction * half_patch_spread_rad
+            )
+            local_window_ms = (local_end_ns - local_start_ns) * 1e-6
 
             rgb_metadata = bag_index.rgb_images[pair.rgb_index]
             depth_metadata = bag_index.depth_images[pair.depth_index]
@@ -1378,19 +1377,13 @@ def isolate_packets(
             if not np.any(depth_mask):
                 raise ValueError("depth_patch_mask_is_empty")
 
-            half_local_window_ns = int(round(local_window_ms * 500_000.0))
-            local_start_ns = contact_time_ns - half_local_window_ns
-            local_end_ns = contact_time_ns + half_local_window_ns
-            if (
-                local_start_ns < trajectory.start_time_ns
-                or local_end_ns > trajectory.end_time_ns
-            ):
-                raise ValueError("local_window_outside_corrected_run")
             if not _window_has_complete_timestamp_coverage(
                 bag_index,
                 local_start_ns,
                 local_end_ns,
                 maximum_gap_ns,
+                trajectory.start_time_ns,
+                trajectory.end_time_ns,
             ):
                 raise ValueError("local_window_has_incomplete_telemetry_coverage")
 
@@ -1398,7 +1391,8 @@ def isolate_packets(
                 _resample_all_streams(
                     bag_index,
                     contact_time_ns,
-                    local_window_ms,
+                    local_start_ns,
+                    local_end_ns,
                     processing_config,
                     trajectory.start_time_ns,
                     trajectory.end_time_ns,
@@ -1408,7 +1402,8 @@ def isolate_packets(
                 _resample_all_streams(
                     bag_index,
                     contact_time_ns,
-                    processing_config.spectral_window_ms,
+                    contact_time_ns - half_spectral_window_ns,
+                    contact_time_ns + half_spectral_window_ns,
                     processing_config,
                     trajectory.start_time_ns,
                     trajectory.end_time_ns,
@@ -1491,6 +1486,8 @@ def isolate_packets(
             "patch_spread_rad": processing_config.alpha_sp_rad,
             "alpha_off_rad": processing_config.alpha_off_rad,
             "local_window_ms": local_window_ms,
+            "local_start_time_ns": local_start_ns,
+            "local_end_time_ns": local_end_ns,
             "knee_joint_rgb_rad": knee_joint_rgb,
             "knee_joint_depth_rad": knee_joint_depth,
             "theta_p_rgb_rad": theta_p_rgb,
@@ -1566,7 +1563,7 @@ def isolate_packets(
                 "packet_path": str(packet_directory.relative_to(output_directory)),
             }
         )
-        last_saved_image_time_ns = pair.image_time_ns
+        last_saved_patch_centre_motion_rad = patch_centre_motion_angle_rad
 
     found_images = extract_selected_images(bag_directory, image_requests)
     missing_images = set(image_requests) - found_images
@@ -1650,7 +1647,10 @@ def extract_features(
     provenance_path = dataset_directory / "provenance.json"
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
     if processing_config is None:
-        processing_config = ProcessingConfig(**provenance["processing_config"])
+        processing_config = ProcessingConfig(**{
+            name: value for name, value in provenance["processing_config"].items()
+            if name not in LEGACY_CONFIG_FIELDS
+        })
         processing_config.validate()
 
     feature_records = []

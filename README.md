@@ -810,9 +810,9 @@ package; it is not a runtime dependency of the viewer.
 
 Learning packet generation is strictly offline. It determines the steady-torque run,
 constructs continuous encoder-corrected `theta_y(t)`, isolates a configured
-physical terrain patch, finds its future wheel-contact time, and attaches a
-calculated local telemetry window plus a fixed spectral window. Stage 2 saves
-RGB/depth crops, the complete 3D point map, a robust fitted plane, signed
+physical terrain patch without overlapping the previous saved patch, and
+attaches local telemetry from wheel entry to exit plus a fixed spectral window.
+Stage 2 saves RGB/depth crops, the complete 3D point map, a robust fitted plane, signed
 along/radial slopes, and spectra for 15 motor and IMU telemetry channels.
 Encoder motion is converted through the experiment's
 `theta_y_kinematic_sign` before any spatial projection. Recordings moving away
@@ -904,7 +904,6 @@ spectral_window_ms: 1000.0
 telemetry_resample_hz: 100.0
 maximum_interpolation_gap_ms: 50.0
 maximum_pitch_uncertainty_deg: 1.0
-maximum_packet_saving_frequency_hz: 10.0
 alpha_off_rad: 0.35
 alpha_sp_rad: 0.10
 grouser_effective_height_m: 0.0
@@ -918,10 +917,17 @@ plane_inlier_threshold_m: 0.005
 minimum_spectral_valid_fraction: 0.8
 ```
 
-The local window is no longer a fixed configuration value. It is calculated
-once per run from `alpha_sp_rad` and the average encoder-corrected rig angular
-speed, so measured slip is included. It can therefore have a different length
-in different runs.
+Packets are selected by angular coverage: their centres must advance by at
+least `alpha_sp_rad`, so patches never overlap and small gaps are possible.
+Older configuration files may contain `maximum_packet_saving_frequency_hz`;
+this retired setting is accepted and ignored.
+
+Each local telemetry window starts and ends at the corrected `theta_y(t)`
+crossings of that patch's entry and exit boundaries. Its duration and sample
+count can vary between packets, including within one run. Samples include both
+exact endpoints and are timed relative to patch-centre contact, which need not
+be halfway through the local window. The fixed FFT window remains centred on
+contact and may overlap other packets' FFT windows.
 
 `alpha_off_rad` is a positive distance ahead; the measured travel direction is
 applied automatically in encoder-motion coordinates. The selected angle is

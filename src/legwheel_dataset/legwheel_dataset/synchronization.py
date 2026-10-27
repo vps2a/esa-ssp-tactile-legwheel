@@ -97,14 +97,16 @@ def resample_channels(
     source_times_ns: IntArray,
     source_values: FloatArray,
     centre_time_ns: int,
-    window_ms: float,
+    start_time_ns: int,
+    end_time_ns: int,
     rate_hz: float,
     maximum_gap_ms: float,
 ) -> tuple[FloatArray, NDArray[np.bool_], IntArray]:
-    """Resample telemetry onto a fixed relative-time grid.
+    """Resample between exact endpoints, with times relative to the centre.
 
     Each output cell has a validity mask. Interpolation across a source gap
-    larger than maximum_gap_ms is intentionally left invalid.
+    larger than maximum_gap_ms is intentionally left invalid. The centre need
+    not be the midpoint of the window.
     """
     source_times_ns = np.asarray(source_times_ns, dtype=np.int64)
     source_values = np.asarray(source_values, dtype=float)
@@ -115,10 +117,16 @@ def resample_channels(
     if np.any(np.diff(source_times_ns) <= 0):
         raise ValueError("Telemetry timestamps must be strictly increasing.")
 
-    sample_count = max(2, int(round(window_ms * rate_hz / 1000.0)) + 1)
-    half_window_ns = int(round(window_ms * 1_000_000.0 / 2.0))
+    duration_ns = int(end_time_ns) - int(start_time_ns)
+    if duration_ns <= 0:
+        raise ValueError("Telemetry window end must be after its start.")
+    sample_count = max(2, int(round(duration_ns * rate_hz / 1_000_000_000.0)) + 1)
     relative_times_ns = np.rint(
-        np.linspace(-half_window_ns, half_window_ns, sample_count)
+        np.linspace(
+            int(start_time_ns) - int(centre_time_ns),
+            int(end_time_ns) - int(centre_time_ns),
+            sample_count,
+        )
     ).astype(np.int64)
     target_times_ns = relative_times_ns + int(centre_time_ns)
     output = np.full((sample_count, source_values.shape[1]), np.nan)

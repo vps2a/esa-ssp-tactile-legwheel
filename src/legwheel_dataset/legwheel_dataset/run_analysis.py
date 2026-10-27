@@ -181,44 +181,34 @@ class CorrectedThetaTrajectory:
             raise ValueError("alpha_off_rad_must_be_positive")
         image_theta = self.theta_y_at(image_time_ns)
         target_theta = image_theta + self.travel_direction * ahead_offset_rad
+        if (
+            self.travel_direction * target_theta
+            > self.travel_direction * self.theta_y_at_ticks_rad[-1]
+        ):
+            raise ValueError("patch_not_reached_before_corrected_run_end")
+        return self.crossing_time(target_theta)
 
-        interval = int(
-            np.searchsorted(self.tick_times_ns, image_time_ns, side="right")
-        ) - 1
-        interval = max(0, interval)
-        lower_time = int(image_time_ns)
-        for index in range(interval, self.correction_factors.size):
-            upper_time = int(self.tick_times_ns[index + 1])
-            upper_theta = float(self.theta_y_at_ticks_rad[index + 1])
-            crossed = (
-                upper_theta >= target_theta
-                if self.travel_direction > 0.0
-                else upper_theta <= target_theta
-            )
-            if crossed:
-                # theta_y is continuous within an interval. Bisection avoids
-                # quantising the contact time to encoder or wheel timestamps.
-                low = lower_time
-                high = upper_time
-                for _ in range(60):
-                    if high - low <= 1:
-                        break
-                    middle = (low + high) // 2
-                    middle_theta = self.theta_y_at(middle)
-                    before = (
-                        middle_theta < target_theta
-                        if self.travel_direction > 0.0
-                        else middle_theta > target_theta
-                    )
-                    if before:
-                        low = middle
-                    else:
-                        high = middle
-                crossing_time = high
-                residual = self.theta_y_at(crossing_time) - target_theta
-                return crossing_time, float(residual)
-            lower_time = upper_time
-        raise ValueError("patch_not_reached_before_corrected_run_end")
+    def crossing_time(self, target_theta: float) -> tuple[int, float]:
+        """Invert corrected theta_y for a patch boundary or centre angle."""
+        directed_angles = self.travel_direction * self.theta_y_at_ticks_rad
+        directed_target = self.travel_direction * target_theta
+        if not directed_angles[0] <= directed_target <= directed_angles[-1]:
+            raise ValueError("target_angle_outside_corrected_theta_range")
+        right = int(np.searchsorted(directed_angles, directed_target))
+        if right == 0:
+            return self.start_time_ns, 0.0
+
+        # Bisect the continuous trajectory within the enclosing encoder ticks,
+        # so crossing times are not snapped to encoder or telemetry samples.
+        low = int(self.tick_times_ns[right - 1])
+        high = int(self.tick_times_ns[right])
+        while high - low > 1:
+            middle = (low + high) // 2
+            if self.travel_direction * self.theta_y_at(middle) < directed_target:
+                low = middle
+            else:
+                high = middle
+        return high, float(self.theta_y_at(high) - target_theta)
 
 
 def _encoder_change_events(

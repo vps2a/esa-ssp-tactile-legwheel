@@ -40,17 +40,13 @@ FIELD_HELP = {
         "Diagnostic two-sigma uncertainty threshold for an IMU pitch estimate.",
         "It marks confidence only; uncertain frames and packets are still retained.",
     ),
-    "maximum_packet_saving_frequency_hz": (
-        "Maximum rate at which synchronized packets may be saved.",
-        "It limits near-duplicate packets; rejected candidates do not use a slot.",
-    ),
     "alpha_off_rad": (
         "Positive angular distance from the camera to the patch centre.",
         "The measured direction of travel is applied automatically.",
     ),
     "alpha_sp_rad": (
         "Full angular width of the selected terrain patch.",
-        "It controls patch size and the calculated local telemetry duration.",
+        "It sets minimum packet spacing and the local telemetry boundaries.",
     ),
     "grouser_effective_height_m": (
         "Effective grouser height added to wheel radius in metres.",

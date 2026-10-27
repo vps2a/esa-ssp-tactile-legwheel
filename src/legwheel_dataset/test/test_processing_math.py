@@ -653,7 +653,10 @@ class FeatureTest(unittest.TestCase):
                 plane_ransac_iterations=20,
             )
             (dataset / "provenance.json").write_text(
-                json.dumps({"processing_config": config.to_dict()}),
+                json.dumps({"processing_config": {
+                    **config.to_dict(),
+                    "maximum_packet_saving_frequency_hz": 10.0,
+                }}),
                 encoding="utf-8",
             )
             (dataset / "manifest.jsonl").write_text(
