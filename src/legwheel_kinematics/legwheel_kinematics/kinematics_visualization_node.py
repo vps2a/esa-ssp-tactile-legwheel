@@ -6,26 +6,29 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import Point, TransformStamped
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, qos_profile_sensor_data
+from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import JointState
 from std_msgs.msg import ColorRGBA
 from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 from visualization_msgs.msg import Marker, MarkerArray
 
 from legwheel_kinematics.config import KinematicsConfig
+from legwheel_kinematics.pose_history import (
+    KINEMATIC_STATE_TOPIC,
+    joint_state_pose,
+    stamp_ns,
+)
 from legwheel_kinematics.track import generate_track_points
 from legwheel_kinematics.transforms import (
     KINEMATIC_FRAME_IDS,
     frame_coordinates,
     rotation_matrix_to_quaternion,
-    theta_p_from_config,
     transformation_matrices_from_config,
 )
 
 
-LEG_STATE_TOPIC = "/legwheel/joint_states"
 VISUALIZATION_TOPIC = "/legwheel/visualization/kinematics_3d"
-KNEE_JOINT_NAME = "knee_joint"
 
 
 def _point(values) -> Point:
@@ -65,6 +68,7 @@ class KinematicsVisualizationNode(Node):
         super().__init__("kinematics_visualization")
         self.declare_parameter("experiment_config", "")
         self.declare_parameter("track_point_count", 360)
+        self.declare_parameter("publish_tf", True)
 
         config_path = self.get_parameter("experiment_config").value
         if not config_path:
@@ -76,7 +80,10 @@ class KinematicsVisualizationNode(Node):
             self._config,
             int(self.get_parameter("track_point_count").value),
         )
-        self._missing_knee_logged = False
+        self._invalid_state_logged = False
+        self._publish_tf = bool(self.get_parameter("publish_tf").value)
+        self._using_sim_time = bool(self.get_parameter("use_sim_time").value)
+        self._last_clock_ns = None
 
         self._transform_broadcaster = TransformBroadcaster(self)
         self._static_transform_broadcaster = StaticTransformBroadcaster(self)
@@ -87,27 +94,33 @@ class KinematicsVisualizationNode(Node):
         )
         self.create_subscription(
             JointState,
-            LEG_STATE_TOPIC,
-            self._leg_state_callback,
+            KINEMATIC_STATE_TOPIC,
+            self._kinematic_state_callback,
+            QoSProfile(depth=200),
+        )
+        self.create_subscription(
+            Clock,
+            "/clock",
+            self._clock_callback,
             qos_profile_sensor_data,
         )
 
-        self._publish_static_transforms()
+        if self._publish_tf:
+            self._publish_static_transforms()
         self.get_logger().info(
-            "Replay visualization initialized: publishing TF and 3D track points."
+            "Replay visualization is waiting for reliable IMU poses on "
+            f"{KINEMATIC_STATE_TOPIC}. Start kinematic_joint_state_node when "
+            "running this visualizer directly."
         )
 
     def _publish_static_transforms(self) -> None:
-        """Publish the four transforms which do not depend on theta_p."""
-        T01, _, T23, T34, T45 = transformation_matrices_from_config(
+        """Publish only the three fixed beam-end and camera mounting transforms."""
+        _, _, T23, T34, T45 = transformation_matrices_from_config(
             self._config,
             theta_p=0.0,
         )
         stamp = self.get_clock().now().to_msg()
         transforms = [
-            _transform_message(
-                KINEMATIC_FRAME_IDS[0], KINEMATIC_FRAME_IDS[1], T01, stamp
-            ),
             _transform_message(
                 KINEMATIC_FRAME_IDS[2], KINEMATIC_FRAME_IDS[3], T23, stamp
             ),
@@ -120,34 +133,59 @@ class KinematicsVisualizationNode(Node):
         ]
         self._static_transform_broadcaster.sendTransform(transforms)
 
-    def _leg_state_callback(self, message: JointState) -> None:
-        """Publish geometry at the timestamp of each recorded knee state."""
+    def _clock_callback(self, message: Clock) -> None:
+        """Track the current playback epoch independently of delayed pose stamps."""
+        if self._using_sim_time:
+            self._last_clock_ns = stamp_ns(message.clock)
+
+    def _kinematic_state_callback(self, message: JointState) -> None:
+        """Publish measured yaw and IMU pitch at the original sensor timestamp."""
+        if (
+            self._last_clock_ns is not None
+            and stamp_ns(message.header.stamp) > self._last_clock_ns + 1_000_000_000
+        ):
+            # A deep DDS queue can still contain poses from before a rewind.
+            # Do not republish those future-epoch transforms after the seek.
+            return
+        # Empty derived states mark rejected IMU samples. Do not turn them into
+        # either a knee-based pose or an invalid TF transform.
+        if not message.name and not message.position:
+            return
         try:
-            knee_index = list(message.name).index(KNEE_JOINT_NAME)
-            knee_joint = float(message.position[knee_index])
-            theta_p = theta_p_from_config(knee_joint, self._config)
-        except (ValueError, IndexError) as error:
-            if not self._missing_knee_logged:
-                self.get_logger().error(
-                    f"Cannot publish replay visualization: {error}"
-                )
-                self._missing_knee_logged = True
+            theta_y, theta_p = joint_state_pose(message)
+        except ValueError as error:
+            if not self._invalid_state_logged:
+                self.get_logger().error(f"Cannot publish replay visualization: {error}")
+                self._invalid_state_logged = True
             return
 
-        _, T12, _, _, _ = transformation_matrices_from_config(
+        T01, T12, _, _, _ = transformation_matrices_from_config(
             self._config,
             theta_p,
+            theta_y=theta_y,
         )
-        self._transform_broadcaster.sendTransform(
-            _transform_message(
-                KINEMATIC_FRAME_IDS[1],
-                KINEMATIC_FRAME_IDS[2],
-                T12,
-                message.header.stamp,
+        # Yaw now comes from the central encoder, so both pivot transforms
+        # are dynamic. Publishing T01 as static would rotate the markers but
+        # leave downstream TF consumers at the old, zero-yaw camera pose.
+        if self._publish_tf:
+            self._transform_broadcaster.sendTransform(
+                [
+                    _transform_message(
+                        KINEMATIC_FRAME_IDS[0],
+                        KINEMATIC_FRAME_IDS[1],
+                        T01,
+                        message.header.stamp,
+                    ),
+                    _transform_message(
+                        KINEMATIC_FRAME_IDS[1],
+                        KINEMATIC_FRAME_IDS[2],
+                        T12,
+                        message.header.stamp,
+                    ),
+                ]
             )
-        )
 
-        Frame_coords = frame_coordinates(self._config, theta_p)
+        Frame_coords = frame_coordinates(self._config, theta_p, theta_y=theta_y)
         self._marker_publisher.publish(
             self._make_marker_array(Frame_coords, message.header.stamp)
         )
@@ -155,22 +193,24 @@ class KinematicsVisualizationNode(Node):
     def _make_marker_array(self, Frame_coords, stamp) -> MarkerArray:
         """Create track-point, frame-origin and kinematic-chain markers."""
         markers = MarkerArray()
-        markers.markers.extend([
-            self._track_marker(
-                marker_id=0,
-                name="inner_track_points",
-                points=self._track_points.inner_track_points,
-                color=_color(0.1, 0.8, 1.0),
-                stamp=stamp,
-            ),
-            self._track_marker(
-                marker_id=1,
-                name="outer_track_points",
-                points=self._track_points.outer_track_points,
-                color=_color(1.0, 0.5, 0.1),
-                stamp=stamp,
-            ),
-        ])
+        markers.markers.extend(
+            [
+                self._track_marker(
+                    marker_id=0,
+                    name="inner_track_points",
+                    points=self._track_points.inner_track_points,
+                    color=_color(0.1, 0.8, 1.0),
+                    stamp=stamp,
+                ),
+                self._track_marker(
+                    marker_id=1,
+                    name="outer_track_points",
+                    points=self._track_points.outer_track_points,
+                    color=_color(1.0, 0.5, 0.1),
+                    stamp=stamp,
+                ),
+            ]
+        )
 
         origins = np.vstack([matrix[:3, 3] for matrix in Frame_coords])
         origin_marker = self._base_marker(2, "frame_origins", stamp)

@@ -1,10 +1,33 @@
 import math
 import unittest
 
-from legwheel_dataset.frame_playback import FramePose, interpolate_frame_pose
+from legwheel_dataset.frame_playback import (
+    FramePose,
+    interpolate_frame_pose,
+    require_imu_pitch_dataset,
+)
 
 
 class TestFramePlayback(unittest.TestCase):
+    def test_legacy_or_mixed_pose_sources_require_regeneration(self):
+        for provenance, metadata in (
+            ({}, None),
+            ({"pitch_estimator_version": True}, None),
+            ({"pitch_estimator_version": 0}, None),
+            ({"pitch_estimator_version": 1}, {}),
+            ({"pitch_estimator_version": 2}, {"theta_p_source": "knee_geometry"}),
+        ):
+            with self.subTest(provenance=provenance, metadata=metadata):
+                with self.assertRaisesRegex(ValueError, "Regenerate"):
+                    require_imu_pitch_dataset(provenance, metadata)
+
+    def test_saved_imu_packets_from_either_estimator_version_are_accepted(self):
+        for version in (1, 2):
+            require_imu_pitch_dataset(
+                {"pitch_estimator_version": version},
+                {"theta_p_source": "camera_imu"},
+            )
+
     def test_empty_and_outside_packet_range_have_no_pose(self):
         poses = [FramePose(100, 1.0, -0.1), FramePose(200, 2.0, -0.2)]
 

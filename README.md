@@ -426,7 +426,7 @@ Two packages keep analysis code out of the motor-control and recording process:
 | Package | Purpose |
 | --- | --- |
 | `legwheel_description` | Optional URDF representation of the notebook frame chain. |
-| `legwheel_kinematics` | Loads experiment geometry, derives `theta_p` from `knee_joint`, publishes replay-time TF and 3D track points, and projects the circular track into camera images. |
+| `legwheel_kinematics` | Estimates `theta_p` from camera IMU data, publishes measured-yaw/inertial-pitch TF and 3D track points, and projects the circular track into camera images. |
 | `legwheel_dataset` | Reads MCAP directly, isolates synchronized packets, extracts RGB/depth patches, fits terrain planes, and calculates telemetry spectra. |
 
 The experiment YAML must include the geometry shown in the example experiment
@@ -455,18 +455,35 @@ publishers after updating code and configuration.
 
 The wheel sits inward from the beam end: its outer track radius is
 `beam_radius_m`, its inner radius is `beam_radius_m - wheel_width_m`, and its
-centreline radius is `beam_radius_m - wheel_width_m / 2`. The knee-derived beam
-pitch uses the vertical displacement divided by `beam_radius_m` inside the
-arcsine, retaining the measured negative sign convention.
+centreline radius is `beam_radius_m - wheel_width_m / 2`.
 
-Offline dataset analysis and `visualise_run` instead estimate `theta_p` from
-the recorded camera IMU, with gyro bias estimation, circular-acceleration
-compensation and offline smoothing. The full camera rotation compensates
-`camera_front_angle_deg` when interpreting IMU vectors. Unreliable image-time
-poses are rejected; knee angle remains telemetry. See the
+All visualizers and offline analysis estimate `theta_p` from the camera IMU,
+with gyro bias estimation, circular-acceleration compensation and smoothing.
+The full camera rotation compensates `camera_front_angle_deg` when interpreting
+IMU vectors. Unreliable image-time poses are rejected; knee angle remains
+telemetry and is never a pitch fallback. See the
 [offline IMU pitch documentation](src/legwheel_dataset/README.md#offline-beam-pitch-from-the-camera-imu)
-for confidence limits and recording recommendations. Live kinematics publishers
-continue to use the knee-derived angle.
+for confidence limits and recording recommendations.
+
+The standalone 3D view, image overlays and URDF share
+`/legwheel/kinematic_joint_states`, produced by `kinematic_joint_state_node`.
+Each launch starts this shared publisher by default. It requires the combined
+camera IMU and `/rotation_encoder/joint_state`; the central encoder supplies yaw
+and circular-acceleration correction. Use `imu_topic:=/camera/imu` for legacy
+recordings. The source uses a bounded ten-second window and preserves detected
+rest calibration as that window advances. A steady-clock timer runs at 5 Hz;
+native IMU poses are published with their original timestamps and a 0.6-second
+lookahead delay. No estimate is extrapolated into the unavailable end of a
+stream. Dataset processing and `visualise_run` use the complete recording.
+
+When several standalone views run together, launch only one pose publisher:
+set `publish_kinematic_state:=false` on additional overlay/3D launches. If the
+URDF already publishes the frame tree, also set `publish_tf:=false` on the 3D
+marker launch. Image overlays hold only a bounded queue of image headers while
+waiting for a supported acquisition-time pose. Rejected samples are explicit
+barriers, so an annotation cannot interpolate through an impact. Bag seeks
+reset the streaming histories and their calibration. Old derived datasets
+without IMU pitch provenance must be regenerated before `visualise_stream`.
 
 After a kinematics change, regenerate derived packets before inspecting dataset
 overlays: those overlays contain saved pixel coordinates. The kinematics model
@@ -488,6 +505,7 @@ ros2 launch legwheel_kinematics track_overlay.launch.py \
 ```bash
 ros2 launch legwheel_kinematics kinematics_visualization.launch.py \
   use_sim_time:=true \
+  publish_kinematic_state:=false \
   experiment_config:=/path/to/run_1/experiment_config_run_1_snapshot.yaml
 ```
 
@@ -501,25 +519,20 @@ RGB or depth image and add the corresponding annotation topic:
 - `/legwheel/visualization/rgb_track`
 - `/legwheel/visualization/depth_track`
 
-The marker has the exact image timestamp. The overlay uses the latest available
-named `knee_joint` state and the same numerical projection library as offline
-processing.
+The marker has the exact image timestamp. The overlay waits for IMU poses
+bracketing that acquisition time and uses the same numerical projection library
+as offline processing. Images without a supported pose have no annotation.
 
 For the 3D view, add a **3D** panel, set its display frame to
 `legwheel_base`, enable `/legwheel/visualization/kinematics_3d`, and enable the
 transform frames and labels. The marker topic contains the inner and outer
 circular track points, the six notebook frame origins, and a line joining the
-kinematic chain. The same replay-only node publishes the fixed transforms on
-`/tf_static` and recalculates the `theta_p` transform on `/tf` for every
-recorded `knee_joint` sample. The markers and moving transform use that sample's
-original header timestamp, so seeking and playback speed changes remain
-aligned.
-
-Do not launch `legwheel_description description.launch.py` at the same time as
-`kinematics_visualization.launch.py`: both publish the same frame names and
-would create competing TF authorities. The direct kinematics visualization
-launch is preferred for rosbag post-processing and does not require TF to have
-been recorded in the raw bag.
+kinematic chain. The node publishes the three camera/beam mounting transforms
+on `/tf_static` and both measured yaw and IMU pitch on `/tf`. Markers and moving
+transforms use the shared pose's original sensor timestamp. The direct launch
+does not require TF to have been recorded in the raw bag. To add these markers
+to an existing robot description, pass `publish_kinematic_state:=false
+publish_tf:=false`; the URDF remains the sole frame-tree publisher.
 
 ### Accumulated RGB-D and tracks in Foxglove 3D
 

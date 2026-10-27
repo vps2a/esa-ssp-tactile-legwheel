@@ -31,7 +31,7 @@ from legwheel_dataset.images import (
     masked_crop,
     polygon_mask,
 )
-from legwheel_dataset.imu_pitch import (
+from legwheel_kinematics.imu_pitch import (
     PITCH_ESTIMATOR_VERSION,
     PitchTrajectory,
     estimate_pitch,

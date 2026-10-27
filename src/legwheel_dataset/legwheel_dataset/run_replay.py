@@ -22,7 +22,7 @@ from legwheel_dataset.bag_reader import (
     message_stamp_ns,
 )
 from legwheel_dataset.images import decode_image, depth_point_map_in_base
-from legwheel_dataset.imu_pitch import PitchTrajectory, estimate_pitch
+from legwheel_kinematics.imu_pitch import PitchTrajectory, estimate_pitch
 from legwheel_kinematics.config import KinematicsConfig
 from legwheel_kinematics.projection import CameraCalibration, project_camera_points
 from legwheel_kinematics.transforms import frame_coordinates
@@ -339,9 +339,9 @@ class RecordedRun:
         if not imu:
             raise ValueError("The recorded camera IMU topic contains no measurements.")
         encoder_times, encoder_angles = _series(encoder, "central-encoder")
-        # Unwrap before interpolation/differentiation, and apply the experiment's
-        # encoder sign once. Both yaw and circular acceleration use this series.
-        encoder_angles = np.unwrap(encoder_angles)
+        # The central encoder publishes continuous count-derived angles. Keep
+        # full turns even across a dropout; shortest-path unwrapping would lose
+        # real revolutions. Apply the configured sign once for both consumers.
         encoder_angles = geometry.theta_y_kinematic_sign * (
             encoder_angles - encoder_angles[0]
         )

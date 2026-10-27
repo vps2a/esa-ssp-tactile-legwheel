@@ -174,8 +174,11 @@ pixel coordinates are saved during packet isolation.
 Dataset analysis, packet generation and the raw-run 3D viewer estimate
 `theta_p` from the recorded camera accelerometer and gyroscope. Knee angle
 remains diagnostic/ML telemetry and is never a fallback for an unavailable
-inertial pose. Existing live kinematics publishers retain their knee-based
-calculation.
+inertial pose. Live/bag-stream kinematics publishers use the same shared
+estimator in `legwheel_kinematics`; knee geometry is not a pitch source in any
+visualizer. Datasets saved before IMU pitch was introduced must be regenerated:
+`visualise_stream` refuses their old poses and overlays rather than presenting
+them as current inertial results.
 
 The estimator rotates the Gemini 336's nominal optical-axis IMU measurements
 into the beam frame using the existing camera transform. This includes

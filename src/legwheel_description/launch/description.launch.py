@@ -18,9 +18,11 @@ def _launch_nodes(context):
     use_sim_time = LaunchConfiguration("use_sim_time").perform(context).lower()
     use_sim_time = use_sim_time in ("true", "1", "yes")
     config = KinematicsConfig.from_yaml(config_path)
-    xacro_path = Path(
-        get_package_share_directory("legwheel_description")
-    ) / "urdf" / "legwheel.urdf.xacro"
+    xacro_path = (
+        Path(get_package_share_directory("legwheel_description"))
+        / "urdf"
+        / "legwheel.urdf.xacro"
+    )
     robot_description = xacro.process_file(
         str(xacro_path),
         mappings={
@@ -37,18 +39,30 @@ def _launch_nodes(context):
         Node(
             package="legwheel_kinematics",
             executable="kinematic_joint_state_node",
-            parameters=[{
-                "experiment_config": str(config_path),
-                "use_sim_time": use_sim_time,
-            }],
+            parameters=[
+                {
+                    "experiment_config": str(config_path),
+                    "use_sim_time": use_sim_time,
+                    "imu_topic": LaunchConfiguration("imu_topic").perform(context),
+                    "encoder_topic": LaunchConfiguration("encoder_topic").perform(
+                        context
+                    ),
+                }
+            ],
         ),
         Node(
             package="robot_state_publisher",
             executable="robot_state_publisher",
-            parameters=[{
-                "robot_description": robot_description,
-                "use_sim_time": use_sim_time,
-            }],
+            parameters=[
+                {
+                    "robot_description": robot_description,
+                    "use_sim_time": use_sim_time,
+                    # The shared source already orders and validates each pose.
+                    # Accept its delayed acquisition stamps, including after a
+                    # playback rewind, instead of throttling on an old timestamp.
+                    "ignore_timestamp": True,
+                }
+            ],
             remappings=[
                 ("/joint_states", "/legwheel/kinematic_joint_states"),
             ],
@@ -57,15 +71,27 @@ def _launch_nodes(context):
 
 
 def generate_launch_description():
-    return LaunchDescription([
-        DeclareLaunchArgument(
-            "experiment_config",
-            description="Absolute path to the experiment YAML configuration.",
-        ),
-        DeclareLaunchArgument(
-            "use_sim_time",
-            default_value="false",
-            description="Set true while replaying a rosbag with --clock.",
-        ),
-        OpaqueFunction(function=_launch_nodes),
-    ])
+    return LaunchDescription(
+        [
+            DeclareLaunchArgument(
+                "experiment_config",
+                description="Absolute path to the experiment YAML configuration.",
+            ),
+            DeclareLaunchArgument(
+                "use_sim_time",
+                default_value="false",
+                description="Set true while replaying a rosbag with --clock.",
+            ),
+            DeclareLaunchArgument(
+                "imu_topic",
+                default_value="/legwheel_rgbd/gyro_accel/sample",
+                description="Combined camera IMU; use /camera/imu for legacy recordings.",
+            ),
+            DeclareLaunchArgument(
+                "encoder_topic",
+                default_value="/rotation_encoder/joint_state",
+                description="Central encoder JointState used for yaw and acceleration correction.",
+            ),
+            OpaqueFunction(function=_launch_nodes),
+        ]
+    )

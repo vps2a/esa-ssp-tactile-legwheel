@@ -6,8 +6,8 @@ import unittest
 from dataclasses import replace
 
 import numpy as np
-from legwheel_dataset.imu_pitch import GRAVITY_M_S2, estimate_pitch
 from legwheel_kinematics.config import KinematicsConfig
+from legwheel_kinematics.imu_pitch import GRAVITY_M_S2, estimate_pitch
 
 
 def _geometry(camera_angle_deg=40.0):
@@ -188,6 +188,85 @@ class ImuPitchTest(unittest.TestCase):
         self.assertAlmostEqual(
             trajectory.sample(2_000_000_000), pitch[200], delta=math.radians(0.1)
         )
+
+    def test_gravity_initialization_accepts_pitch_change_explained_by_the_gyro(self):
+        seconds = np.arange(0.0, 2.01, 0.01)
+        pitch = 0.1 + math.radians(15.0) * seconds
+        yaw = -0.6 * seconds
+        geometry = _geometry(-28.0)
+        timestamps, gyro, acceleration = _simulate(seconds, pitch, yaw, geometry)
+        trajectory = estimate_pitch(
+            timestamps, gyro, acceleration, timestamps, yaw, geometry
+        )
+        self.assertEqual(trajectory.report["stationary_calibration_samples"], 0)
+        self.assertAlmostEqual(
+            trajectory.sample(600_000_000), pitch[60], delta=math.radians(0.5)
+        )
+        self.assertAlmostEqual(
+            trajectory.sample(1_800_000_000), pitch[180], delta=math.radians(0.5)
+        )
+
+    def test_previous_stationary_bias_is_used_only_without_new_recorded_rest(self):
+        seconds = np.arange(0.0, 2.01, 0.01)
+        bias = math.radians(1.0)
+        geometry = _geometry()
+        yaw = -0.6 * seconds
+        timestamps, gyro, acceleration = _simulate(
+            seconds, 0.1, yaw, geometry, pitch_bias=bias
+        )
+        moving = estimate_pitch(
+            timestamps,
+            gyro,
+            acceleration,
+            timestamps,
+            yaw,
+            geometry,
+            initial_gyro_bias_rad_s=bias,
+            initial_gyro_bias_uncertainty_rad_s=math.radians(0.05),
+        )
+        self.assertEqual(
+            moving.report["gyro_bias_source"], "previous_stationary_calibration"
+        )
+        self.assertIsNone(moving.report["stationary_calibration_end_time_ns"])
+        self.assertAlmostEqual(
+            moving.sample(1_000_000_000), 0.1, delta=math.radians(0.03)
+        )
+
+        yaw = np.zeros_like(seconds)
+        timestamps, gyro, acceleration = _simulate(
+            seconds, 0.1, yaw, geometry, pitch_bias=bias
+        )
+        resting = estimate_pitch(
+            timestamps,
+            gyro,
+            acceleration,
+            timestamps,
+            yaw,
+            geometry,
+            initial_gyro_bias_rad_s=2.0 * bias,
+            initial_gyro_bias_uncertainty_rad_s=math.radians(0.05),
+        )
+        self.assertEqual(resting.report["gyro_bias_source"], "stationary_measurements")
+        self.assertIsNotNone(resting.report["stationary_calibration_end_time_ns"])
+        self.assertAlmostEqual(resting.report["initial_gyro_bias_rad_s"], bias)
+        for invalid_prior in (
+            {"initial_gyro_bias_rad_s": bias},
+            {"initial_gyro_bias_uncertainty_rad_s": 0.1},
+            {
+                "initial_gyro_bias_rad_s": bias,
+                "initial_gyro_bias_uncertainty_rad_s": 0.0,
+            },
+        ):
+            with self.assertRaises(ValueError):
+                estimate_pitch(
+                    timestamps,
+                    gyro,
+                    acceleration,
+                    timestamps,
+                    yaw,
+                    geometry,
+                    **invalid_prior,
+                )
 
     def test_gap_and_nonfinite_row_are_not_interpolated_or_smoothed_across(self):
         seconds = np.concatenate(
