@@ -16,6 +16,13 @@ from legwheel_experiments.schemas import (
 from legwheel_experiments.state_machine import ExperimentState
 
 
+ADDITIONAL_CONFIG_SNAPSHOTS = (
+    (Path("src/legwheel_can/config/motor_config.json"), "motor_config"),
+    (Path("src/legwheel_can/config/motor_ids.yaml"), "motor_ids"),
+    (Path("src/legwheel_can/config/motor_limits.yaml"), "motor_limits"),
+)
+
+
 class RunRecorder:
     """Create a run directory and preserve the validated configuration inputs."""
 
@@ -172,6 +179,11 @@ class RunRecorder:
                 "Camera driver config file does not exist: "
                 f"{camera_driver_config_path}"
             )
+        for source_path, _ in ADDITIONAL_CONFIG_SNAPSHOTS:
+            if not source_path.is_file():
+                raise FileNotFoundError(
+                    f"Configuration snapshot source does not exist: {source_path}"
+                )
 
         if target_directory.exists():
             if not overwrite_existing:
@@ -197,7 +209,10 @@ class RunRecorder:
         destination = (
             self.run_directory / f"experiment_config_run_{run_number}_snapshot.yaml"
         )
-        shutil.copy2(experiment_config_path, destination)
+        # Save the validated values held by the runner. The source file may
+        # have been edited since it was loaded at the start of the CLI.
+        with destination.open("w", encoding="utf-8") as file:
+            yaml.safe_dump(asdict(experiment_config), file, sort_keys=False)
 
         camera_topics_destination = (
             self.run_directory / f"camera_topics_run_{run_number}_snapshot.py"
@@ -214,6 +229,11 @@ class RunRecorder:
                 camera_driver_config_path,
                 camera_driver_config_destination,
             )
+        for source_path, snapshot_name in ADDITIONAL_CONFIG_SNAPSHOTS:
+            destination = self.run_directory / (
+                f"{snapshot_name}_run_{run_number}_snapshot{source_path.suffix}"
+            )
+            shutil.copy2(source_path, destination)
 
         #TODO: Full metadata needs to be created
         #Writing experiment metadata

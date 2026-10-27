@@ -13,6 +13,8 @@ from typing import Any
 
 import yaml
 
+from legwheel_encoder.config import EncoderConfig
+
 
 @dataclass(frozen=True)
 class ExperimentConfig:
@@ -181,6 +183,10 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         "rig_config.beam_radius_m",
     )
     require_positive_number(
+        config.rig_config.get("pivot_height_m"),
+        "rig_config.pivot_height_m",
+    )
+    require_positive_number(
         config.rig_config.get("beam_total_length_m"),
         "rig_config.beam_total_length_m",
     )
@@ -196,16 +202,16 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         config.wheel_config.get("wheel_radius_mm"),
         "wheel_config.wheel_radius_mm",
     )
-    wheel_width_mm = require_number(
+    wheel_width_mm = require_positive_number(
         config.wheel_config.get("wheel_width_mm"),
         "wheel_config.wheel_width_mm",
-        minimum=0.0,
     )
 
-    # The wheel centreline must remain inside the beam radius used by _wheel_control.
-    if wheel_width_mm >= 2.0 * beam_radius_m * 1000.0:
+    # The wheel sits inward from the beam end, leaving a positive inner radius.
+    if wheel_width_mm >= beam_radius_m * 1000.0:
         raise ValueError(
-            "wheel_config.wheel_width_mm must be smaller than the rig diameter."
+            "wheel_config.wheel_width_mm must be smaller than the beam radius "
+            "in millimetres."
         )
 
     encoder_setup = require_mapping(
@@ -213,9 +219,35 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
         "encoder_setup",
         "electronics_hardware.encoder_setup",
     )
-    require_positive_number(
-        encoder_setup.get("ticks_per_legwheel_revolution"),
-        "electronics_hardware.encoder_setup.ticks_per_legwheel_revolution",
+    EncoderConfig.from_setup(encoder_setup)
+
+    camera = require_mapping(
+        config.electronics_hardware,
+        "camera",
+        "electronics_hardware.camera",
+    )
+    camera_config = require_mapping(
+        camera,
+        "camera_config",
+        "electronics_hardware.camera.camera_config",
+    )
+    require_number(
+        camera_config.get("sensor_front_offset_m"),
+        "electronics_hardware.camera.camera_config.sensor_front_offset_m",
+    )
+    require_number(
+        camera_config.get("camera_beam_offset_m"),
+        "electronics_hardware.camera.camera_config.camera_beam_offset_m",
+    )
+    require_number(
+        camera_config.get("camera_height_m"),
+        "electronics_hardware.camera.camera_config.camera_height_m",
+    )
+    require_number(
+        camera_config.get("camera_front_angle_deg"),
+        "electronics_hardware.camera.camera_config.camera_front_angle_deg",
+        minimum=-180.0,
+        maximum=180.0,
     )
 
 
