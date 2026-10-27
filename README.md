@@ -416,6 +416,13 @@ requires RGB, depth, and IMU timestamps to advance before arming.
 Use `Ctrl-C` to abort. The runner sends zero wheel torque, disables motors, and
 attempts to finalise the rosbag in its cleanup path.
 
+After normal completion, once the leg has straightened, motors are disabled,
+and rosbag has stopped, the runner asks whether the run was valid and offers
+optional post-run notes. It saves `run_valid` as a boolean and `post_run_notes`
+as text in `run_config.yaml`, preserving the original `notes` and final run
+parameters. Aborted/interrupted runs skip these prompts. Until reviewed,
+`run_valid` is null; if notes are declined, `post_run_notes` is an empty string.
+
 Recordings preserve `/wheel/requested_torque` (the experiment's request),
 `/wheel/commanded_torque` (the final target successfully sent to the drive),
 and `/wheel/governor_state` (settings, integral contribution, limiting and fault

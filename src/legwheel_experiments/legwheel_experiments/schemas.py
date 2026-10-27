@@ -38,6 +38,9 @@ class RunConfig:
     leg_parameters: dict[str, float]
     wheel_parameters: dict[str, Any]
     notes: str = ""
+    # None means the operator has not reviewed this run, including aborted runs.
+    run_valid: bool | None = None
+    post_run_notes: str = ""
 
 
 # Top-level scalar values and YAML mappings must be checked differently.
@@ -266,6 +269,8 @@ def make_run_config(raw_config: dict[str, Any]) -> RunConfig:
             # Notes were added after the initial configuration format, so runs
             # constructed by older callers remain valid without them.
             notes=raw_config.get("notes", ""),
+            run_valid=raw_config.get("run_valid"),
+            post_run_notes=raw_config.get("post_run_notes", ""),
         )
     except KeyError as error:
         raise ValueError(
@@ -288,6 +293,10 @@ def validate_run_config(config: RunConfig) -> None:
         raise ValueError("wheel_parameters must be a mapping.")
     if not isinstance(config.notes, str):
         raise ValueError("notes must be text.")
+    if config.run_valid is not None and not isinstance(config.run_valid, bool):
+        raise ValueError("run_valid must be a boolean or null when not reviewed.")
+    if not isinstance(config.post_run_notes, str):
+        raise ValueError("post_run_notes must be text.")
 
     require_number(config.run_length_loops, "run_length_loops", minimum=0.0, maximum=2.0)
     require_number(

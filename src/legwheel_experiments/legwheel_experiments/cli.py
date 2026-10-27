@@ -1,12 +1,12 @@
+from __future__ import annotations
+
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import threading
-import rclpy
 import sys
 
 from pathlib import Path
-from rclpy.executors import SingleThreadedExecutor
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from legwheel_experiments.schemas import RunConfig, load_experiment_config, make_run_config, ExperimentConfig
 from legwheel_experiments.state_machine import ExperimentStateMachine, ExperimentState
@@ -16,10 +16,8 @@ from legwheel_experiments.wheel_control import (
     WheelControlDefaults, ask_float, collect_wheel_control_settings,
     load_wheel_control_defaults,
 )
-from legwheel_experiments.experiment_runner_node import (
-    ExperimentAbortedError,
-    ExperimentRunnerNode,
-)
+if TYPE_CHECKING:
+    from legwheel_experiments.experiment_runner_node import ExperimentRunnerNode
 
 #Helper functions
 
@@ -38,17 +36,32 @@ def parse_arguments() -> argparse.Namespace:
 
     return parser.parse_args()
 
-def ask_run_notes() -> str:
+def ask_run_notes(*, post_run: bool = False) -> str:
     """Optionally collect free-text notes to save with this run's configuration."""
     while True:
         choice = input(
+            "Do you want to add any post-run notes? (y/n): " if post_run else
             "Would you like to add notes to this run configuration? (y/n): "
         ).strip().lower()
         if choice == "y":
-            return input("Run notes: ").strip()
+            return input("Post-run notes: " if post_run else "Run notes: ").strip()
         if choice == "n":
             return ""
         print("Invalid input. Please enter 'y' or 'n'.")
+
+
+def record_post_run_feedback(recorder: RunRecorder, run_config: RunConfig) -> None:
+    """Save the operator's review without replacing the original run notes."""
+    while True:
+        answer = input("Was the run valid? (y/n): ").strip().lower()
+        if answer in {"y", "n"}:
+            break
+        print("Invalid input. Please enter 'y' or 'n'.")
+
+    # Persist validity first so Ctrl-C/EOF during notes cannot lose that answer.
+    run_config = replace(run_config, run_valid=answer == "y")
+    recorder.update_run_config(run_config)
+    recorder.update_run_config(replace(run_config, post_run_notes=ask_run_notes(post_run=True)))
 
 
 
@@ -244,6 +257,13 @@ def confirm_experiment_start() -> None:
         print('Run has not started. Type "START" exactly to continue.')
 
 def main():
+    # Terminal/configuration helpers remain testable without a ROS installation.
+    import rclpy
+    from rclpy.executors import SingleThreadedExecutor
+    from legwheel_experiments.experiment_runner_node import (
+        ExperimentAbortedError, ExperimentRunnerNode,
+    )
+
     print("=== LEGWHEEL EXPERIMENT RUNNER ===")
 
     arguments = parse_arguments()
@@ -312,6 +332,7 @@ def main():
     # Creating rosbag variables
     bag_recorder = None
     experiment_completed = False
+    recording_stopped = False
     failure_reason = None
 
     try:
@@ -407,7 +428,7 @@ def main():
         def spring_zero_position_callback(
             current_run_config: RunConfig,
         ) -> RunConfig:
-            nonlocal bag_recorder
+            nonlocal bag_recorder, run_config
 
             # Complete all interactive leg adjustments before starting the dataset
             # recording. The wheel torque remains zero throughout this process.
@@ -416,6 +437,9 @@ def main():
                 recorder,
                 current_run_config,
             )
+            # Keep the CLI's final configuration in sync with the saved adjustment
+            # so post-run feedback cannot restore the earlier spring-zero value.
+            run_config = updated_run_config
 
             # Do not start a high-bandwidth recording if a camera stream has already
             # failed while the operator was adjusting the leg.
@@ -469,6 +493,7 @@ def main():
         if bag_recorder is not None:
             try:
                 bag_recorder.stop()
+                recording_stopped = True
                 print("[ROSBAG] Rosbag recording stopped and finalized.")
             except Exception as error:
                 print(f"[ROSBAG] Failed to finalize rosbag: {error}")
@@ -490,6 +515,16 @@ def main():
 
         if rclpy.ok():
             rclpy.shutdown()
+
+    # A normal node return includes the leg-straightening sequence. Wait until
+    # recording and ROS cleanup finish before asking for the operator's review.
+    if experiment_completed and recording_stopped:
+        try:
+            record_post_run_feedback(recorder, run_config)
+        except (EOFError, KeyboardInterrupt):
+            print("\nPost-run feedback interrupted. Any saved answers have been retained.")
+        except OSError as error:
+            print(f"Could not save all post-run feedback: {error}")
 
 # ===== OLD DEBUGGING FUNCTIONS =====
 
