@@ -35,6 +35,7 @@ from legwheel_experiments.schemas import (
     validate_experiment_config,
     validate_run_config,
 )
+from legwheel_experiments.wheel_control import validate_wheel_parameter_readback
 from legwheel_experiments.stream_health import (
     AdvancingStampMonitor,
     message_stamp_nanoseconds,
@@ -523,30 +524,19 @@ class ExperimentRunnerNode(Node):
         expected_values = tuple(self._expected_wheel_control.values())
         if not self._wheel_parameter_client.wait_for_services(timeout_sec=5.0):
             raise RuntimeError("Motor node wheel configuration services are unavailable")
+        parameters = [
+            Parameter(name, value=value)
+            for name, value in zip(parameter_names, expected_values)
+        ]
         response = self._wait_for_parameter_result(
-            self._wheel_parameter_client.set_parameters_atomically([
-                Parameter(name, value=value)
-                for name, value in zip(parameter_names, expected_values)
-            ])
+            self._wheel_parameter_client.set_parameters_atomically(parameters)
         )
         if not response.result.successful:
             raise RuntimeError(f"Motor node rejected wheel settings: {response.result.reason}")
         readback = self._wait_for_parameter_result(
             self._wheel_parameter_client.get_parameters(list(parameter_names))
         )
-        actual_values = tuple(
-            value.string_value if isinstance(expected, str) else value.double_value
-            for value, expected in zip(readback.values, expected_values)
-        )
-        correct_types = all(
-            value.type == (Parameter.Type.STRING if isinstance(expected, str) else Parameter.Type.DOUBLE)
-            for value, expected in zip(readback.values, expected_values)
-        )
-        if (
-            len(readback.values) != len(expected_values)
-            or not correct_types or actual_values != expected_values
-        ):
-            raise RuntimeError("Motor node wheel settings do not match the requested run")
+        validate_wheel_parameter_readback(parameters, readback.values)
         self._wheel_configuration_confirmed = True
 
     def _wheel_control_callback(self, message: String) -> None:

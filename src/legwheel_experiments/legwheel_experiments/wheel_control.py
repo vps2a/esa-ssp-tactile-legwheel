@@ -1,6 +1,7 @@
 """Run wheel settings and the exact package configuration used for defaults."""
 
 from dataclasses import dataclass
+from collections.abc import Sequence
 import json
 import math
 from pathlib import Path
@@ -9,6 +10,43 @@ from typing import Any
 import yaml
 
 from legwheel_experiments.schemas import require_mapping, require_number, require_positive_number
+
+
+def validate_wheel_parameter_readback(
+    requested_parameters: Sequence[Any], reported_values: Sequence[Any],
+) -> None:
+    """Compare ROS wire values, retaining parameter names in failure messages.
+
+    Parameter.Type is a Python Enum, whereas ParameterValue.type is an integer.
+    Serializing each request gives us integer type codes on both sides. Keeping
+    this check independent of ROS imports also makes that boundary testable.
+    """
+    prefix = "Motor node wheel settings do not match the requested run"
+    if len(reported_values) != len(requested_parameters):
+        raise RuntimeError(
+            f"{prefix}: expected {len(requested_parameters)} parameters, "
+            f"received {len(reported_values)}"
+        )
+
+    mismatches = []
+    for parameter, reported in zip(requested_parameters, reported_values):
+        expected = parameter.get_parameter_value()
+        if reported.type != expected.type:
+            mismatches.append(
+                f"{parameter.name}: expected ROS type {expected.type}, received {reported.type}"
+            )
+            continue
+        # Wheel configuration uses only strings and doubles. Read the active
+        # message field only after checking its type, including for zero values.
+        value_field = "string_value" if isinstance(parameter.value, str) else "double_value"
+        expected_value = getattr(expected, value_field)
+        reported_value = getattr(reported, value_field)
+        if reported_value != expected_value:
+            mismatches.append(
+                f"{parameter.name}: expected {expected_value!r}, received {reported_value!r}"
+            )
+    if mismatches:
+        raise RuntimeError(f"{prefix}: " + "; ".join(mismatches))
 
 
 @dataclass(frozen=True)
