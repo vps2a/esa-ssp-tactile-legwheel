@@ -1,7 +1,18 @@
-# ESA SSP Tactile LegWheel
+# Welcome to the Open LegWheel Dataset Project!
 
-ROS 2 Jazzy workspace for operating and recording experiments with the ESA SSP
-LegWheel rig. It integrates MAB Robotics MD80 motor controllers, a serial
+This project aims to address the lack of traversibility data for training upcoming hybrid exploration rovers. It is an open-source project currently maintained by @vps2a - Filip Szczebak. For any suggestions or questions please feel free to reach out at filip@szczebak.com.
+
+# Dataset Location
+
+The collective dataset is currently stored in HuggingFace under this [link](https://huggingface.co/datasets/vps2a/open_legwheel)
+
+# CAD and Design Files
+
+The CAD files are available on a free platform OnShape under this [link](https://cad.onshape.com/documents/7945975a1e2987842bb7db33/w/577eb7f23b2fb39c5298f464/e/060e9628c73f0835c4b77241?renderMode=0&uiState=6ae3a08f8a82bae0df0d5337)
+
+# Tactile LegWheel Repository
+
+ROS 2 Jazzy workspace for operating and recording experiments with the Open LegWheel rig. It integrates MAB Robotics MD80 motor controllers, a serial
 rotation encoder, an Orbbec Gemini 336 RGB-D camera, and a safety-gated
 experiment runner that records MCAP rosbags.
 
