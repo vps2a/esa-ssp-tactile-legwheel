@@ -29,6 +29,8 @@ def test_run_notes_are_serialized_with_the_run_configuration():
 
     assert yaml.safe_load(yaml.safe_dump(asdict(run_config))) == {
         **raw_config,
+        "run_valid": None,
+        "post_run_notes": "",
     }
 
 
@@ -38,3 +40,25 @@ def test_run_notes_must_be_text():
 
     with pytest.raises(ValueError, match="notes must be text"):
         make_run_config(raw_config)
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_post_run_review_round_trips_as_boolean_and_separate_notes(valid):
+    raw_config = {
+        **raw_run_config(), "notes": "Before the run",
+        "run_valid": valid, "post_run_notes": "After the run",
+    }
+    saved = yaml.safe_load(yaml.safe_dump(asdict(make_run_config(raw_config))))
+    assert saved == raw_config
+    assert type(saved["run_valid"]) is bool
+
+
+@pytest.mark.parametrize("invalid", [0, 1, "false", [], {}])
+def test_run_valid_rejects_non_booleans(invalid):
+    with pytest.raises(ValueError, match="run_valid"):
+        make_run_config({**raw_run_config(), "run_valid": invalid})
+
+
+def test_post_run_notes_must_be_text():
+    with pytest.raises(ValueError, match="post_run_notes"):
+        make_run_config({**raw_run_config(), "post_run_notes": ["not text"]})

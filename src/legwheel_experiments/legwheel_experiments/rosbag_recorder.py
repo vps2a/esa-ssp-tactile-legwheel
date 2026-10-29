@@ -20,6 +20,8 @@ ROSBAG_TOPICS = (
     "/legwheel/spring_constant",
     "/legwheel/damping_constant",
     "/wheel/requested_torque",
+    "/wheel/commanded_torque",
+    "/wheel/governor_state",
     # Preserve the camera and rig frame tree for audit and 3-D visualization.
     "/tf",
     "/tf_static",

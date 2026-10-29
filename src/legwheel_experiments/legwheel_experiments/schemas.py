@@ -36,8 +36,11 @@ class RunConfig:
 
     run_length_loops: float
     leg_parameters: dict[str, float]
-    wheel_parameters: dict[str, float]
+    wheel_parameters: dict[str, Any]
     notes: str = ""
+    # None means the operator has not reviewed this run, including aborted runs.
+    run_valid: bool | None = None
+    post_run_notes: str = ""
 
 
 # Top-level scalar values and YAML mappings must be checked differently.
@@ -266,6 +269,8 @@ def make_run_config(raw_config: dict[str, Any]) -> RunConfig:
             # Notes were added after the initial configuration format, so runs
             # constructed by older callers remain valid without them.
             notes=raw_config.get("notes", ""),
+            run_valid=raw_config.get("run_valid"),
+            post_run_notes=raw_config.get("post_run_notes", ""),
         )
     except KeyError as error:
         raise ValueError(
@@ -288,6 +293,10 @@ def validate_run_config(config: RunConfig) -> None:
         raise ValueError("wheel_parameters must be a mapping.")
     if not isinstance(config.notes, str):
         raise ValueError("notes must be text.")
+    if config.run_valid is not None and not isinstance(config.run_valid, bool):
+        raise ValueError("run_valid must be a boolean or null when not reviewed.")
+    if not isinstance(config.post_run_notes, str):
+        raise ValueError("post_run_notes must be text.")
 
     require_number(config.run_length_loops, "run_length_loops", minimum=0.0, maximum=2.0)
     require_number(
@@ -320,3 +329,20 @@ def validate_run_config(config: RunConfig) -> None:
         minimum=0.05,
         maximum=5.0,
     )
+    wheel = config.wheel_parameters
+    # Missing mode identifies historical pure-torque callers and recordings.
+    mode = wheel.get("control_mode", "raw_torque")
+    if not isinstance(mode, str) or mode not in {"raw_torque", "raw_torque_velocity_capped"}:
+        raise ValueError("wheel_parameters.control_mode is not recognized.")
+    if mode == "raw_torque_velocity_capped":
+        cap = require_positive_number(
+            wheel.get("max_wheel_speed_rad_s"), "wheel_parameters.max_wheel_speed_rad_s"
+        )
+        if cap > 4.5:
+            raise ValueError("Maximum selectable wheel speed is 4.5 rad/s.")
+    elif wheel.get("max_wheel_speed_rad_s") is not None:
+        raise ValueError("Pure raw torque requires a null wheel speed cap.")
+    # New runs always resolve and save both gains, including inactive defaults.
+    if "control_mode" in wheel:
+        require_positive_number(wheel.get("velocity_governor_kp"), "wheel governor P")
+        require_number(wheel.get("velocity_governor_ki"), "wheel governor I", minimum=0.0)

@@ -1,21 +1,23 @@
+from __future__ import annotations
+
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import threading
-import rclpy
 import sys
 
 from pathlib import Path
-from rclpy.executors import SingleThreadedExecutor
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from legwheel_experiments.schemas import RunConfig, load_experiment_config, make_run_config, ExperimentConfig
 from legwheel_experiments.state_machine import ExperimentStateMachine, ExperimentState
 from legwheel_experiments.data_recorder import RunRecorder
 from legwheel_experiments.rosbag_recorder import RosbagRecorder
-from legwheel_experiments.experiment_runner_node import (
-    ExperimentAbortedError,
-    ExperimentRunnerNode,
+from legwheel_experiments.wheel_control import (
+    WheelControlDefaults, ask_float, collect_wheel_control_settings,
+    load_wheel_control_defaults,
 )
+if TYPE_CHECKING:
+    from legwheel_experiments.experiment_runner_node import ExperimentRunnerNode
 
 #Helper functions
 
@@ -34,42 +36,37 @@ def parse_arguments() -> argparse.Namespace:
 
     return parser.parse_args()
 
-#A better way of handling numering inputs than 'input' - won't crash
-def ask_float(prompt: str, minimum: float | None = None, maximum: float | None = None) -> float:
-    while True:
-        raw_value = input(prompt)
-
-        try:
-            value = float(raw_value)
-        except ValueError:
-            print("Invalid input. Please enter a valid number.")
-            continue
-
-        if minimum is not None and value < minimum:
-            print(f"Value must be at least {minimum}. Please try again.")
-            continue
-
-        if maximum is not None and value > maximum:
-            print(f"Value must be at most {maximum}. Please try again.")
-            continue
-
-        return value
-
-
-def ask_run_notes() -> str:
+def ask_run_notes(*, post_run: bool = False) -> str:
     """Optionally collect free-text notes to save with this run's configuration."""
     while True:
         choice = input(
+            "Do you want to add any post-run notes? (y/n): " if post_run else
             "Would you like to add notes to this run configuration? (y/n): "
         ).strip().lower()
         if choice == "y":
-            return input("Run notes: ").strip()
+            return input("Post-run notes: " if post_run else "Run notes: ").strip()
         if choice == "n":
             return ""
         print("Invalid input. Please enter 'y' or 'n'.")
 
 
-def collect_run_configuration() -> dict[str, Any]:
+def record_post_run_feedback(recorder: RunRecorder, run_config: RunConfig) -> None:
+    """Save the operator's review without replacing the original run notes."""
+    while True:
+        answer = input("Was the run valid? (y/n): ").strip().lower()
+        if answer in {"y", "n"}:
+            break
+        print("Invalid input. Please enter 'y' or 'n'.")
+
+    # Persist validity first so Ctrl-C/EOF during notes cannot lose that answer.
+    run_config = replace(run_config, run_valid=answer == "y")
+    recorder.update_run_config(run_config)
+    recorder.update_run_config(replace(run_config, post_run_notes=ask_run_notes(post_run=True)))
+
+
+
+def collect_run_configuration(defaults: WheelControlDefaults | None = None) -> dict[str, Any]:
+    defaults = defaults or load_wheel_control_defaults()
     print("\n=== Run Configuration ===")
     print("Please provide the following parameters for the experiment run:")
 
@@ -83,6 +80,7 @@ def collect_run_configuration() -> dict[str, Any]:
 
     commanded_wheel_torque_nm = ask_float("Commanded wheel torque (in Nm): ", minimum=0, maximum=8)
     wheel_torque_ramp_time_sec = ask_float("Wheel ramp time (in seconds): ", minimum=0.05, maximum=5)
+    wheel_control_settings = collect_wheel_control_settings(defaults)
 
     notes = ask_run_notes()
 
@@ -102,7 +100,8 @@ def collect_run_configuration() -> dict[str, Any]:
         },
         "wheel_parameters": {
             "commanded_wheel_torque_nm": commanded_wheel_torque_nm,
-            "wheel_torque_ramp_time_sec": wheel_torque_ramp_time_sec
+            "wheel_torque_ramp_time_sec": wheel_torque_ramp_time_sec,
+            **wheel_control_settings,
         },
         "notes": notes,
         # "data_acquisition_rates": {
@@ -258,6 +257,13 @@ def confirm_experiment_start() -> None:
         print('Run has not started. Type "START" exactly to continue.')
 
 def main():
+    # Terminal/configuration helpers remain testable without a ROS installation.
+    import rclpy
+    from rclpy.executors import SingleThreadedExecutor
+    from legwheel_experiments.experiment_runner_node import (
+        ExperimentAbortedError, ExperimentRunnerNode,
+    )
+
     print("=== LEGWHEEL EXPERIMENT RUNNER ===")
 
     arguments = parse_arguments()
@@ -273,7 +279,12 @@ def main():
     
     print(f"Loaded experiment : {experiment_config.experiment_id}")
 
-    raw_run_config = collect_run_configuration()
+    try:
+        wheel_defaults = load_wheel_control_defaults()
+        raw_run_config = collect_run_configuration(wheel_defaults)
+    except (OSError, ValueError, LookupError) as error:
+        print(f"Could not load wheel control defaults: {error}")
+        return
 
     # Validate the operator input before showing confirmation or creating files.
     try:
@@ -290,7 +301,17 @@ def main():
 
     #Now creating the run recorder
 
-    recorder = RunRecorder(experiment_directory)
+    recorder = RunRecorder(
+        experiment_directory,
+        motor_config_path=wheel_defaults.motor_config_path,
+        motor_limits_path=wheel_defaults.motor_limits_path,
+        config_snapshot_contents={
+            name: contents for name, contents in (
+                ("motor_config", wheel_defaults.motor_config_contents),
+                ("motor_limits", wheel_defaults.motor_limits_contents),
+            ) if contents is not None
+        },
+    )
     run_number, overwrite_existing = choose_run_number(recorder)
 
     run_directory = recorder.start_run(
@@ -311,6 +332,8 @@ def main():
     # Creating rosbag variables
     bag_recorder = None
     experiment_completed = False
+    recording_stopped = False
+    failure_reason = None
 
     try:
         rclpy.init()
@@ -330,6 +353,10 @@ def main():
         )
 
         executor_thread.start()
+
+        # Configure while disabled. This call waits on the executor thread and
+        # verifies readback before any preflight/ARM gate can pass.
+        node.configure_wheel_control(run_config)
 
         # == Waiting for preflight checks ==
         print("\nWaiting for preflight checks...")
@@ -401,7 +428,7 @@ def main():
         def spring_zero_position_callback(
             current_run_config: RunConfig,
         ) -> RunConfig:
-            nonlocal bag_recorder
+            nonlocal bag_recorder, run_config
 
             # Complete all interactive leg adjustments before starting the dataset
             # recording. The wheel torque remains zero throughout this process.
@@ -410,6 +437,9 @@ def main():
                 recorder,
                 current_run_config,
             )
+            # Keep the CLI's final configuration in sync with the saved adjustment
+            # so post-run feedback cannot restore the earlier spring-zero value.
+            run_config = updated_run_config
 
             # Do not start a high-bandwidth recording if a camera stream has already
             # failed while the operator was adjusting the leg.
@@ -447,6 +477,10 @@ def main():
 
     except ExperimentAbortedError as error:
         print(f"\nExperiment aborted by runtime safety guard: {error}")
+        failure_reason = str(error)
+    except RuntimeError as error:
+        print(f"\nExperiment failed: {error}")
+        failure_reason = str(error)
     except KeyboardInterrupt:
         print("\nExperiment runner interrupted by user.")
     
@@ -459,6 +493,7 @@ def main():
         if bag_recorder is not None:
             try:
                 bag_recorder.stop()
+                recording_stopped = True
                 print("[ROSBAG] Rosbag recording stopped and finalized.")
             except Exception as error:
                 print(f"[ROSBAG] Failed to finalize rosbag: {error}")
@@ -467,7 +502,7 @@ def main():
             recorder.mark_complete()
         elif recorder.has_active_run():
             abort_reason = None if node is None else node.abort_reason()
-            recorder.mark_aborted(abort_reason or "Experiment did not complete")
+            recorder.mark_aborted(abort_reason or failure_reason or "Experiment did not complete")
 
         if executor is not None:
             executor.shutdown()
@@ -480,6 +515,16 @@ def main():
 
         if rclpy.ok():
             rclpy.shutdown()
+
+    # A normal node return includes the leg-straightening sequence. Wait until
+    # recording and ROS cleanup finish before asking for the operator's review.
+    if experiment_completed and recording_stopped:
+        try:
+            record_post_run_feedback(recorder, run_config)
+        except (EOFError, KeyboardInterrupt):
+            print("\nPost-run feedback interrupted. Any saved answers have been retained.")
+        except OSError as error:
+            print(f"Could not save all post-run feedback: {error}")
 
 # ===== OLD DEBUGGING FUNCTIONS =====
 

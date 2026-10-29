@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 find_package(rclpy REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -36,6 +37,7 @@ add_executable(md80_zero_node
 
 ament_target_dependencies(md80_legwheel_node
   rclcpp
+  rcl_interfaces
   sensor_msgs
   std_msgs
   std_srvs
@@ -59,6 +61,7 @@ target_link_libraries(md80_zero_node
 )
 
 target_compile_features(md80_legwheel_node PUBLIC cxx_std_20)
+target_include_directories(md80_legwheel_node PRIVATE include)
 target_compile_features(md80_zero_node PUBLIC cxx_std_20)
 
 install(TARGETS
@@ -82,5 +85,12 @@ install(PROGRAMS
 install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME}
 )
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(test_wheel_velocity_governor test/test_wheel_velocity_governor.cpp)
+  target_include_directories(test_wheel_velocity_governor PRIVATE include)
+  add_test(NAME wheel_velocity_governor COMMAND test_wheel_velocity_governor)
+endif()
 
 ament_package()

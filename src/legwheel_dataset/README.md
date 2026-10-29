@@ -745,6 +745,15 @@ before the first or after the last accepted packet.
 
 ## Dataset splitting
 
+Runs may use pure raw torque or the optional raw-torque velocity governor.
+Processing still selects the drive interval from `/wheel/requested_torque`;
+this is a requested-drive plateau, not proof of constant motor torque. The
+analysis report's `wheel_control` section preserves mode, cap and gains and
+summarizes `/wheel/commanded_torque` when recorded. That optional stream is the
+target successfully sent after governing; wheel-state effort is estimated motor
+torque. Old recordings without the new configuration fields or command topic
+remain supported. The existing 15-channel packet telemetry format is unchanged.
+
 Every packet stores unwrapped motion and kinematic `theta_y` values plus a
 `lap_index`. Repeated loops can observe the same physical terrain. Do not
 randomly split packets from one run between training and evaluation; split by

@@ -161,6 +161,8 @@ Publishes:
 | --- | --- | --- |
 | `/legwheel/joint_states` | `sensor_msgs/msg/JointState` | Encoder state for connected hip/knee motors |
 | `/wheel/wheel_state` | `sensor_msgs/msg/JointState` | Wheel encoder position, velocity, and torque estimate |
+| `/wheel/commanded_torque` | `std_msgs/msg/Float64` | Final torque target successfully transferred to the wheel drive |
+| `/wheel/governor_state` | `std_msgs/msg/String` | JSON settings, session identity, PI state, feedback validity, and fault status |
 
 Subscribes:
 
@@ -375,6 +377,8 @@ Configured in `config/motor_config.json`:
   "shutdown_to_startup_deviation_tolerance": 0.1,
   "wheel_torque_rampup_time": 1.0,
   "default_max_torque": 3.0,
+  "wheel_velocity_governor_default_kp": 0.5,
+  "wheel_velocity_governor_default_ki": 0.1,
 
   "initial_hip_zero_position_rad": 0.0,
   "initial_knee_zero_position_rad": 0.0,
@@ -391,6 +395,59 @@ The tolerance and zero positions are in radians. Wheel torque values are in Nm
 and the wheel ramp time is in seconds. The spring constants are in Nm/rad, and
 damping constants are in N/(rad/s). The impedance node reads these values on
 startup and refuses control if they are missing or invalid.
+
+### Optional per-run wheel velocity governor
+
+`run_experiment` selects `raw_torque` or `raw_torque_velocity_capped`. Both keep
+the MD80 in `RAW_TORQUE`. Capped mode runs a PI controller in the C++ update
+loop and only removes driving torque; it never commands regenerative braking.
+This accommodates the rig's bench supply without a braking-energy absorber.
+Coasting or externally driven overspeed may therefore exceed the selected cap.
+
+The selectable cap is bounded by `wheel_velocity_governor_max_rad_s` in
+`motor_limits.yaml` (4.5 rad/s). It is not a firmware protection setting and
+does not apply in pure mode. The provisional JSON defaults have units
+P = Nm s/rad and I = Nm/rad. They must be tuned on the actual rig.
+
+The motor node accepts these parameters as an atomic set while disabled:
+
+- `wheel_control_mode`: `raw_torque` or `raw_torque_velocity_capped`;
+- `wheel_speed_cap_rad_s`: positive in capped mode, zero when inactive;
+- `wheel_governor_kp`: finite and greater than zero;
+- `wheel_governor_ki`: finite and nonnegative;
+- `wheel_control_session_id`: identifies this run for status/readback checks.
+
+The experiment runner confirms parameter readback and matching, fresh status
+before ARM. Parameter validation and arming are serialized; invalid or active
+configuration changes are rejected. A new run always selects its mode explicitly.
+The manual keyboard wheel controller explicitly selects pure mode before reading
+keys. If an earlier capped configuration is still enabled, disable motors first.
+
+The governor uses signed speed feedback, conditional anti-windup, bounded
+integral torque, and a monotonic integration clock. Restoration of torque is
+rate-limited; reductions take effect immediately. Zero commands, disabling,
+configuration changes, and direction changes clear controller history. While
+the shaft is rotating opposite the requested direction, capped mode commands
+zero instead of braking it. The torque request still defines the drive ceiling.
+
+A failed velocity read immediately removes capped-mode drive. A continuous
+100 ms feedback loss or an update interval longer than 100 ms latches a
+control fault, cleared by applying a new run configuration while disabled.
+Ordinary overspeed does not latch a fault. Existing firmware protections remain.
+
+Recorded topics are `/wheel/requested_torque`, `/wheel/commanded_torque` (a target
+successfully transferred to the motor, not measured torque), and
+`/wheel/governor_state`. The JSON status includes effective settings, run/session
+identity, integral torque, velocity validity, limiting state, and any fault.
+Motor-estimated torque remains `/wheel/wheel_state` effort.
+
+The standalone controller tests can also run without ROS:
+
+```bash
+c++ -std=c++20 -Wall -Wextra -Werror -pedantic -Isrc/legwheel_can/include \
+  src/legwheel_can/test/test_wheel_velocity_governor.cpp -o /tmp/test_wheel_velocity_governor
+/tmp/test_wheel_velocity_governor
+```
 
 ## Build
 

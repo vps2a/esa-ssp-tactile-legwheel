@@ -8,11 +8,14 @@ import termios
 import threading
 import time
 import tty
+import uuid
 from pathlib import Path
 from typing import Optional, TextIO
 
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
+from rclpy.parameter_client import AsyncParameterClient
 from std_msgs.msg import Float64
 
 
@@ -47,6 +50,8 @@ class WheelControllerNode(Node):
         self._last_drive_key_time: Optional[float] = None
         self._current_torque_nm = 0.0
         self._last_update_time = time.monotonic()
+        self._pure_torque_ready = False
+        self._input_thread = None
 
         self.requested_torque_pub = self.create_publisher(
             Float64, "/wheel/requested_torque", 10
@@ -56,21 +61,55 @@ class WheelControllerNode(Node):
         )
 
         self.get_logger().info(
-            "Wheel controller ready: hold 'w' for forward, 's' for reverse, "
-            "'+'/'-' to adjust max torque."
+            "Wheel controller initialized; confirming pure torque mode before accepting keys."
         )
         self.get_logger().info(
             "Initial max_torque=%.3f Nm, ramp_time=%.3f s."
             % (self.max_torque_nm, self.ramp_time_s)
         )
 
+
+    def start(self) -> None:
+        """Do not inherit a previous experiment's capped mode on the same node."""
+        client = AsyncParameterClient(self, "/legwheel_can")
+        if not client.wait_for_services(timeout_sec=5.0):
+            raise RuntimeError("Motor node configuration services are unavailable")
+        parameters = [
+            Parameter("wheel_control_mode", value="raw_torque"),
+            Parameter("wheel_speed_cap_rad_s", value=0.0),
+        ]
+        # A fresh disabled session also clears any latched fault from an older
+        # run. Existing manual bring-up may already have enabled the legs; in
+        # that case only an idempotent assertion of pure mode is permitted.
+        response = self._select_wheel_settings(client, [
+            *parameters, Parameter("wheel_control_session_id", value="manual_" + uuid.uuid4().hex),
+        ])
+        if not response.result.successful:
+            response = self._select_wheel_settings(client, parameters)
+        if not response.result.successful:
+            raise RuntimeError(
+                "Could not select pure torque mode; disable motors first: "
+                + response.result.reason
+            )
+        self._pure_torque_ready = True
+        self.get_logger().info(
+            "Pure torque mode confirmed: hold 'w' for forward, 's' for reverse, "
+            "'+'/'-' to adjust max torque."
+        )
         self._input_thread = threading.Thread(target=self._input_loop, daemon=True)
         self._input_thread.start()
+
+    def _select_wheel_settings(self, client, parameters):
+        future = client.set_parameters_atomically(parameters)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+        if not future.done():
+            raise RuntimeError("Pure torque selection timed out")
+        return future.result()
 
     def stop(self) -> None:
         self._stop_event.set()
         self._publish_torque(0.0)
-        if self._input_thread.is_alive():
+        if self._input_thread is not None and self._input_thread.is_alive():
             self._input_thread.join(timeout=1.0)
 
     def _load_motor_config(self):
@@ -174,6 +213,8 @@ class WheelControllerNode(Node):
                 )
 
     def _update_requested_torque(self) -> None:
+        if not self._pure_torque_ready:
+            return
         now = time.monotonic()
         with self._lock:
             if (
@@ -212,7 +253,10 @@ def main(args=None) -> None:
     rclpy.init(args=args)
     node = WheelControllerNode()
     try:
+        node.start()
         rclpy.spin(node)
+    except RuntimeError as error:
+        node.get_logger().error(str(error))
     except KeyboardInterrupt:
         pass
     finally:

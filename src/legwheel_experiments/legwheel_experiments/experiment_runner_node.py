@@ -7,6 +7,9 @@ import queue
 import rclpy
 import threading
 import time
+import uuid
+from rclpy.parameter import Parameter
+from rclpy.parameter_client import AsyncParameterClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from sensor_msgs.msg import Image, Imu, JointState
@@ -32,6 +35,7 @@ from legwheel_experiments.schemas import (
     validate_experiment_config,
     validate_run_config,
 )
+from legwheel_experiments.wheel_control import validate_wheel_parameter_readback
 from legwheel_experiments.stream_health import (
     AdvancingStampMonitor,
     message_stamp_nanoseconds,
@@ -198,6 +202,18 @@ class ExperimentRunnerNode(Node):
 
         # This remains false until both run and experiment configuration checks pass.
         self._configuration_valid = False
+        self._wheel_configuration_confirmed = False
+        self._expected_wheel_control = None
+        self._reported_wheel_control = None
+        self._wheel_control_received_at_s = None
+        self._wheel_parameter_client = AsyncParameterClient(self, "/legwheel_can")
+        self._wheel_control_subscription = self.create_subscription(
+            String, "/wheel/governor_state", self._wheel_control_callback,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
+        # Unlike the camera guard, this always runs: missing control feedback
+        # must not silently turn a requested capped run into an uncapped run.
+        self._wheel_control_guard_timer = self.create_timer(0.1, self._wheel_control_guard)
         self._recording_started = False #means the CLI successfully loaded and validated the experiment YAML.
 
         self._preflight_status = "Preflight has not started"
@@ -481,6 +497,92 @@ class ExperimentRunnerNode(Node):
 
     # == Preflight ==
 
+    def _wait_for_parameter_result(self, future, timeout_s: float = 5.0):
+        """Wait from the CLI thread while the ROS executor services the request."""
+        completed = threading.Event()
+        future.add_done_callback(lambda _: completed.set())
+        if not completed.wait(timeout_s):
+            raise RuntimeError("Wheel control configuration request timed out")
+        return future.result()
+
+    def configure_wheel_control(self, run_config: RunConfig) -> None:
+        """Require atomic acceptance and readback before preflight can pass."""
+        validate_run_config(run_config)
+        self._wheel_configuration_confirmed = False
+        wheel = run_config.wheel_parameters
+        self._expected_wheel_control = {
+            "control_mode": wheel.get("control_mode", "raw_torque"),
+            "max_wheel_speed_rad_s": float(wheel.get("max_wheel_speed_rad_s") or 0.0),
+            "velocity_governor_kp": float(wheel.get("velocity_governor_kp", 0.5)),
+            "velocity_governor_ki": float(wheel.get("velocity_governor_ki", 0.1)),
+            "session_id": uuid.uuid4().hex,
+        }
+        parameter_names = (
+            "wheel_control_mode", "wheel_speed_cap_rad_s", "wheel_governor_kp",
+            "wheel_governor_ki", "wheel_control_session_id",
+        )
+        expected_values = tuple(self._expected_wheel_control.values())
+        if not self._wheel_parameter_client.wait_for_services(timeout_sec=5.0):
+            raise RuntimeError("Motor node wheel configuration services are unavailable")
+        parameters = [
+            Parameter(name, value=value)
+            for name, value in zip(parameter_names, expected_values)
+        ]
+        response = self._wait_for_parameter_result(
+            self._wheel_parameter_client.set_parameters_atomically(parameters)
+        )
+        if not response.result.successful:
+            raise RuntimeError(f"Motor node rejected wheel settings: {response.result.reason}")
+        readback = self._wait_for_parameter_result(
+            self._wheel_parameter_client.get_parameters(list(parameter_names))
+        )
+        validate_wheel_parameter_readback(parameters, readback.values)
+        self._wheel_configuration_confirmed = True
+
+    def _wheel_control_callback(self, message: String) -> None:
+        """Invalid reports revoke readiness instead of preserving cached settings."""
+        self._reported_wheel_control = None
+        try:
+            report = json.loads(message.data)
+            if not isinstance(report, dict):
+                raise ValueError("Wheel control report must be an object")
+            self._reported_wheel_control = report
+            self._wheel_control_received_at_s = time.monotonic()
+        except (ValueError, TypeError):
+            self.get_logger().warning("Invalid wheel control status report")
+
+    def _wheel_control_ready(self) -> bool:
+        report = self._reported_wheel_control
+        expected = self._expected_wheel_control
+        if not self._wheel_configuration_confirmed or report is None or expected is None:
+            return False
+        if self._wheel_control_received_at_s is None or (
+            time.monotonic() - self._wheel_control_received_at_s > 0.5
+        ):
+            return False
+        if any(report.get(key) != value for key, value in expected.items()):
+            return False
+        if report.get("fault") != "" or report.get("active_braking_enabled") is not False:
+            return False
+        return expected["control_mode"] == "raw_torque" or report.get("velocity_valid") is True
+
+    def _wheel_control_guard(self) -> None:
+        if self._state_machine.state is not ExperimentState.RUNNING:
+            return
+        report = self._reported_wheel_control or {}
+        # A single failed velocity read suppresses torque locally. Only a latched
+        # driver fault, a configuration mismatch, or lost status aborts the run.
+        expected = self._expected_wheel_control or {}
+        mismatch = any(report.get(key) != value for key, value in expected.items())
+        stale = self._wheel_control_received_at_s is None or (
+            time.monotonic() - self._wheel_control_received_at_s > 0.5
+        )
+        if mismatch or stale or report.get("fault") or report.get("active_braking_enabled") is not False:
+            self._abort_for_runtime_failure(
+                report.get("fault") or "wheel control status lost or configuration changed",
+                "wheel control",
+            )
+
     #Preflight status helper functions
     def _preflight_callback(self) -> None:
         if self._state_machine.state is not ExperimentState.PREFLIGHT:
@@ -517,6 +619,11 @@ class ExperimentRunnerNode(Node):
                 "Experiment configuration is valid",
                 self._configuration_valid,
                 "Waiting for valid experiment configuration",
+            ),
+            (
+                "Wheel control settings confirmed by the motor node",
+                self._wheel_control_ready(),
+                "Waiting for matching, fresh wheel control settings and velocity feedback",
             ),
             (
                 "Encoder settings match the experiment configuration",
@@ -1087,6 +1194,9 @@ class ExperimentRunnerNode(Node):
         return None, stale_stream_ages
 
     def _abort_for_camera_failure(self, failure_reason: str) -> None:
+        self._abort_for_runtime_failure(failure_reason, "camera health")
+
+    def _abort_for_runtime_failure(self, failure_reason: str, source: str) -> None:
         """Record the cause and immediately publish the safe command set."""
         if self._runtime_abort_event.is_set():
             return
@@ -1094,7 +1204,7 @@ class ExperimentRunnerNode(Node):
         self._runtime_abort_reason = failure_reason
         self._runtime_abort_event.set()
         self.get_logger().error(
-            f"Aborting experiment because camera health failed: {failure_reason}"
+            f"Aborting experiment because {source} failed: {failure_reason}"
         )
 
         # Publish safe commands from the executor immediately. The control thread

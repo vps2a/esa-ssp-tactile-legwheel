@@ -20,6 +20,8 @@ LEG_STATE_TOPIC = "/legwheel/joint_states"
 WHEEL_STATE_TOPIC = "/wheel/wheel_state"
 ROTATION_TICKS_TOPIC = TICKS_TOPIC
 REQUESTED_TORQUE_TOPIC = "/wheel/requested_torque"
+COMMANDED_TORQUE_TOPIC = "/wheel/commanded_torque"
+OPTIONAL_INDEX_TOPICS = {COMMANDED_TORQUE_TOPIC}
 
 INDEX_TOPICS = {
     RGB_IMAGE_TOPIC,
@@ -32,6 +34,7 @@ INDEX_TOPICS = {
     ROTATION_TICKS_TOPIC,
     REQUESTED_TORQUE_TOPIC,
 }
+READABLE_INDEX_TOPICS = INDEX_TOPICS | OPTIONAL_INDEX_TOPICS
 
 
 def message_stamp_ns(message, bag_time_ns: int) -> int:
@@ -241,10 +244,14 @@ def index_bag(bag_directory: Path) -> BagIndex:
             "torque_command": TelemetrySeries(("wheel.requested_torque",)),
         }
     )
+    # Keep this separate from the stable, 15-channel dataset telemetry schema.
+    # Older bags have no post-governor command topic and remain valid inputs.
+    if COMMANDED_TORQUE_TOPIC in message_types:
+        index.streams["governed_torque_command"] = TelemetrySeries(("wheel.commanded_torque",))
 
     while reader.has_next():
         topic, serialized, bag_time_ns = reader.read_next()
-        if topic not in INDEX_TOPICS:
+        if topic not in READABLE_INDEX_TOPICS:
             continue
         message = _deserialize(serialized, message_types[topic])
         timestamp_ns = message_stamp_ns(message, bag_time_ns)
@@ -300,6 +307,8 @@ def index_bag(bag_directory: Path) -> BagIndex:
                 timestamp_ns,
                 [float(message.data)],
             )
+        elif topic == COMMANDED_TORQUE_TOPIC:
+            index.streams["governed_torque_command"].append(timestamp_ns, [float(message.data)])
         elif topic == IMU_TOPIC:
             # Keep the declared basis so offline pose estimation can reject a
             # body-frame stream instead of assuming it uses Gemini optical axes.

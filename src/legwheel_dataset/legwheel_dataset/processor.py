@@ -436,6 +436,40 @@ def _recorded_encoder_motion(bag_index, experiment_config):
     return times, calibration.motion_angle(ticks, ticks[0]), origin
 
 
+def _describe_wheel_control(
+    bag_index: BagIndex, wheel_settings: dict[str, Any],
+    start_time_ns: int, end_time_ns: int,
+) -> dict[str, Any]:
+    """Describe the selected mode without mistaking requested torque for output."""
+    wheel_control_report = {
+        "control_mode": wheel_settings.get("control_mode", "raw_torque"),
+        "max_wheel_speed_rad_s": wheel_settings.get("max_wheel_speed_rad_s"),
+        "velocity_governor_kp": wheel_settings.get("velocity_governor_kp"),
+        "velocity_governor_ki": wheel_settings.get("velocity_governor_ki"),
+        "interval_source": "requested_torque_plateau",
+        "interval_meaning": "requested drive phase; motor torque may vary under the governor",
+        "active_braking_enabled": False,
+        "governed_command_available": "governed_torque_command" in bag_index.streams,
+    }
+    governed_stream = bag_index.streams.get("governed_torque_command")
+    if governed_stream is not None:
+        command_times, command_values = governed_stream.arrays()
+        during_run = (
+            (command_times >= start_time_ns)
+            & (command_times <= end_time_ns)
+        )
+        commands_nm = command_values[during_run, 0]
+        commands_nm = commands_nm[np.isfinite(commands_nm)]
+        if commands_nm.size:
+            wheel_control_report["governed_command"] = {
+                "sample_count": int(commands_nm.size),
+                "minimum_nm": float(np.min(commands_nm)),
+                "maximum_nm": float(np.max(commands_nm)),
+                "mean_absolute_nm": float(np.mean(np.abs(commands_nm))),
+            }
+    return wheel_control_report
+
+
 def _run_motion_analysis(
     bag_index: BagIndex,
     experiment_config: dict[str, Any],
@@ -530,10 +564,15 @@ def _run_motion_analysis(
         (trajectory.wheel_times_ns >= trajectory.start_time_ns)
         & (trajectory.wheel_times_ns <= trajectory.end_time_ns)
     ]
+    wheel_control_report = _describe_wheel_control(
+        bag_index, run_config["wheel_parameters"],
+        trajectory.start_time_ns, trajectory.end_time_ns,
+    )
     report = {
         "status": "analysed",
         "encoder_position_version": ENCODER_POSITION_VERSION,
         "encoder_position": encoder_origin,
+        "wheel_control": wheel_control_report,
         "torque_period": {
             "threshold_start_time_ns": torque_period.start_time_ns,
             "threshold_end_time_ns": torque_period.end_time_ns,
