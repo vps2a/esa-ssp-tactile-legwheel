@@ -47,6 +47,7 @@ from legwheel_dataset.patch_geometry import (
     project_full_track_boundaries,
     project_track_patch,
 )
+from legwheel_dataset.progress import ProgressCallback, progress_items, progress_range
 from legwheel_dataset.run_analysis import (
     CorrectedThetaTrajectory,
     build_corrected_theta_trajectory,
@@ -191,6 +192,8 @@ def _estimate_run_pitch(
     experiment_config: dict[str, Any],
     geometry: KinematicsConfig,
     processing_config: ProcessingConfig,
+    *,
+    progress: ProgressCallback | None = None,
 ) -> PitchTrajectory:
     """Estimate beam pitch once, using the complete recorded IMU timeline.
 
@@ -223,6 +226,7 @@ def _estimate_run_pitch(
         geometry,
         maximum_gap_s=processing_config.maximum_interpolation_gap_ms / 1000.0,
         maximum_uncertainty_deg=processing_config.maximum_pitch_uncertainty_deg,
+        progress=progress,
     )
     pitch.report["recorded_imu_frame_ids"] = sorted(bag_index.imu_frame_ids)
     return pitch
@@ -1122,6 +1126,8 @@ def isolate_packets(
     processing_config: ProcessingConfig,
     experiment_config_path: Path | None = None,
     output_directory: Path | None = None,
+    *,
+    progress: ProgressCallback | None = None,
 ) -> Path:
     """Convert synchronized MCAP data into self-contained Stage 1 packets."""
     run_directory = run_directory.resolve()
@@ -1153,7 +1159,11 @@ def isolate_packets(
     packets_directory = output_directory / "packets"
     packets_directory.mkdir(parents=True)
 
-    bag_index = index_bag(bag_directory)
+    bag_index = index_bag(
+        bag_directory, progress=progress_range(progress, 0.0, 0.20),
+    )
+    if progress:
+        progress(0.20, "Analysing run motion")
     trajectory, analysis_report = _run_motion_analysis(
         bag_index,
         experiment_config,
@@ -1190,7 +1200,8 @@ def isolate_packets(
         )
     try:
         pitch_trajectory = _estimate_run_pitch(
-            bag_index, experiment_config, kinematics_config, processing_config
+            bag_index, experiment_config, kinematics_config, processing_config,
+            progress=progress_range(progress, 0.25, 0.60),
         )
     except ValueError as error:
         analysis_report["status"] = "failed_pitch_estimation"
@@ -1275,7 +1286,9 @@ def isolate_packets(
             }
         )
 
-    for pair in synchronized_pairs:
+    for pair in progress_items(
+        synchronized_pairs, progress, 0.62, 0.82, "Isolating packets",
+    ):
         if pair.image_time_ns < trajectory.start_time_ns:
             reject(pair, "image_before_t0")
             continue
@@ -1485,6 +1498,10 @@ def isolate_packets(
         ))
         metadata = {
             "packet_id": packet_id,
+            # Classification describes the highlighted physical terrain patch.
+            "class_id": None,
+            "classification_method": None,
+            "model_id": None,
             "experiment_id": experiment_id,
             "run_number": run_number,
             "lap_index": lap_index,
@@ -1604,7 +1621,10 @@ def isolate_packets(
         )
         last_saved_patch_centre_motion_rad = patch_centre_motion_angle_rad
 
-    found_images = extract_selected_images(bag_directory, image_requests)
+    found_images = extract_selected_images(
+        bag_directory, image_requests,
+        progress=progress_range(progress, 0.82, 0.98),
+    )
     missing_images = set(image_requests) - found_images
     if missing_images:
         analysis_report["status"] = "failed_image_recovery"
@@ -1615,6 +1635,8 @@ def isolate_packets(
         )
 
     manifest_path = output_directory / "manifest.jsonl"
+    if progress:
+        progress(0.98, "Writing packet reports")
     manifest_path.write_text(
         "".join(json.dumps(record) + "\n" for record in manifest_records),
         encoding="utf-8",
@@ -1649,6 +1671,8 @@ def isolate_packets(
     analysis_report["status"] = "stage1_complete"
     analysis_report["accepted_packet_count"] = len(manifest_records)
     _write_json(analysis_report_path, analysis_report)
+    if progress:
+        progress(1.0, "Packet isolation complete")
     return output_directory
 
 
@@ -1680,6 +1704,8 @@ def _mask_crop_origin_uv(mask: np.ndarray) -> list[int]:
 def extract_features(
     dataset_directory: Path,
     processing_config: ProcessingConfig | None = None,
+    *,
+    progress: ProgressCallback | None = None,
 ) -> Path:
     """Extract patches, point maps, plane slopes, and all-channel spectra."""
     dataset_directory = dataset_directory.resolve()
@@ -1693,18 +1719,31 @@ def extract_features(
         processing_config.validate()
 
     feature_records = []
-    for record in _read_manifest(dataset_directory):
+    for record in progress_items(
+        _read_manifest(dataset_directory), progress, 0.0, 0.98,
+        "Extracting packet features",
+    ):
         packet_directory = dataset_directory / record["packet_path"]
         stage2_directory = packet_directory / "stage2"
         stage2_directory.mkdir(exist_ok=False)
         metadata = json.loads(
             (packet_directory / "metadata.json").read_text(encoding="utf-8")
         )
+        # Older Stage 1 datasets have no classification fields. Upgrade them
+        # here too, and preserve labels assigned before feature extraction.
+        classification = {
+            name: metadata.get(name)
+            for name in ("class_id", "classification_method", "model_id")
+        }
+        if any(name not in metadata for name in classification):
+            metadata.update(classification)
+            _write_json(packet_directory / "metadata.json", metadata)
         imu_uncertainty_deg = _packet_imu_uncertainty_deg(metadata)
         # Include this feature even when an unrelated plane/spectrum extraction
         # fails. A high value does not invalidate a packet or its other features.
         feature_record = {
             "packet_id": metadata["packet_id"],
+            **classification,
             "valid": False,
             "IMU uncertainty": imu_uncertainty_deg,
         }
@@ -1824,6 +1863,8 @@ def extract_features(
         feature_records.append(feature_record)
 
     features_path = dataset_directory / "features.jsonl"
+    if progress:
+        progress(0.98, "Writing feature reports")
     features_path.write_text(
         "".join(json.dumps(record) + "\n" for record in feature_records),
         encoding="utf-8",
@@ -1852,4 +1893,6 @@ def extract_features(
             if not record["valid"]
         ]
         _write_json(analysis_report_path, analysis_report)
+    if progress:
+        progress(1.0, "Feature extraction complete")
     return dataset_directory

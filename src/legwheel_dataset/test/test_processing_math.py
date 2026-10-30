@@ -257,7 +257,7 @@ class SynchronizationTest(unittest.TestCase):
                 },
             )
 
-            def provide_images(_bag_directory, requests):
+            def provide_images(_bag_directory, requests, *, progress=None):
                 for (topic, _), callback in requests.items():
                     if topic.endswith("color/image_raw"):
                         array = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -713,6 +713,13 @@ class FeatureTest(unittest.TestCase):
             self.assertEqual(features["IMU uncertainty"], 7.25)
             aggregate_features = json.loads((dataset / "features.jsonl").read_text())
             self.assertEqual(aggregate_features["IMU uncertainty"], 7.25)
+            # Legacy Stage 1 metadata acquires the same null fields as new data.
+            metadata = json.loads((packet / "metadata.json").read_text())
+            for name in ("class_id", "classification_method", "model_id"):
+                self.assertIn(name, metadata)
+                self.assertIsNone(metadata[name])
+                self.assertIsNone(features[name])
+                self.assertIsNone(aggregate_features[name])
             with np.load(packet / "stage2" / "features.npz") as arrays:
                 self.assertEqual(float(arrays["imu_uncertainty_deg"]), 7.25)
             self.assertAlmostEqual(features["along_slope_deg"], 0.0, places=6)
@@ -731,12 +738,18 @@ class FeatureTest(unittest.TestCase):
             }) + "\n")
             (packet / "metadata.json").write_text(json.dumps({
                 "packet_id": "packet_0", "imu_uncertainty_deg": 12.0,
+                "class_id": 0, "classification_method": "manual", "model_id": None,
             }))
             # Missing image files are unrelated to the IMU confidence feature.
             extract_features(dataset)
             features = json.loads((packet / "stage2" / "features.json").read_text())
             self.assertFalse(features["valid"])
             self.assertEqual(features["IMU uncertainty"], 12.0)
+            aggregate = json.loads((dataset / "features.jsonl").read_text())
+            for record in (features, aggregate):
+                self.assertEqual(record["class_id"], 0)
+                self.assertEqual(record["classification_method"], "manual")
+                self.assertIsNone(record["model_id"])
 
 
 if __name__ == "__main__":

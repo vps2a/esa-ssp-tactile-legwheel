@@ -4,8 +4,8 @@ This directory contains standalone analysis tools that do not participate in
 online ROS processing or rosbag recording:
 
 - `kinematics_calculator.ipynb` verifies the symbolic robot kinematics;
-- `dataset_browser.py` is a read-only desktop browser for derived packet
-  datasets.
+- `dataset_browser.py` is a desktop browser for inspecting derived packets
+  and manually classifying their terrain patches.
 
 ## Requirements
 
@@ -98,12 +98,49 @@ Stage 1-only packets remain inspectable. Their images, masks, metadata and
 available telemetry are displayed, while slope, FFT and 3D views clearly state
 that Stage 2 is unavailable.
 
+### Manual terrain classification
+
+The row above the plots contains four class buttons:
+
+| Class | Highlighted terrain patch |
+| --- | --- |
+| 0 | Firm Terrain |
+| 1 | Loose Terrain |
+| 2 | Firm to Loose Transition |
+| 3 | Loose to Firm Transition |
+
+**Manual Classification Mode** is off when the browser starts and when another
+dataset is opened. The buttons are disabled until it is enabled. Enabling it
+shows one confirmation warning that subsequent selections will manually
+overwrite previous classifications; enabling the mode alone changes no labels.
+
+Click a class button or press **0**, **1**, **2** or **3** to save the current
+packet's classification immediately and advance to the next packet. Number
+shortcuts are ignored while typing in **Go to**, and holding a number does not
+classify multiple packets. Manual mode remains enabled while navigating within
+the current dataset. At the last packet, a selection saves and stays there.
+
+An existing class is highlighted in light blue, including while manual mode is
+off. The **Metadata** tab shows the class, classification method and model ID.
+No automatic classifier is run by the browser.
+
 ### Data safety
 
-The browser is strictly read-only. It reads `.json`, `.jsonl`, `.npy` and
-`.npz` files without writing into the selected dataset. The remembered dataset
-path is stored in the normal per-user Qt application settings outside the
-dataset directory.
+Opening an older dataset adds missing `class_id`, `classification_method` and
+`model_id` fields to every packet and existing feature record. Unclassified
+fields are `null`; existing labels are preserved. This upgrade also runs with
+manual mode off and requires write access to the selected dataset.
+
+Each manual selection synchronizes `metadata.json`, `stage2/features.json` and
+the matching dataset-wide `features.jsonl` row. A manual classification records
+`classification_method: "manual"` and `model_id: null`. Stage 1-only packets
+update metadata; Stage 2 later carries the label into feature files. Writes use
+complete temporary files followed by replacement, with rollback if a save
+fails. The browser only advances after the save succeeds.
+
+Images, numerical arrays and the manifest remain unchanged. The remembered
+dataset path is stored in the normal per-user Qt application settings outside
+the dataset directory; manual mode is never remembered.
 
 ### Troubleshooting
 
