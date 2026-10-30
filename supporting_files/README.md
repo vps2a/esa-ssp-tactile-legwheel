@@ -6,6 +6,8 @@ online ROS processing or rosbag recording:
 - `kinematics_calculator.ipynb` verifies the symbolic robot kinematics;
 - `dataset_browser.py` is a desktop browser for inspecting derived packets
   and manually classifying their terrain patches.
+- `batch_dataset_building_tool.py` builds datasets for selected runs across
+  multiple recorded experiments through a desktop wizard.
 
 ## Requirements
 
@@ -173,3 +175,69 @@ Commit source files, `pyproject.toml`, and `uv.lock`. Keep `.venv/` and
 Before committing, restart the kernel and run all cells to verify reproducibility.
 
 This environment is intended for standalone calculations. Notebooks importing ROS packages require a compatible ROS environment.
+
+## Batch dataset builder
+
+Run this tool on Ubuntu with ROS 2 Jazzy and the built workspace sourced.
+From the repository root:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+cd supporting_files
+uv sync
+uv run python batch_dataset_building_tool.py
+```
+
+The installed command is `uv run legwheel-batch-dataset-builder`. Optionally
+provide `--directory /path/to/Experiment_Recordings` to start with a directory
+already loaded. The GUI uses the supporting-tools environment; each analysis
+runs under `/usr/bin/python3` so it can load the sourced ROS libraries. For a
+different ROS Python installation, pass `--ros-python /path/to/python3`.
+Rebuild/source `legwheel_dataset` after updating this repository so that the
+worker sees the current processing code.
+
+1. Choose a directory containing experiment folders as immediate children.
+   Experiment YAML files are recognized by their contents, including the
+   experiment ID and geometry/hardware mappings, rather than their filenames.
+2. Select experiments, then choose runs on a separate page for each experiment.
+   Runs are ordered numerically. **Select all available** and **Clear all**
+   controls are provided for both experiments and runs.
+3. Each run shows **Completed Datasets: N**. **Partial Datasets** and **Failed
+   Attempts** appear only when their counts are nonzero. A completed dataset
+   finished Stage 2; Stage 1-only or otherwise incomplete outputs are partial.
+   Failed and cancelled attempts are counted as failures.
+4. Invalid and unreviewed runs remain selectable with a warning. **Mark valid**
+   immediately creates or updates `run_valid: true` in `run_config.yaml`,
+   preserving its other values. This is saved even if no batch is started.
+   Runs missing required inputs remain visible but cannot be selected.
+5. Edit the shared settings, initially populated from the builder's defaults.
+   All 16 numeric settings are available, with units and hover explanations.
+   **Start batch** validates them and saves the same commented, timestamped
+   `postprocess.yaml` in every selected run, replacing previous settings.
+6. The tool processes one run at a time using its recorded experiment snapshot
+   and the production packet/feature stages. Outputs use the normal
+   `run_N/derived/CONFIGURATION_HASH/` location.
+
+The progress screen shows overall 0–100% progress, the current experiment/run,
+its own progress bar and processing phase, and an approximate remaining time.
+The ETA initially says **Estimating…** and updates from observed processing
+speed. Each run contributes equally to overall progress; longer runs can take
+more time despite contributing the same share of the percentage.
+
+A completed dataset matching the selected settings is skipped and listed in
+the final summary. Before retrying an incomplete or failed output at the normal
+location, that folder is renamed with an `_attempt_TIMESTAMP_UNIQUEID` suffix.
+Its files and any classifications are preserved. The tool never deletes an
+earlier dataset or changes the raw recording.
+
+Individual failures do not stop later runs. **Cancel batch** immediately kills
+the active analysis process, preserves its partial output and records its
+cancelled status in `batch_build_status.json`. Later runs are left unstarted;
+completed runs remain available. Closing the window during a build performs
+the same cancellation. If cancellation happens while settings are being saved,
+only the settings files already written are changed.
+
+The final table lists each run as completed, skipped, failed, cancelled or not
+started, with its output path and explanatory message. **New batch** refreshes
+dataset counts. **Show processing log** exposes detailed errors when needed.

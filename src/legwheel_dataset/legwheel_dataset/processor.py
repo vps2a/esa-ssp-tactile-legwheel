@@ -178,6 +178,23 @@ def _dataset_identifier(
     return hashlib.sha256(payload).hexdigest()[:12]
 
 
+def dataset_output_directory(
+    run_directory: Path, processing_config: ProcessingConfig,
+) -> Path:
+    """Resolve the normal output path without opening the bag or writing files.
+
+    Batch processing uses this same identity to skip completed datasets and
+    preserve incomplete attempts before retrying them.
+    """
+    run_directory = run_directory.expanduser().resolve()
+    processing_config.validate()
+    experiment_config = _load_yaml(find_experiment_snapshot(run_directory))
+    identifier = _dataset_identifier(
+        experiment_config, _load_run_config(run_directory), processing_config,
+    )
+    return run_directory / "derived" / identifier
+
+
 def _finite_column(
     times: np.ndarray,
     values: np.ndarray,
