@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QFileDialog, QFormLayout, QHBoxLayout,
+    QAbstractItemView, QCheckBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
     QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
@@ -14,9 +14,13 @@ from PySide6.QtWidgets import (
 
 from legwheel_dataset.config import ProcessingConfig
 from legwheel_dataset.config_creator import FIELD_HELP
+from legwheel_dataset.terrain import review_terrain_ids
 
-from .model import BuildResult, ExperimentInfo, RunInfo, discover_experiments, mark_run_valid
+from .model import (
+    BuildResult, ExperimentInfo, RunInfo, discover_experiments, inspect_run, mark_run_valid,
+)
 from .runner import BatchRunner
+from .terrain_ids import TerrainIdsDialog
 
 
 SETTING_LABELS = {
@@ -317,6 +321,8 @@ class BatchBuilderWindow(QMainWindow):
             if not experiments:
                 self.feedback.setText("Select at least one experiment.")
                 return
+            if not self._resolve_terrain_ids(experiments):
+                return
             selected = {run.directory for old in self.run_pages for run in old.selected_runs()}
             for old in self.run_pages:
                 self.stack.removeWidget(old)
@@ -341,6 +347,27 @@ class BatchBuilderWindow(QMainWindow):
                 f"{len(runs)} selected {run_word} across {len(self.run_pages)} {experiment_word}. "
                 f"{replacements} existing postprocess.yaml files will be replaced."
             )
+
+    def _resolve_terrain_ids(self, experiments: list[ExperimentInfo]) -> bool:
+        """Resolve experiment-wide metadata before any runs are chosen."""
+        try:
+            reviews = [review_terrain_ids(experiment.directory) for experiment in experiments]
+            if any(not review.documents for review in reviews):
+                raise ValueError("An experiment's metadata is no longer available. Reload the directory.")
+        except (OSError, ValueError) as error:
+            QMessageBox.critical(self, "Cannot review terrain and lighting IDs", str(error))
+            return False
+        missing = [review for review in reviews if review.needs_resolution]
+        if missing:
+            dialog = TerrainIdsDialog(missing, self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return False
+        # Saving IDs may mark datasets in any run as requiring regeneration.
+        for experiment in experiments:
+            experiment.runs = [
+                inspect_run(run.directory, experiment.directory.name) for run in experiment.runs
+            ]
+        return True
 
     def _build_progress_page(self) -> QWidget:
         page, layout = QWidget(), QVBoxLayout()

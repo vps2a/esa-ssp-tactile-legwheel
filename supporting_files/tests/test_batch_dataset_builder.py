@@ -16,7 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # The source packages are pure Python until a bag is opened. Exposing them here
 # keeps the supporting-tools tests runnable without building/sourcing ROS.
 REPOSITORY = Path(__file__).resolve().parents[2]
-for package in ("legwheel_dataset", "legwheel_encoder", "legwheel_kinematics"):
+for package in ("legwheel_dataset", "legwheel_encoder", "legwheel_kinematics", "legwheel_experiments"):
     sys.path.insert(0, str(REPOSITORY / "src" / package))
 
 import yaml  # noqa: E402
@@ -39,6 +39,7 @@ from legwheel_batch_builder.worker import build_run  # noqa: E402
 EXPERIMENT = {
     "experiment_id": "terrain_test", "rig_config": {}, "leg_config": {},
     "wheel_config": {}, "electronics_hardware": {},
+    "environment": {"terrain_and_light_ID": "TL001"},
 }
 
 
@@ -67,7 +68,9 @@ def create_output(output, stage="stage2_complete"):
     output.mkdir(parents=True)
     (output / "packets").mkdir()
     (output / "manifest.jsonl").write_text("")
-    (output / "provenance.json").write_text(json.dumps({"stage": stage}))
+    (output / "provenance.json").write_text(json.dumps({
+        "stage": stage, "terrain_and_light_ID": "TL001", "experiment_config": EXPERIMENT,
+    }))
     if stage == "stage2_complete":
         (output / "features.jsonl").write_text("")
 
@@ -240,7 +243,7 @@ class BatchGuiTests(unittest.TestCase):
         # Real child processes need the environment a sourced ROS workspace
         # would provide; the sys.path changes above only affect this process.
         source_paths = [str(REPOSITORY / "src" / name) for name in (
-            "legwheel_dataset", "legwheel_encoder", "legwheel_kinematics",
+            "legwheel_dataset", "legwheel_encoder", "legwheel_kinematics", "legwheel_experiments",
         )]
         inherited = os.environ.get("PYTHONPATH", "")
         environment = patch.dict(os.environ, {"PYTHONPATH": os.pathsep.join(source_paths + [inherited])})

@@ -11,7 +11,8 @@ import time
 import traceback
 
 from .model import (
-    EVENT_PREFIX, archive_incomplete_output, dataset_state, write_attempt_status,
+    EVENT_PREFIX, archive_incomplete_output, dataset_requires_regeneration,
+    dataset_state, write_attempt_status,
 )
 
 
@@ -36,7 +37,7 @@ def build_run(run_directory: Path, config_path: Path) -> int:
         config = ProcessingConfig.from_yaml(config_path)
         output = dataset_output_directory(run_directory, config)
         if output.exists():
-            if dataset_state(output) == "completed":
+            if dataset_state(output) == "completed" and not dataset_requires_regeneration(output):
                 emit_event("result", status="skipped", output=str(output),
                            message="A completed dataset with these settings already exists.")
                 return 0

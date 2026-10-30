@@ -33,7 +33,10 @@ if outcome == "failed":
     print("Synthetic worker failure", file=sys.stderr, flush=True)
     raise SystemExit(2)
 
-(output / "provenance.json").write_text(json.dumps({"stage": "stage2_complete"}))
+(output / "provenance.json").write_text(json.dumps({
+    "stage": "stage2_complete", "terrain_and_light_ID": "TL001",
+    "experiment_config": {"environment": {"terrain_and_light_ID": "TL001"}},
+}))
 (output / "manifest.jsonl").write_text("")
 (output / "features.jsonl").write_text("")
 if outcome == "late_cancel":

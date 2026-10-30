@@ -116,6 +116,13 @@ opening the blocking Matplotlib visualization.
 
 ## Required input
 
+The recorded experiment configuration must include a valid
+`environment.terrain_and_light_ID`, constant across the experiment's configs,
+run snapshots and dataset provenance. This case-sensitive setup ID allows ASCII
+letters, digits, underscores and hyphens, with at least one letter or digit.
+Different experiments may share an ID. Individual builds reject missing or
+conflicting IDs before analysis; use the batch builder to repair older metadata.
+
 The `--run-directory` must contain:
 
 ```text
@@ -286,6 +293,26 @@ deterministic hash. Exact motion and kinematic values always remain in
 
 Every packet retains the complete RGB and depth images. It can therefore be
 examined after the original MCAP has been moved or archived.
+
+### Terrain and lighting setup identity
+
+Each new dataset writes `terrain_and_light_ID` at the top level of
+`provenance.json`, alongside the same value in
+`experiment_config.environment.terrain_and_light_ID`. The ID participates in
+the existing configuration hash, so changing it changes the normal output path.
+
+When the batch builder adds or corrects an ID in an existing provenance file,
+it preserves that dataset's identifier, folder, numerical files and packet
+classifications, and sets `requires_regeneration: true` with an explanatory
+`regeneration_reason`. A warning lists affected datasets before saving.
+These outputs cannot be skipped as reusable completed datasets. The batch
+builder creates a fresh dataset for selected runs and preserves the previous
+output if a retry uses the same path. Unselected runs remain marked for later
+regeneration. Stage 2 alone refuses flagged datasets; run the full build again.
+
+New builds set `requires_regeneration: false`. Existing numerical results and
+classifications remain in the preserved old dataset; labels are not transferred
+automatically to the newly generated packets.
 
 ### Terrain classification
 

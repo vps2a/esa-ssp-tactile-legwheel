@@ -148,6 +148,7 @@ class SynchronizationTest(unittest.TestCase):
                     "wheel_radius_mm": 50.0,
                     "wheel_width_mm": 100.0,
                 },
+                "environment": {"terrain_and_light_ID": "TL001"},
             }
             (run_directory / "run_config.yaml").write_text(
                 "wheel_parameters:\n  commanded_wheel_torque_nm: 1.0\n",
@@ -653,10 +654,14 @@ class FeatureTest(unittest.TestCase):
                 plane_ransac_iterations=20,
             )
             (dataset / "provenance.json").write_text(
-                json.dumps({"processing_config": {
-                    **config.to_dict(),
-                    "maximum_packet_saving_frequency_hz": 10.0,
-                }}),
+                json.dumps({
+                    "terrain_and_light_ID": "TL001",
+                    "experiment_config": {"environment": {"terrain_and_light_ID": "TL001"}},
+                    "processing_config": {
+                        **config.to_dict(),
+                        "maximum_packet_saving_frequency_hz": 10.0,
+                    },
+                }),
                 encoding="utf-8",
             )
             (dataset / "manifest.jsonl").write_text(
@@ -732,6 +737,8 @@ class FeatureTest(unittest.TestCase):
             packet.mkdir(parents=True)
             (dataset / "provenance.json").write_text(json.dumps({
                 "processing_config": ProcessingConfig().to_dict(),
+                "terrain_and_light_ID": "TL001",
+                "experiment_config": {"environment": {"terrain_and_light_ID": "TL001"}},
             }))
             (dataset / "manifest.jsonl").write_text(json.dumps({
                 "packet_path": "packets/packet_0",

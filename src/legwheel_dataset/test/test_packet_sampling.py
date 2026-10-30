@@ -105,6 +105,7 @@ class PacketSamplingTest(unittest.TestCase):
         experiment = root / "experiment.yaml"
         experiment.write_text(json.dumps({
             "experiment_id": "sampling",
+            "environment": {"terrain_and_light_ID": "TL001"},
             "rig_config": {"pivot_height_m": 0.353, "beam_radius_m": 0.83},
             "leg_config": {"hip_link_length_m": 0.2, "calf_link_length_m": 0.2},
             "wheel_config": {"wheel_radius_mm": 50.0, "wheel_width_mm": 100.0},
@@ -169,6 +170,12 @@ class PacketSamplingTest(unittest.TestCase):
         fractions = [fraction for fraction, _ in progress_events]
         self.assertEqual(fractions[-1], 1.0)
         self.assertEqual(fractions, sorted(fractions))
+        provenance = json.loads((output / "provenance.json").read_text())
+        self.assertEqual(provenance["terrain_and_light_ID"], "TL001")
+        self.assertEqual(
+            provenance["experiment_config"]["environment"]["terrain_and_light_ID"], "TL001",
+        )
+        self.assertFalse(provenance["requires_regeneration"])
 
         records = [
             json.loads(line)

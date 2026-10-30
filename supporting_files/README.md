@@ -194,8 +194,9 @@ provide `--directory /path/to/Experiment_Recordings` to start with a directory
 already loaded. The GUI uses the supporting-tools environment; each analysis
 runs under `/usr/bin/python3` so it can load the sourced ROS libraries. For a
 different ROS Python installation, pass `--ros-python /path/to/python3`.
-Rebuild/source `legwheel_dataset` after updating this repository so that the
-worker sees the current processing code.
+Rebuild and source the workspace, including `legwheel_experiments` and
+`legwheel_dataset`, after updating this repository so that the worker sees the
+current validation and processing code.
 
 1. Choose a directory containing experiment folders as immediate children.
    Experiment YAML files are recognized by their contents, including the
@@ -203,6 +204,11 @@ worker sees the current processing code.
 2. Select experiments, then choose runs on a separate page for each experiment.
    Runs are ordered numerically. **Select all available** and **Clear all**
    controls are provided for both experiments and runs.
+   Before run selection, a dialog collects missing terrain/light IDs and asks
+   you to resolve conflicts. An ID is a case-sensitive string of ASCII letters,
+   digits, underscores and hyphens, containing at least one letter or digit.
+   Multiple experiments may share the same ID. No conflicting value is selected
+   automatically; existing values are offered for an explicit choice.
 3. Each run shows **Completed Datasets: N**. **Partial Datasets** and **Failed
    Attempts** appear only when their counts are nonzero. A completed dataset
    finished Stage 2; Stage 1-only or otherwise incomplete outputs are partial.
@@ -225,9 +231,27 @@ The ETA initially says **Estimating…** and updates from observed processing
 speed. Each run contributes equally to overall progress; longer runs can take
 more time despite contributing the same share of the percentage.
 
-A completed dataset matching the selected settings is skipped and listed in
+**Save IDs** immediately updates `environment.terrain_and_light_ID` in each
+experiment configuration and **all** its recorded run snapshots, including
+unselected runs. It also synchronizes the top-level and embedded experiment IDs
+in every existing dataset's `provenance.json`. Other configuration values and
+packet files are preserved. Cancelling the ID dialog changes no files; cancelling
+the batch afterwards does not undo IDs already saved.
+
+The dialog warns which existing datasets need regeneration before saving an
+added or corrected ID. Those provenance files retain their original dataset
+identifiers and gain `requires_regeneration: true` and a reason. Run-selection
+warnings identify affected runs. Selected runs are rebuilt when the batch starts;
+unselected runs wait for a later batch. Previous datasets and their packet labels
+are retained. New datasets have `requires_regeneration: false`; packet labels
+are not automatically transferred from older datasets.
+
+A completed dataset matching the selected settings and not marked for
+regeneration is skipped and listed in
 the final summary. Before retrying an incomplete or failed output at the normal
 location, that folder is renamed with an `_attempt_TIMESTAMP_UNIQUEID` suffix.
+The same preservation applies to completed datasets marked for regeneration if
+the new build needs their output path.
 Its files and any classifications are preserved. The tool never deletes an
 earlier dataset or changes the raw recording.
 

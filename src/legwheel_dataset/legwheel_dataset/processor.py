@@ -61,6 +61,7 @@ from legwheel_dataset.synchronization import (
     pair_image_timestamps,
     resample_channels,
 )
+from legwheel_dataset.terrain import require_provenance_terrain_id, require_run_terrain_id
 from legwheel_kinematics.config import KINEMATICS_MODEL_VERSION, KinematicsConfig
 from legwheel_kinematics.projection import CameraCalibration
 
@@ -189,6 +190,7 @@ def dataset_output_directory(
     run_directory = run_directory.expanduser().resolve()
     processing_config.validate()
     experiment_config = _load_yaml(find_experiment_snapshot(run_directory))
+    require_run_terrain_id(run_directory, experiment_config)
     identifier = _dataset_identifier(
         experiment_config, _load_run_config(run_directory), processing_config,
     )
@@ -1153,6 +1155,7 @@ def isolate_packets(
         experiment_config_path = find_experiment_snapshot(run_directory)
     experiment_config_path = experiment_config_path.resolve()
     experiment_config = _load_yaml(experiment_config_path)
+    terrain_id = require_run_terrain_id(run_directory, experiment_config)
     run_config = _load_run_config(run_directory)
     camera_driver_config = _validate_registered_depth(run_directory)
     kinematics_config = KinematicsConfig.from_experiment_dict(experiment_config)
@@ -1661,6 +1664,8 @@ def isolate_packets(
     provenance = {
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "stage": "stage1_complete",
+        "terrain_and_light_ID": terrain_id,
+        "requires_regeneration": False,
         "dataset_identifier": dataset_identifier,
         "run_directory": str(run_directory),
         "kinematics_model_version": KINEMATICS_MODEL_VERSION,
@@ -1728,6 +1733,7 @@ def extract_features(
     dataset_directory = dataset_directory.resolve()
     provenance_path = dataset_directory / "provenance.json"
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    require_provenance_terrain_id(provenance)
     if processing_config is None:
         processing_config = ProcessingConfig(**{
             name: value for name, value in provenance["processing_config"].items()

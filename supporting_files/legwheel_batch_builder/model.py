@@ -15,11 +15,11 @@ from uuid import uuid4
 import yaml
 
 from legwheel_dataset.config_creator import write_processing_config
+from legwheel_dataset.terrain import EXPERIMENT_MAPPINGS
 
 
 EVENT_PREFIX = "LEGWHEEL_BATCH_EVENT "
 ATTEMPT_STATUS_FILE = "batch_build_status.json"
-EXPERIMENT_MAPPINGS = ("rig_config", "leg_config", "wheel_config", "electronics_hardware")
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -58,6 +58,11 @@ def dataset_state(directory: Path) -> str:
     ):
         return "completed"
     return "partial"
+
+
+def dataset_requires_regeneration(directory: Path) -> bool:
+    """Keep completed-but-outdated datasets out of the build-skip path."""
+    return bool(_read_json(directory / "provenance.json").get("requires_regeneration"))
 
 
 @dataclass
@@ -157,6 +162,13 @@ def inspect_run(directory: Path, experiment_name: str) -> RunInfo:
                 run.problems.append(str(error))
     try:
         run.counts = count_datasets(directory)
+        outdated = sum(
+            dataset_requires_regeneration(path.parent)
+            for path in (directory / "derived").glob("*/provenance.json")
+        )
+        if outdated:
+            subject = "1 dataset requires" if outdated == 1 else f"{outdated} datasets require"
+            run.warnings.append(f"{subject} regeneration (terrain/light ID updated)")
     except OSError as error:
         run.problems.append(f"Cannot inspect existing datasets: {error}")
     return run
@@ -217,10 +229,10 @@ def write_attempt_status(directory: Path, status: str, message: str = "") -> Non
 
 
 def archive_incomplete_output(directory: Path) -> Path:
-    """Free the normal output path without deleting an earlier attempt."""
+    """Preserve incomplete or outdated output before rebuilding at its normal path."""
     if not directory.is_dir():
         raise ValueError(f"Dataset output path is not a directory: {directory}")
-    if dataset_state(directory) == "completed":
+    if dataset_state(directory) == "completed" and not dataset_requires_regeneration(directory):
         raise ValueError("A completed dataset must never be moved for a retry.")
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     archived = directory.with_name(f"{directory.name}_attempt_{timestamp}_{uuid4().hex[:8]}")
