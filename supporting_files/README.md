@@ -8,6 +8,8 @@ online ROS processing or rosbag recording:
   and manually classifying their terrain patches.
 - `batch_dataset_building_tool.py` builds datasets for selected runs across
   multiple recorded experiments through a desktop wizard.
+- `dataset_exporter.py` assembles selected processed packets into a portable
+  Parquet dataset, with band powers and temporal/spatial overlap analysis.
 
 ## Requirements
 
@@ -150,6 +152,90 @@ If Qt cannot connect to the graphical display, start the program from a desktop
 terminal in the Ubuntu VM rather than an SSH session. On Linux, missing Qt
 system-library errors should be resolved through the distribution package
 manager; do not install a second Python environment over `.venv`.
+
+## Dataset exporter
+
+This standalone tool needs no ROS installation, sourced workspace, or original
+MCAP recordings. It only reads existing derived dataset folders. Source files,
+including legacy classification metadata, are never upgraded or modified.
+
+```bash
+cd supporting_files
+uv sync
+uv run python dataset_exporter.py
+```
+
+The installed command is `uv run legwheel-dataset-exporter`. Optionally start
+with `--directory /path/to/Experiment_Recordings` or a single configuration-hash
+folder. The environment includes Hugging Face Datasets, PyArrow and Pillow for
+typed Parquet output and lossless image encoding.
+
+1. **Add source folder…** discovers processed datasets recursively, skipping raw
+   bags and Python environments. Add more folders to combine collections.
+2. Expand the experiment/run/processing-version tree and check individual
+   packets or whole groups. A run or group checkbox selects all its exportable
+   packets in one action, skipping blocked packets. Its checked/partial state
+   reflects only exportable packets; groups with none have no checkbox.
+   Group checkboxes include filtered packets. Select only one processing version per run.
+   Search and class filters preserve existing selections; **Select visible** and
+   **Deselect visible** act only on matching, usable packets. Unlabelled packets
+   remain selectable. Selecting a packet displays its RGB patch and any blocking
+   reason. The review panel shows class counts and an approximate input size.
+3. Choose a dataset name and an existing destination folder. Adjust the uniform
+   frequency band width (default **10 Hz**). Full RGB/depth frames and numerical
+   point maps are separate options, both initially off. Patches, masks, telemetry,
+   saved spectra/features and provenance are always included.
+4. **Export selected packets** re-reads the selected sources, validates their
+   FFT-window trajectory coverage, performs a second overlap-analysis pass and
+   writes the export. Progress and cancellation remain available. Closing during
+   work requests cancellation and waits for temporary output cleanup.
+
+The output is `NAME_HASH/`, containing `packets/part-*.parquet`, `runs.parquet`,
+`export_manifest.json`, and a generated `README.md`. Packet Parquet files include
+Hugging Face feature metadata, with embedded PNG images and numerical arrays.
+Depth PNGs preserve uint16 values and their metre scale. Missing numerical values
+remain null, with telemetry validity masks retained. The companion run table holds
+configurations and summary counts. The generated README describes every column
+group, loading, units, calculations, and limitations. Its Hub configuration exposes
+packet and run tables separately, with an explicitly **unassigned** split.
+Choose a license and review the dataset card before publishing.
+
+Band power is absolute power per channel, calculated as the sum of saved PSD bins
+times frequency spacing. DC is excluded. Bins belong to `[lower, upper)` with
+Nyquist included at the final edge. The exporter preserves original FFT resolution
+and saves the actual band edges. Invalid/empty bands and bands beyond a source's
+Nyquist range are null; mixed sample rates share one band layout. Dominant powers
+remain PSD peak ordinates, distinct from integrated band powers.
+
+Temporal overlap compares closed FFT time intervals. Spatial overlap compares
+conservative wheel-travel arcs on the circular track, including repeated laps and
+zero-angle wraparound. Boundary angles use linear interpolation between corrected
+encoder ticks; conservative bounds include the surrounding ticks. This assumes
+monotonic motion between ticks and does not bound unrecorded reversals or physical
+calibration errors. Missing trajectory coverage, detected reversals, and intervals
+between encoder movement events greater than **2 seconds** block affected packets.
+Exactly 2 seconds is allowed. This exporter-only interpolation limit is independent
+of the pitch estimator's message-gap threshold, and is saved as
+`maximum_encoder_gap_ns` in the run table. Long intervals between count changes
+can reflect slow motion; they do not establish missing sensor messages. No
+extrapolation is used. Shared endpoints count as overlap.
+
+Each packet stores symmetric overlap vectors referencing other **selected packets
+in its run**, using stable export IDs and original 1-based packet numbers. Each run
+stores the exact maximum temporally non-overlapping subset count and the separate
+maximum spatially non-overlapping subset count. These are not statistical
+independence estimates. All selected packets are exported; no subset is filtered.
+
+`KK_01_L1` is preserved and separated into laboratory `KK`, physical terrain setup
+`KK_01`, and lighting `L1`. Missing IDs produce null grouping fields; malformed or
+conflicting IDs are reported during discovery. Splits remain unassigned so future
+analysis can group the same physical setup across lighting changes.
+
+The hash covers normalized exported content, labels, source configurations,
+selection, settings, and exporter/schema version. It excludes output location,
+selection order, display name, and export time. Existing output folders are not
+overwritten. Exports are staged in a temporary sibling folder and published only
+after completion; failures and cancellations remove that temporary folder.
 
 ## Running the kinematics notebook
 
